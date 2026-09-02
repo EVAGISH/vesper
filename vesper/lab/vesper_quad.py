@@ -47,6 +47,7 @@ class VesperQuadEnvCfg(DirectRLEnvCfg):
     )
     scene: InteractiveSceneCfg = InteractiveSceneCfg(num_envs=1024, env_spacing=6.0, replicate_physics=True)
     robot: ArticulationCfg | None = None  # filled at runtime (needs pegasus import)
+    city_buildings: list | None = None    # [{"center":[n,e],"size":[dn,de],"height":h}]
 
 
 class VesperQuadEnv(DirectRLEnv):
@@ -74,6 +75,16 @@ class VesperQuadEnv(DirectRLEnv):
         self.scene.filter_collisions(global_prim_paths=[self.cfg.terrain.prim_path])
         light = sim_utils.DomeLightCfg(intensity=1500.0)
         light.func("/World/Light", light)
+        if self.cfg.city_buildings:
+            for i, b in enumerate(self.cfg.city_buildings):
+                (n, e), (dn, de), h = b["center"], b["size"], b["height"]
+                shade = 0.45 + 0.3 * ((i * 37) % 10) / 10
+                cub = sim_utils.CuboidCfg(
+                    size=(de, dn, h),
+                    collision_props=sim_utils.CollisionPropertiesCfg(),
+                    visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(shade, shade * 0.95, shade * 0.9)),
+                )
+                cub.func(f"/World/city/b{i:03d}", cub, translation=(e, n, h / 2))
 
     def _pre_physics_step(self, actions: torch.Tensor):
         self._omega = actions.clamp(0.0, 1.0) * self.params.omega_max
@@ -110,5 +121,7 @@ class VesperQuadEnv(DirectRLEnv):
         super()._reset_idx(env_ids)
         root = self._robot.data.default_root_state[env_ids].clone()
         root[:, :3] += self.scene.env_origins[env_ids]
+        if hasattr(self, "spawn_offsets"):
+            root[:, :3] += self.spawn_offsets[env_ids]
         self._robot.write_root_pose_to_sim(root[:, :7], env_ids)
         self._robot.write_root_velocity_to_sim(root[:, 7:], env_ids)
