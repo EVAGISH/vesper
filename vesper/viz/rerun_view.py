@@ -21,6 +21,20 @@ def view_run(run_dir: str | Path, spawn: bool = True) -> None:
     if manifest.exists():
         rr.log("run/manifest", rr.TextDocument(json.dumps(json.loads(manifest.read_text()), indent=2)), static=True)
 
+    rays_path = run_dir / "rays.parquet"
+    if rays_path.exists():
+        import math
+        r = read_trajectory(rays_path)
+        K = sum(1 for c in r if c.startswith("r"))
+        for i in range(len(r["t"])):
+            rr.set_time_seconds("sim_time", float(r["t"][i]))
+            o = np.array([r["px"][i], r["py"][i], r["pz"][i]])
+            strips = []
+            for k in range(K):
+                a = r["yaw"][i] + 2 * math.pi * k / K
+                strips.append([o, o + r[f"r{k}"][i] * np.array([math.cos(a), math.sin(a), 0.0])])
+            rr.log("world/rays", rr.LineStrips3D(strips, radii=0.01))
+
     for i in range(len(traj["t"])):
         rr.set_time_seconds("sim_time", float(traj["t"][i]))
         rr.log("world/drone", rr.Transform3D(
