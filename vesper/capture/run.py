@@ -1,10 +1,8 @@
 """Run capture: every sim run writes frames, an MP4, and a manifest to runs/<id>/.
 
-If VESPER_RUNS_BUCKET is set (compose passes it through), finish() syncs the
-run to s3://$VESPER_RUNS_BUCKET/runs/<id>/ so capture_pull.sh can fetch it.
+capture_pull.sh rsyncs the directory from the droplet to the Mac.
 """
 import json
-import os
 import subprocess
 import time
 from pathlib import Path
@@ -50,11 +48,4 @@ class RunCapture:
             )
         self._meta.update(frames=self._n, fps=fps, finished=time.time())
         (self.dir / "manifest.json").write_text(json.dumps(self._meta, indent=2))
-
-        bucket = os.environ.get("VESPER_RUNS_BUCKET")
-        if bucket:
-            subprocess.run(
-                ["aws", "s3", "sync", str(self.dir), f"s3://{bucket}/runs/{self.run_id}"],
-                check=False,  # a failed sync shouldn't kill a finished run
-            )
         return video

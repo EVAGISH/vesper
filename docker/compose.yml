@@ -1,4 +1,4 @@
-# Runs on the EC2 box (Linux + NVIDIA runtime), not on a Mac.
+# Runs on the GPU droplet (Linux + NVIDIA runtime), not on a Mac.
 #
 # The cache volume mounts below are load-bearing: Isaac Sim's RTX renderer
 # compiles GPU shaders on first boot (5-20 min for this exact GPU+driver) and
@@ -15,7 +15,6 @@ services:
     environment:
       - ACCEPT_EULA=Y
       - PRIVACY_CONSENT=Y
-      - VESPER_RUNS_BUCKET=${VESPER_BUCKET:-}
     volumes:
       - ..:/workspace/vesper
       - ../runs:/workspace/vesper/runs

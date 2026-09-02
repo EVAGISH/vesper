@@ -39,7 +39,7 @@ until [ "$(api GET /droplets/$ID | jq -r .droplet.status)" = active ]; do echo -
 echo
 
 # --- firewall (create once), assign droplet
-MY_IP="${MY_IP:-$(curl -s https://checkip.amazonaws.com)}"
+MY_IP="${MY_IP:-$(curl -s https://api.ipify.org)}"
 FW=$(api GET /firewalls | jq -r ".firewalls[] | select(.name==\"$FIREWALL_NAME\") | .id")
 rule() { echo "{\"protocol\":\"$1\",\"ports\":\"$2\",\"sources\":{\"addresses\":[\"$MY_IP/32\"]}}"; }
 if [ -z "$FW" ]; then

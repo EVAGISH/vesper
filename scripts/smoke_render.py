@@ -1,7 +1,7 @@
 """Step 0 smoke test: basic terrain + a quadrotor + an RTX camera, headless.
 
 Nobody is flying -- the drone is dropped from 2m so physics visibly runs.
-Output: runs/<id>/overview.mp4 (+ S3 sync if VESPER_RUNS_BUCKET is set).
+Output: runs/<id>/overview.mp4.
 
 Run inside the container on the GPU box:
     /isaac-sim/python.sh scripts/smoke_render.py

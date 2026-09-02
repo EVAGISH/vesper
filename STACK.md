@@ -104,26 +104,26 @@ Noise, bias drift, latency, dropout, and visibility clipping are ours, written o
 
 ## 5. Cloud & inspection **[confident on shape, open on sizing]**
 
-- **Compute: DigitalOcean GPU Droplets** (AWS denied our GPU quota; EC2 scripts in `infra/ec2/` are kept for if/when an appeal lands). Dev box: **RTX 4000 Ada 20 GB** (~$0.76/hr); scale tier when VRAM demands it: **L40S 48 GB** (~$1.57/hr). Real VMs, per-second billing, UDP allowed — livestream works.
+- **Compute: DigitalOcean GPU Droplets.** Dev box: **RTX 4000 Ada 20 GB** (~$0.76/hr); scale tier when VRAM demands it: **L40S 48 GB** (~$1.57/hr). Real VMs, per-second billing, UDP allowed — livestream works.
 - No image baking needed: DO's "NVIDIA AI/ML Ready" base image ships driver + Docker. The daily cycle is `launch.sh` → work → `snapshot.sh` (power off, snapshot, destroy — DO bills powered-off droplets, so there is no cheap "stopped" state; the snapshot preserves the docker image and shader cache).
-- **Storage stays on AWS S3** (`vesper-519659320853`) — it works from any cloud with a scoped access key.
-- **Fan-out:** one box at a few thousand envs covers the stress-test story. Multi-box (AWS Batch with the NGC image is a documented pattern) only when sweeping many worlds × many policies.
+- **Storage:** run artifacts live on the droplet and rsync to the Mac; the snapshot carries the docker image and shader cache between days. No object store yet.
+- **Fan-out:** one box at a few thousand envs covers the stress-test story. Multi-box only when sweeping many worlds × many policies.
 - Plan on ~2 boxes; one shared dev box gets contended fast.
 - `infra/do/`: `launch.sh`, `ssh.sh`, `provision.sh` (rsync repo + NGC login + build), `snapshot.sh`, `destroy.sh`. Plain curl + jq, no doctl dependency.
 
 **Manual inspection — three channels, cheapest first:**
 
-1. **Rendered artifacts.** Headless runs attach a chase/overview camera and write PNG frames or MP4 to `runs/<id>/`, synced to S3; a one-liner pulls them to the Mac. Every milestone below has one of these as its exit criterion — "it works" always comes with a picture.
+1. **Rendered artifacts.** Headless runs attach a chase/overview camera and write PNG frames or MP4 to `runs/<id>/`; a one-liner rsyncs them to the Mac. Every milestone below has one of these as its exit criterion — "it works" always comes with a picture.
 2. **Trajectory logs in rerun.** Every run writes the parquet log; rerun on the Mac shows the 3D path over the world, sensor streams, and time series — no GPU needed to look.
 3. **Live: WebRTC livestream.** Isaac Sim's livestream mode + the WebRTC Streaming Client on the Mac, for interactive poking and teleop. Heaviest channel; needed for flying, not for checking.
 
-**[open]** RunPod for headless sweep fan-out later (cheapest per-FLOP; container-shaped, no UDP — fine for batch, wrong for the dev box). **[open]** whether to return to EC2 if the AWS quota appeal ever clears.
+**[open]** RunPod for headless sweep fan-out later (cheapest per-FLOP; container-shaped, no UDP — fine for batch, wrong for the dev box).
 
 ---
 
 ## 6. Repository **[confident]**
 
-Heavy software (Isaac Sim ~10 GB, Isaac Lab, Pegasus, PX4 build) lives in the Docker image, never in git. USD worlds, splats, and run artifacts live in S3, gitignored locally. The repo holds Python, the Dockerfile, infra scripts, and config.
+Heavy software (Isaac Sim ~10 GB, Isaac Lab, Pegasus, PX4 build) lives in the Docker image, never in git. USD worlds, splats, and run artifacts live on the droplet, gitignored locally. The repo holds Python, the Dockerfile, infra scripts, and config.
 
 ```
 vesper/
@@ -135,7 +135,6 @@ vesper/
 │   └── entrypoint.sh
 ├── infra/
 │   ├── do/                   # DigitalOcean: launch, ssh, provision, snapshot, destroy
-│   ├── ec2/ + ami/           # AWS equivalents, parked until GPU quota clears
 │   └── batch/                # later
 ├── vesper/
 │   ├── env.py                # the `Env` interface + obs/action specs shared by both lanes
@@ -144,7 +143,7 @@ vesper/
 │   ├── control/              # torch PX4-style cascade + allocator                 pure torch
 │   ├── sensors/              # noise/latency/dropout models                        pure torch
 │   ├── record/               # trajectory schema (parquet), writer, replay         pure python
-│   ├── capture/              # chase/overview camera, frame/MP4 writer, S3 sync    container
+│   ├── capture/              # chase/overview camera, frame/MP4 writer            container
 │   ├── worlds/               # spec → USD stage builder, asset registry            container
 │   ├── lab/                  # throughput lane: Isaac Lab DirectRLEnv, sensor adapters → Env
 │   ├── fidelity/             # fidelity lane: Pegasus wrapper, PX4 launcher, MAVSDK teleop → Env
@@ -152,7 +151,7 @@ vesper/
 │   └── eval/                 # sweep runner, per-dimension binning, findings
 ├── scripts/                  # view.sh, capture_pull.sh, bench.py, fly.py, sweep.py, train.py
 ├── tests/                    # pure modules only — CPU, no Isaac; run in CI
-├── assets/                   # gitignored; synced from S3
+├── assets/                   # gitignored; synced from the droplet
 └── web/                      # later: browser trajectory viewer
 ```
 
