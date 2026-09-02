@@ -5,6 +5,9 @@ asyncio in-process and kills MAVSDK's gRPC connection, so the mission must
 live outside it. Telemetry-paced throughout; exits 0 after touchdown.
 """
 import asyncio
+import sys
+
+from vesper.scenario import ScenarioSpec
 
 
 async def wait_alt(drone, target, above):
@@ -22,7 +25,7 @@ async def wait_near_global(drone, lat, lon, tol_m=0.8):
             return
 
 
-async def run():
+async def run(spec: ScenarioSpec):
     from mavsdk import System
 
     drone = System()
@@ -36,9 +39,9 @@ async def run():
             break
     await drone.action.arm()
     print("mission: armed", flush=True)
-    await drone.action.set_takeoff_altitude(3.0)
+    await drone.action.set_takeoff_altitude(spec.takeoff_alt_m)
     await drone.action.takeoff()
-    await wait_alt(drone, 2.6, above=True)
+    await wait_alt(drone, spec.takeoff_alt_m - 0.4, above=True)
     print("mission: at altitude", flush=True)
 
     # square via PX4's own navigator (goto), avoiding the offboard plugin,
@@ -49,11 +52,11 @@ async def run():
         break
     import math
     lat0, lon0 = home.latitude_deg, home.longitude_deg
-    abs_alt = home.absolute_altitude_m + 3.0
     m2lat = 1.0 / 111111.0
     m2lon = 1.0 / (111111.0 * math.cos(math.radians(lat0)))
-    for n, e in [(4, 0), (4, 4), (0, 4), (0, 0)]:
+    for n, e, alt in spec.waypoints:
         lat, lon = lat0 + n * m2lat, lon0 + e * m2lon
+        abs_alt = home.absolute_altitude_m + alt
         await drone.action.goto_location(lat, lon, abs_alt, 0.0)
         await wait_near_global(drone, lat, lon)
         print(f"mission: corner ({n},{e})", flush=True)
@@ -63,4 +66,4 @@ async def run():
 
 
 if __name__ == "__main__":
-    asyncio.run(run())
+    asyncio.run(run(ScenarioSpec.load(sys.argv[1])))

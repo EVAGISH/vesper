@@ -32,6 +32,8 @@ from pegasus.simulator.logic.vehicles.multirotor import Multirotor, MultirotorCo
 from pegasus.simulator.params import ROBOTS, SIMULATION_ENVIRONMENTS
 
 from vesper.capture import RunCapture
+from vesper.record import TrajectoryWriter
+from vesper.scenario.spec import square_scenario
 
 FPS = 30
 MAX_SIM_SECONDS = 150.0   # hard stop; mission signals completion earlier
@@ -64,26 +66,42 @@ Multirotor(
     config=config,
 )
 
+CAM_POS = np.array([10.0, -4.0, 5.0])  # south-east of the square, elevated
 camera = Camera(
     prim_path="/World/overview_cam",
-    position=np.array([9.0, 7.0, 4.5]),
-    orientation=rot_utils.euler_angles_to_quats(np.array([0.0, 8.0, 208.0]), degrees=True),
+    position=CAM_POS,
     resolution=(1280, 720),
 )
+
+from isaacsim.core.prims import XFormPrim
+drone_prim = XFormPrim("/World/quadrotor")
+
+def aim_camera_at_drone(target):
+    d = target - CAM_POS
+    yaw = np.degrees(np.arctan2(d[1], d[0]))
+    pitch = np.degrees(np.arctan2(-d[2], np.linalg.norm(d[:2])))
+    camera.set_world_pose(
+        CAM_POS, rot_utils.euler_angles_to_quats(np.array([0.0, pitch, yaw]), degrees=True)
+    )
 
 pg.world.reset()
 camera.initialize()
 
+# --- run artifacts: capture + scenario + trajectory --------------------------
+cap = RunCapture("fly-square")
+spec = square_scenario(seed=0)
+spec_path = spec.save(cap.dir / "scenario.json")
+traj = TrajectoryWriter(cap.dir)
+cap.note(scene="pegasus iris + px4 sitl", resolution=[1280, 720],
+         scenario="scenario.json", schema=1)
+
 # --- mission subprocess (vanilla asyncio; kit's patched asyncio breaks MAVSDK)
 import subprocess
 mission_proc = subprocess.Popen(
-    ["/isaac-sim/python.sh", "scripts/mission_square.py"],
+    ["/isaac-sim/python.sh", "scripts/mission_square.py", str(spec_path)],
 )
 
 # --- sim loop + capture ------------------------------------------------------
-cap = RunCapture("fly-square")
-cap.note(scene="pegasus iris + px4 sitl, takeoff-square-land", resolution=[1280, 720])
-
 timeline.play()
 render_dt = pg.world.get_rendering_dt()
 sim_time, next_frame = 0.0, 0.0
@@ -91,12 +109,18 @@ while sim_time < MAX_SIM_SECONDS and mission_proc.poll() is None:
     pg.world.step(render=True)
     sim_time += render_dt
     if sim_time >= next_frame:
+        pos, quat = drone_prim.get_world_poses()
+        pos = np.asarray(pos).reshape(-1)[:3]
+        quat = np.asarray(quat).reshape(-1)[:4]  # wxyz
+        traj.append(sim_time, pos, quat)
+        aim_camera_at_drone(pos)
         rgba = camera.get_rgba()
         if rgba is not None and getattr(rgba, "size", 0):
             cap.add_frame(rgba)
         next_frame = sim_time + 1.0 / FPS
 
 timeline.stop()
+print(f"trajectory: {traj.close()} ({len(traj)} rows)")
 video = cap.finish(fps=FPS)
 print(f"wrote {video}")
 app.close()
