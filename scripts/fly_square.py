@@ -57,7 +57,7 @@ mavlink_config = PX4MavlinkBackendConfig({
 })
 config = MultirotorConfig()
 config.backends = [PX4MavlinkBackend(mavlink_config)]
-Multirotor(
+vehicle = Multirotor(
     "/World/quadrotor",
     ROBOTS["Iris"],
     0,
@@ -72,9 +72,6 @@ camera = Camera(
     position=CAM_POS,
     resolution=(1280, 720),
 )
-
-from isaacsim.core.prims import XFormPrim
-drone_prim = XFormPrim("/World/quadrotor")
 
 def aim_camera_at_drone(target):
     d = target - CAM_POS
@@ -109,10 +106,11 @@ while sim_time < MAX_SIM_SECONDS and mission_proc.poll() is None:
     pg.world.step(render=True)
     sim_time += render_dt
     if sim_time >= next_frame:
-        pos, quat = drone_prim.get_world_poses()
-        pos = np.asarray(pos).reshape(-1)[:3]
-        quat = np.asarray(quat).reshape(-1)[:4]  # wxyz
-        traj.append(sim_time, pos, quat)
+        # Pegasus vehicle state is the moving body (the /World/quadrotor xform
+        # is the static spawn transform -- reading it gives a constant pose)
+        pos = np.asarray(vehicle.state.position, dtype=float).reshape(-1)[:3]
+        q = np.asarray(vehicle.state.attitude, dtype=float).reshape(-1)[:4]  # xyzw
+        traj.append(sim_time, pos, [q[3], q[0], q[1], q[2]])
         aim_camera_at_drone(pos)
         rgba = camera.get_rgba()
         if rgba is not None and getattr(rgba, "size", 0):
