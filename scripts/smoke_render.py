@@ -16,15 +16,13 @@ app = SimulationApp({"headless": True})
 import numpy as np
 import isaacsim.core.utils.numpy.rotations as rot_utils
 from isaacsim.core.api import World
-from isaacsim.core.utils.stage import add_reference_to_stage
+from isaacsim.core.api.objects import DynamicCuboid
 from isaacsim.sensors.camera import Camera
-from isaacsim.storage.native import get_assets_root_path
 from pxr import UsdLux
 import omni.usd
 
 from vesper.capture import RunCapture
 
-DRONE_USD = "/Isaac/Robots/Crazyflie/cf2x.usd"  # stock asset; ours comes later
 SECONDS, FPS, PHYSICS_HZ = 5, 30, 60
 
 world = World(physics_dt=1.0 / PHYSICS_HZ, rendering_dt=1.0 / FPS)
@@ -36,17 +34,17 @@ dome.CreateIntensityAttr(1500.0)
 sun = UsdLux.DistantLight.Define(stage, "/World/sun")
 sun.CreateIntensityAttr(3000.0)
 
-assets_root = get_assets_root_path()
-add_reference_to_stage(assets_root + DRONE_USD, "/World/drone")
+# Asset-independent physics prop: a red cube dropped from 1.5m (bounces, settles)
+world.scene.add(DynamicCuboid(
+    prim_path="/World/cube", name="cube",
+    position=np.array([0.0, 0.0, 1.5]), scale=np.array([0.3, 0.3, 0.3]),
+    color=np.array([0.9, 0.1, 0.1]),
+))
 
-from isaacsim.core.prims import XFormPrim
-XFormPrim("/World/drone").set_world_poses(positions=np.array([[0.0, 0.0, 1.0]]))
-
-# Crazyflie is ~10cm across: camera close in, pitched down, yawed toward origin
 camera = Camera(
     prim_path="/World/overview_cam",
-    position=np.array([1.1, 1.1, 0.9]),
-    orientation=rot_utils.euler_angles_to_quats(np.array([0.0, 25.0, 225.0]), degrees=True),
+    position=np.array([2.6, 2.6, 1.7]),
+    orientation=rot_utils.euler_angles_to_quats(np.array([0.0, 22.0, 225.0]), degrees=True),
     resolution=(1280, 720),
 )
 
@@ -54,7 +52,7 @@ world.reset()
 camera.initialize()
 
 cap = RunCapture("smoke")
-cap.note(scene="ground+crazyflie drop", resolution=[1280, 720])
+cap.note(scene="ground + cube drop", resolution=[1280, 720])
 
 steps_per_frame = PHYSICS_HZ // FPS
 for frame in range(SECONDS * FPS):

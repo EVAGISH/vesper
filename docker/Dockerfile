@@ -21,6 +21,8 @@ RUN /px4/PX4-Autopilot/Tools/setup/ubuntu.sh --no-nuttx --no-sim-tools \
     && cd /px4/PX4-Autopilot && DONT_RUN=1 make px4_sitl_default
 
 # --- Step 1: Pegasus Simulator + MAVSDK ---
+ENV ISAACSIM_PATH=/isaac-sim \
+    ISAACSIM_PYTHON_EXE=/isaac-sim/python.sh
 RUN git clone --depth 1 --branch v5.1.0 \
     https://github.com/PegasusSimulator/PegasusSimulator.git /pegasus
 RUN /isaac-sim/python.sh -m pip install --no-cache-dir -e /pegasus/extensions/pegasus.simulator \
