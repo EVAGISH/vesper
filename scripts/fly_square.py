@@ -13,8 +13,6 @@ from isaacsim import SimulationApp
 
 app = SimulationApp({"headless": True})
 
-import asyncio
-import threading
 import time
 
 import numpy as np
@@ -35,7 +33,8 @@ from pegasus.simulator.params import ROBOTS, SIMULATION_ENVIRONMENTS
 
 from vesper.capture import RunCapture
 
-SECONDS, FPS = 45, 30
+FPS = 30
+MAX_SIM_SECONDS = 150.0   # hard stop; mission signals completion earlier
 
 # --- world + vehicle ---------------------------------------------------------
 timeline = omni.timeline.get_timeline_interface()
@@ -67,63 +66,35 @@ Multirotor(
 
 camera = Camera(
     prim_path="/World/overview_cam",
-    position=np.array([6.0, 6.0, 4.0]),
-    orientation=rot_utils.euler_angles_to_quats(np.array([0.0, 22.0, 225.0]), degrees=True),
+    position=np.array([9.0, 7.0, 4.5]),
+    orientation=rot_utils.euler_angles_to_quats(np.array([0.0, 8.0, 208.0]), degrees=True),
     resolution=(1280, 720),
 )
 
 pg.world.reset()
 camera.initialize()
 
-# --- mission thread (MAVSDK -> PX4 over udp:14540) ---------------------------
-def mission():
-    from mavsdk import System
-    from mavsdk.offboard import OffboardError, VelocityNedYaw
-
-    async def run():
-        drone = System()
-        await drone.connect(system_address="udp://:14540")
-        async for state in drone.core.connection_state():
-            if state.is_connected:
-                break
-        async for health in drone.telemetry.health():
-            if health.is_armable:
-                break
-        await drone.action.arm()
-        await drone.action.set_takeoff_altitude(3.0)
-        await drone.action.takeoff()
-        await asyncio.sleep(8)
-        try:
-            await drone.offboard.set_velocity_ned(VelocityNedYaw(0, 0, 0, 0))
-            await drone.offboard.start()
-            for vx, vy in [(1.5, 0), (0, 1.5), (-1.5, 0), (0, -1.5)]:
-                await drone.offboard.set_velocity_ned(VelocityNedYaw(vx, vy, 0, 0))
-                await asyncio.sleep(4)
-            await drone.offboard.set_velocity_ned(VelocityNedYaw(0, 0, 0, 0))
-            await drone.offboard.stop()
-        except OffboardError as e:
-            print(f"offboard failed: {e}")
-        await drone.action.land()
-
-    asyncio.run(run())
-
-threading.Thread(target=mission, daemon=True).start()
+# --- mission subprocess (vanilla asyncio; kit's patched asyncio breaks MAVSDK)
+import subprocess
+mission_proc = subprocess.Popen(
+    ["/isaac-sim/python.sh", "scripts/mission_square.py"],
+)
 
 # --- sim loop + capture ------------------------------------------------------
 cap = RunCapture("fly-square")
 cap.note(scene="pegasus iris + px4 sitl, takeoff-square-land", resolution=[1280, 720])
 
 timeline.play()
-t_end = time.time() + SECONDS
-frame_dt, next_frame = 1.0 / FPS, 0.0
-while time.time() < t_end:
+render_dt = pg.world.get_rendering_dt()
+sim_time, next_frame = 0.0, 0.0
+while sim_time < MAX_SIM_SECONDS and mission_proc.poll() is None:
     pg.world.step(render=True)
-    now = time.time()
-    if now >= next_frame:
+    sim_time += render_dt
+    if sim_time >= next_frame:
         rgba = camera.get_rgba()
         if rgba is not None and getattr(rgba, "size", 0):
             cap.add_frame(rgba)
-        next_frame = now + frame_dt
+        next_frame = sim_time + 1.0 / FPS
 
 timeline.stop()
 video = cap.finish(fps=FPS)
