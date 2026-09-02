@@ -1,0 +1,29 @@
+# Runs on the EC2 box (Linux + NVIDIA runtime), not on a Mac.
+#
+# The cache volume mounts below are load-bearing: Isaac Sim's RTX renderer
+# compiles GPU shaders on first boot (5-20 min for this exact GPU+driver) and
+# writes them to these paths. Container filesystems are discarded on exit, so
+# without these mounts every restart pays the full recompile.
+services:
+  sim:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    image: vesper-sim
+    gpus: all
+    network_mode: host          # WebRTC livestream ports pass straight through
+    environment:
+      - ACCEPT_EULA=Y
+      - PRIVACY_CONSENT=Y
+      - VESPER_RUNS_BUCKET=${VESPER_BUCKET:-}
+    volumes:
+      - ..:/workspace/vesper
+      - ../runs:/workspace/vesper/runs
+      # Isaac Sim persistent caches (paths per NVIDIA's Isaac Sim container docs)
+      - ~/docker/isaac-sim/cache/kit:/isaac-sim/kit/cache
+      - ~/docker/isaac-sim/cache/ov:/root/.cache/ov
+      - ~/docker/isaac-sim/cache/pip:/root/.cache/pip
+      - ~/docker/isaac-sim/cache/glcache:/root/.cache/nvidia/GLCache
+      - ~/docker/isaac-sim/cache/computecache:/root/.nv/ComputeCache
+      - ~/docker/isaac-sim/logs:/root/.nvidia-omniverse/logs
+      - ~/docker/isaac-sim/data:/root/.local/share/ov/data

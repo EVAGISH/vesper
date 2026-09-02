@@ -1,0 +1,16 @@
+[project]
+name = "vesper"
+version = "0.1.0"
+description = "Turn real-world imagery into a training and evaluation gym for autonomous drones."
+requires-python = ">=3.10"
+dependencies = [
+    "numpy",
+    "pillow",
+]
+
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["vesper*"]
