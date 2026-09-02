@@ -19,6 +19,9 @@ class ScenarioSpec:
     wind_speed_ms: float = 0.0
     wind_dir_deg: float = 0.0
     visibility_m: float = 10000.0
+    # buildings: [{"center":[x,y], "size":[w,d], "height":h}], meters
+    buildings: list = field(default_factory=list)
+    max_sim_s: float = 150.0
 
     def to_dict(self) -> dict:
         return dataclasses.asdict(self)
@@ -44,3 +47,25 @@ def square_scenario(seed: int = 0, side_m: float = 4.0, alt_m: float = 3.0) -> S
         seed=seed, takeoff_alt_m=alt_m,
         waypoints=[[s, 0, alt_m], [s, s, alt_m], [0, s, alt_m], [0, 0, alt_m]],
     )
+
+
+def city_scenario(seed: int = 0, alt_m: float = 3.0) -> ScenarioSpec:
+    """Fly north through a building corridor and back."""
+    from vesper.worlds import sample_city_block
+    return ScenarioSpec(
+        seed=seed, world="city", takeoff_alt_m=alt_m,
+        waypoints=[[5, 0, alt_m], [10, 0, alt_m], [14, 0, alt_m], [0, 0, alt_m]],
+        buildings=sample_city_block(seed),
+    )
+
+
+def crash_scenario(seed: int = 0, alt_m: float = 3.0) -> ScenarioSpec:
+    """Same corridor with a prism blocking it: the mission commands flight
+    through the building; PhysX gets the last word."""
+    from vesper.worlds.layout import blocking_building
+    spec = city_scenario(seed, alt_m)
+    spec.world = "city-crash"
+    spec.buildings = spec.buildings + [blocking_building(8.0)]
+    spec.waypoints = [[14, 0, alt_m]]
+    spec.max_sim_s = 75.0
+    return spec

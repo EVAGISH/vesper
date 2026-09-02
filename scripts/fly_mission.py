@@ -1,4 +1,7 @@
-"""Step 1: Pegasus + PX4 SITL scripted flight -- takeoff, square, land.
+"""Fly a ScenarioSpec: Pegasus + PX4 SITL, world built from the spec.
+
+Usage:  /isaac-sim/python.sh scripts/fly_mission.py [scenario.json]
+(defaults to the step-1 square scenario)
 
 A Pegasus Iris multirotor with the real PX4 autopilot in the loop
 (auto-launched over MAVLink lockstep). A MAVSDK thread commands the mission
@@ -31,12 +34,16 @@ from pegasus.simulator.logic.interface.pegasus_interface import PegasusInterface
 from pegasus.simulator.logic.vehicles.multirotor import Multirotor, MultirotorConfig
 from pegasus.simulator.params import ROBOTS, SIMULATION_ENVIRONMENTS
 
+import sys
+
 from vesper.capture import RunCapture
 from vesper.record import TrajectoryWriter
+from vesper.scenario import ScenarioSpec
 from vesper.scenario.spec import square_scenario
+from vesper.worlds.usd_stage import build_world
 
 FPS = 30
-MAX_SIM_SECONDS = 150.0   # hard stop; mission signals completion earlier
+spec = ScenarioSpec.load(sys.argv[1]) if len(sys.argv) > 1 else square_scenario(seed=0)
 
 # --- world + vehicle ---------------------------------------------------------
 timeline = omni.timeline.get_timeline_interface()
@@ -45,6 +52,7 @@ from isaacsim.core.api import World  # noqa: E402  (after app init)
 
 pg._world = World(**pg._world_settings)
 pg.load_environment(SIMULATION_ENVIRONMENTS["Default Environment"])
+build_world(pg.world, spec)
 
 stage = omni.usd.get_context().get_stage()
 UsdLux.DomeLight.Define(stage, "/World/dome_light").CreateIntensityAttr(1500.0)
@@ -66,7 +74,7 @@ vehicle = Multirotor(
     config=config,
 )
 
-CAM_POS = np.array([10.0, -4.0, 5.0])  # south-east of the square, elevated
+CAM_POS = np.array([16.0, -11.0, 9.0])  # elevated, clear of the building field
 camera = Camera(
     prim_path="/World/overview_cam",
     position=CAM_POS,
@@ -85,8 +93,7 @@ pg.world.reset()
 camera.initialize()
 
 # --- run artifacts: capture + scenario + trajectory --------------------------
-cap = RunCapture("fly-square")
-spec = square_scenario(seed=0)
+cap = RunCapture(f"fly-{spec.world}")
 spec_path = spec.save(cap.dir / "scenario.json")
 traj = TrajectoryWriter(cap.dir)
 cap.note(scene="pegasus iris + px4 sitl", resolution=[1280, 720],
@@ -95,14 +102,14 @@ cap.note(scene="pegasus iris + px4 sitl", resolution=[1280, 720],
 # --- mission subprocess (vanilla asyncio; kit's patched asyncio breaks MAVSDK)
 import subprocess
 mission_proc = subprocess.Popen(
-    ["/isaac-sim/python.sh", "scripts/mission_square.py", str(spec_path)],
+    ["/isaac-sim/python.sh", "scripts/mission_waypoints.py", str(spec_path)],
 )
 
 # --- sim loop + capture ------------------------------------------------------
 timeline.play()
 render_dt = pg.world.get_rendering_dt()
 sim_time, next_frame = 0.0, 0.0
-while sim_time < MAX_SIM_SECONDS and mission_proc.poll() is None:
+while sim_time < spec.max_sim_s and mission_proc.poll() is None:
     pg.world.step(render=True)
     sim_time += render_dt
     if sim_time >= next_frame:
