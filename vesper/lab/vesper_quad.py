@@ -19,13 +19,16 @@ from isaaclab.utils import configclass
 from vesper.dynamics import MultirotorDynamics, MultirotorParams
 
 
+IRIS_USD = "/pegasus/extensions/pegasus.simulator/pegasus/simulator/assets/Robots/Iris/iris.usd"
+
+
 def iris_cfg() -> ArticulationCfg:
-    from pegasus.simulator.params import ROBOTS
+    import os
 
     return ArticulationCfg(
         prim_path="/World/envs/env_.*/Robot",
         spawn=sim_utils.UsdFileCfg(
-            usd_path=ROBOTS["Iris"],
+            usd_path=os.environ.get("VESPER_IRIS_USD", IRIS_USD),
             rigid_props=sim_utils.RigidBodyPropertiesCfg(disable_gravity=False),
             articulation_props=sim_utils.ArticulationRootPropertiesCfg(enabled_self_collisions=False),
         ),
