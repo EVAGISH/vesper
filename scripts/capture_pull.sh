@@ -18,4 +18,5 @@ elif [ -n "${VESPER_BUCKET:-}" ]; then
 else
   echo "no droplet running and no VESPER_BUCKET set"; exit 1
 fi
+"$REPO_ROOT/scripts/runs_prune.sh"
 ls -t "$REPO_ROOT"/runs/*/overview.mp4 2>/dev/null | head -1 | xargs -I{} open {} 2>/dev/null || true
