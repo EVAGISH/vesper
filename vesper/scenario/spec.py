@@ -19,9 +19,11 @@ class ScenarioSpec:
     wind_speed_ms: float = 0.0
     wind_dir_deg: float = 0.0
     visibility_m: float = 10000.0
-    # buildings: [{"center":[x,y], "size":[w,d], "height":h}], meters
+    # buildings: [{"center":[north,east], "size":[dn,de], "height":h}], meters
     buildings: list = field(default_factory=list)
     max_sim_s: float = 150.0
+    spawn_east: float = 0.0
+    range_noise_std: float = 0.1
 
     def to_dict(self) -> dict:
         return dataclasses.asdict(self)
