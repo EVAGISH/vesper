@@ -164,8 +164,8 @@ Start `vesper/lab` from Isaac Lab's project generator (`isaaclab.sh --new`) rath
 
 ## 7. Open questions
 
-- **Throughput.** Expectation is order 10⁴–10⁵ env-steps/s with physics + ray-casters and no cameras. Unmeasured.
-- **Cameras at scale.** `TiledCamera` env count at usable resolution is unknown. Policy may end up on depth/range at scale with RGB reserved for fidelity — or a small-env-count RGB regime may be enough.
+- **Throughput: MEASURED** (2026-09-02, RTX 6000 Ada, `Isaac-Quadcopter-Direct-v0` headless, resets included): 118k env-steps/s @1024 envs, 233k @2048, **456k @4096** — near-linear scaling, GPU not yet saturated. At 50 Hz control that is roughly 9,000 sim-seconds per wall-second aggregate: a 40 s mission × 200 variants in ~1 s of stepping. Tiled RTX cameras (`Isaac-Cartpole-RGB-Camera-Direct-v0` @256 envs): 13.4k env-steps/s — vision is ~2× per-env cost and caps env count, as predicted. RayCaster cost: still unmeasured (needs VesperQuad, Step 5/6).
+- **Cameras at scale.** First datapoint above: tiled RGB at 256 envs runs 13.4k env-steps/s (~50× realtime aggregate) — viable for vision training at hundreds of envs, not thousands. Depth-by-raycast at high env counts still unmeasured.
 - **Controller port scope.** How much of PX4's cascade to reproduce (rate loop only? full position cascade? feed-forward terms?). Decide after the two-lane diff shows where the gap is.
 - **Splat worlds.** Isaac Sim 5.x added neural-reconstruction (3DGS) rendering. If it handles our splats, the photoreal-twin beat lives inside Isaac; otherwise it stays a separate viewer or is cut.
 - **World-generation pipelines** (A: aerial → prisms, B: photo → generative mesh, C: video → splat). Unchanged as inputs; A is the only one the environment depends on. B and C are evaluated after the environment works.
