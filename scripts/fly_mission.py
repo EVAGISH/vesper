@@ -74,12 +74,26 @@ vehicle = Multirotor(
     config=config,
 )
 
-CAM_POS = np.array([16.0, -11.0, 9.0])  # elevated, clear of the building field
+CAM_POS = np.array([-12.0, 7.0, 22.0])  # high vantage west of the corridor (corridor runs +y)
 camera = Camera(
     prim_path="/World/overview_cam",
     position=CAM_POS,
     resolution=(1280, 720),
 )
+
+fpv_camera = Camera(
+    prim_path="/World/fpv_cam",
+    position=np.array([0.0, 0.0, 0.5]),
+    resolution=(640, 360),
+)
+
+def pose_fpv_camera(pos, q_wxyz):
+    """Strap the FPV cam to the body: slightly forward, pitched 15deg down."""
+    r_body = Rotation.from_quat([q_wxyz[1], q_wxyz[2], q_wxyz[3], q_wxyz[0]])
+    r_cam = r_body * Rotation.from_euler("y", 15, degrees=True)
+    cam_pos = pos + r_body.apply(np.array([0.12, 0.0, -0.02]))
+    q = r_cam.as_quat()  # xyzw
+    fpv_camera.set_world_pose(cam_pos, np.array([q[3], q[0], q[1], q[2]]))
 
 def aim_camera_at_drone(target):
     d = target - CAM_POS
@@ -91,6 +105,7 @@ def aim_camera_at_drone(target):
 
 pg.world.reset()
 camera.initialize()
+fpv_camera.initialize()
 
 # --- run artifacts: capture + scenario + trajectory --------------------------
 cap = RunCapture(f"fly-{spec.world}")
@@ -117,11 +132,16 @@ while sim_time < spec.max_sim_s and mission_proc.poll() is None:
         # is the static spawn transform -- reading it gives a constant pose)
         pos = np.asarray(vehicle.state.position, dtype=float).reshape(-1)[:3]
         q = np.asarray(vehicle.state.attitude, dtype=float).reshape(-1)[:4]  # xyzw
-        traj.append(sim_time, pos, [q[3], q[0], q[1], q[2]])
+        q_wxyz = [q[3], q[0], q[1], q[2]]
+        traj.append(sim_time, pos, q_wxyz)
         aim_camera_at_drone(pos)
+        pose_fpv_camera(pos, q_wxyz)
         rgba = camera.get_rgba()
         if rgba is not None and getattr(rgba, "size", 0):
             cap.add_frame(rgba)
+        rgba_fpv = fpv_camera.get_rgba()
+        if rgba_fpv is not None and getattr(rgba_fpv, "size", 0):
+            cap.add_frame(rgba_fpv, stream="fpv")
         next_frame = sim_time + 1.0 / FPS
 
 timeline.stop()

@@ -1,6 +1,7 @@
 """Seeded building layouts (pure python -- runs anywhere, CPU-testable).
 
-A building is {"center": [x, y], "size": [w, d], "height": h} in meters.
+A building is {"center": [north, east], "size": [d_north, d_east], "height": h}, meters,
+matching the (north, east) frame of ScenarioSpec waypoints.
 This is the placeholder generator until Pipeline A (aerial image -> footprints)
 produces real geometry; the spec format is the same either way.
 """
@@ -8,7 +9,7 @@ import numpy as np
 
 
 def sample_city_block(seed: int, corridor_len: float = 14.0, rows: int = 4) -> list[dict]:
-    """Buildings flanking a north-running corridor at y=0, corridor kept clear."""
+    """Buildings flanking a corridor running north at east=0, corridor kept clear."""
     rng = np.random.default_rng(seed)
     buildings = []
     for i in range(rows):
