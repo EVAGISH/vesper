@@ -14,7 +14,7 @@ def sample_variants(base: ScenarioSpec, n: int, seed: int | None = None) -> list
         v = ScenarioSpec.from_dict(base.to_dict())
         v.seed = int(rng.integers(0, 2**31))
         v.spawn_east = round(float(rng.uniform(-1.5, 1.5)), 3)
-        v.wind_speed_ms = round(float(rng.uniform(0.0, 8.0)), 2)
+        v.wind_speed_ms = round(float(rng.uniform(0.0, 14.0)), 2)
         v.wind_dir_deg = round(float(rng.uniform(0, 360)), 1)
         v.visibility_m = round(float(rng.choice([50.0, 120.0, 300.0, 1000.0]))
                                * float(rng.uniform(0.8, 1.2)), 1)

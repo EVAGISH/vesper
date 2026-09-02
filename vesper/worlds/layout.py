@@ -15,7 +15,7 @@ def sample_city_block(seed: int, corridor_len: float = 14.0, rows: int = 4) -> l
     for i in range(rows):
         x = 3.0 + i * (corridor_len - 2.0) / max(rows - 1, 1)
         for side in (-1.0, 1.0):
-            y = side * float(rng.uniform(3.5, 5.5))
+            y = side * float(rng.uniform(2.6, 4.2))
             w, d = float(rng.uniform(2.0, 3.5)), float(rng.uniform(2.0, 3.5))
             h = float(rng.uniform(3.0, 9.0))
             buildings.append({"center": [round(x, 2), round(y, 2)],

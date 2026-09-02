@@ -57,7 +57,9 @@ gen = torch.Generator(device=dev); gen.manual_seed(args.seed)
 wind_dirs = torch.tensor([[math.cos(math.radians(v.wind_dir_deg)),
                            math.sin(math.radians(v.wind_dir_deg)), 0.0] for v in variants], device=dev)
 wind_mean = wind_dirs * torch.tensor([[v.wind_speed_ms] for v in variants], device=dev)
+gust_std = torch.tensor([[0.25 * v.wind_speed_ms] for v in variants], device=dev)
 gusts = GustField(N, wind_mean, gust_std=1.0, dt=dt, device=dev, generator=gen)
+gusts.sigma = gusts.sigma * gust_std  # per-env gust intensity scales with wind
 vis = torch.tensor([v.visibility_m for v in variants], device=dev)
 noise_std = torch.tensor([[v.range_noise_std] for v in variants], device=dev)
 

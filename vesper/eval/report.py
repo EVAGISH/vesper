@@ -3,7 +3,7 @@
 
 def _bin_edges(dim):
     return {
-        "wind_speed_ms": [0, 2, 4, 6, 8.01],
+        "wind_speed_ms": [0, 3.5, 7, 10.5, 14.01],
         "visibility_m": [0, 100, 250, 600, 1e9],
         "range_noise_std": [0, 0.1, 0.25, 0.5],
         "spawn_east": [-1.5, -0.5, 0.5, 1.51],

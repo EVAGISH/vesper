@@ -10,7 +10,7 @@ def test_layout_deterministic():
 def test_corridor_clear():
     for b in sample_city_block(0):
         cy, d = b["center"][1], b["size"][1]
-        assert abs(cy) - d / 2 > 1.0  # nothing overhangs the corridor at y=0
+        assert abs(cy) - d / 2 > 0.5  # corridor stays flyable, now tight
 
 
 def test_crash_scenario_blocks_corridor():
