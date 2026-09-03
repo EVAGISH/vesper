@@ -182,7 +182,14 @@ class PursuitEnv(VesperQuadEnv):
         vel[:, 0] = c.target_speed * torch.cos(self.veh_heading)
         vel[:, 1] = c.target_speed * torch.sin(self.veh_heading)
         vel[:, 3:5] = 0.0                                    # no roll/pitch rate
-        vel[:, 5] = 0.0
+        # Steer the hull to face where it is going. Without this the vehicle keeps
+        # whatever yaw it spawned with and crabs sideways across the terrain.
+        q = self._vehicle.data.root_quat_w
+        yaw = torch.atan2(2 * (q[:, 0] * q[:, 3] + q[:, 1] * q[:, 2]),
+                          1 - 2 * (q[:, 2] ** 2 + q[:, 3] ** 2))
+        want = self.veh_heading + self._veh_yaw_offset
+        err = torch.atan2(torch.sin(want - yaw), torch.cos(want - yaw))
+        vel[:, 5] = (err / self._dt).clamp(-c.target_yaw_rate, c.target_yaw_rate)
         self._vehicle.write_root_velocity_to_sim(vel)
 
     def _apply_action(self):
