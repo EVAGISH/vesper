@@ -27,6 +27,11 @@ app = AppLauncher(args).app
 import numpy as np  # noqa: E402
 import torch  # noqa: E402
 
+# Isaac Lab's AppLauncher experience file doesn't load the camera sensor
+# extension; enable it before importing Camera (fly_mission gets it free via
+# the plain SimulationApp).
+from isaacsim.core.utils.extensions import enable_extension  # noqa: E402
+enable_extension("isaacsim.sensors.camera")
 from isaacsim.sensors.camera import Camera  # noqa: E402
 from isaacsim.core.utils import rotations as rot_utils  # noqa: E402
 
