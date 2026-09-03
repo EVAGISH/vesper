@@ -197,3 +197,32 @@ def test_tilt_from_quat_upright_and_over():
     assert tilt_from_quat(upright).item() == pytest.approx(0.0, abs=1e-6)
     rolled = torch.tensor([[math.cos(math.pi / 4), math.sin(math.pi / 4), 0.0, 0.0]])
     assert tilt_from_quat(rolled).item() == pytest.approx(math.pi / 2, abs=1e-5)
+
+
+def test_set_arena_rebuilds_the_coverage_grid(world):
+    task, cfg = _task(world)
+    small = task.cell_xy.abs().max().item()
+    task.set_arena(45.0)
+    assert task.cfg.arena_half == 45.0
+    assert task.cell_xy.abs().max().item() < small
+    assert task.cell_xy.shape == (cfg.grid * cfg.grid, 2)
+    # and the task still steps cleanly at the new size
+    quat, vel, avb = _state()
+    tgt = torch.zeros(2, 2, 3)
+    obs, r, term, info = task.step(torch.tensor([[0.0, 0.0, 40.0]] * 2), vel, quat, avb, tgt,
+                                   torch.zeros(2, dtype=torch.long))
+    assert torch.isfinite(obs).all()
+
+
+def test_out_of_bounds_is_square_like_the_arena(world):
+    """A corner of the search box is inside it; a radial bound would kill it."""
+    task, cfg = _task(world)                       # arena_half 90
+    quat, vel, avb = _state()
+    tgt = torch.full((2, 2, 3), 500.0)
+    step = torch.zeros(2, dtype=torch.long)
+    corner = torch.tensor([[89.0, 89.0, 60.0]] * 2)      # radius 126 m, inside the box
+    _, _, term, info = task.step(corner, vel, quat, avb, tgt, step)
+    assert not info["oob"].any(), "the box's own corner must not be out of bounds"
+    outside = torch.tensor([[cfg.arena_half + cfg.oob_margin + 5.0, 0.0, 60.0]] * 2)
+    _, _, _, info2 = task.step(outside, vel, quat, avb, tgt, step)
+    assert info2["oob"].all()

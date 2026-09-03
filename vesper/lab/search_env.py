@@ -67,7 +67,9 @@ class SearchEnvCfg(VesperQuadEnvCfg):
     world_usd: str = CORNELL_USD
     world_map: str = CORNELL_MAP
     vehicle_model: str | None = None
-    accel_limit: float = 14.0
+    # 14 m/s^2 asks for a 55 deg lean and 12.5% of evaluated episodes ended in a
+    # tumble; 11 caps the steady-state lean near 48 deg and still flies hard.
+    accel_limit: float = 11.0
     n_targets: int = 3
     terrain: TerrainImporterCfg = TerrainImporterCfg(
         prim_path="/World/ground", terrain_type="usd", usd_path=CORNELL_USD, collision_group=-1,
@@ -250,8 +252,15 @@ class SearchEnv(VesperQuadEnv):
         n = len(env_ids)
         g, dev, c = self.gen, self.device, self.tcfg
 
-        # --- roles: a fresh shuffle per episode so slot 0 is not always the easy one
+        # --- roles: a fresh shuffle per episode so slot 0 is not always the easy one.
+        # Role 0 (a forklift driving in the open) is always one of them: it is the
+        # only class a policy that cannot yet search reliably will ever stumble
+        # onto, so guaranteeing one per episode is what keeps the reach reward
+        # reachable at all early in training.
         perm = torch.argsort(torch.rand(n, len(ROLES), device=dev, generator=g), dim=1)[:, :self.k]
+        has_open = (perm == 0).any(dim=1)
+        slot = torch.randint(0, self.k, (n,), device=dev, generator=g)
+        perm[~has_open, slot[~has_open]] = 0
         self.role[env_ids] = perm
         speed = torch.tensor([r[1] for r in ROLES], device=dev)
         contrast = torch.tensor([r[2] for r in ROLES], device=dev)

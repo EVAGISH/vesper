@@ -21,6 +21,10 @@ parser.add_argument("--iters", type=int, default=1500)
 parser.add_argument("--horizon", type=int, default=48)
 parser.add_argument("--targets", type=int, default=3)
 parser.add_argument("--arena", type=float, default=300.0, help="search box half-extent (m)")
+parser.add_argument("--arena_start", type=float, default=None,
+                    help="curriculum: begin here and grow linearly to --arena over "
+                         "--arena_iters, so the first reaches are found in a small box")
+parser.add_argument("--arena_iters", type=int, default=600)
 parser.add_argument("--episode_s", type=float, default=90.0)
 parser.add_argument("--seed", type=int, default=0)
 parser.add_argument("--lr", type=float, default=3e-4)
@@ -75,7 +79,7 @@ if args.map:
 env = SearchEnv(cfg, seed=args.seed)
 adapter = Adapter(env)
 
-track = ("found", "cleared", "coverage")
+track = ("found", "cleared", "coverage", "oob", "flip", "crash")
 ppo = PPO(adapter, PPOCfg(horizon=args.horizon, lr=args.lr, gamma=args.gamma, track=track),
           device=env.device, seed=args.seed)
 if args.resume:
@@ -102,6 +106,8 @@ def log(row):
     print(f"it {row['iter']:5d} | ret {row['ep_return']:8.1f} | found {row['found']:.2f} "
           f"| cleared {row['cleared']:.2f} | swept {row['coverage']:.2f} "
           f"| all {row['intercept_rate']:.2f} | t {row['time_to_intercept']:5.1f}s "
+          f"| box {2*env.tcfg.arena_half:.0f}m "
+          f"| oob {row['oob']:.2f} flip {row['flip']:.2f} crash {row['crash']:.2f} "
           f"| eps {row['episodes']:5d} | {sps/1e3:.0f}k step/s", flush=True)
     # "cleared" is the score that matters: the fraction of vehicles reached
     score = row["cleared"]
@@ -110,7 +116,22 @@ def log(row):
         ppo.save(cap.dir / "search.pt")
 
 
-hist = ppo.learn(args.iters, log_every=10, on_log=log)
+if args.arena_start:
+    # The arena is the curriculum knob that matters: in a 300 m box a policy that
+    # cannot yet search still trips over a forklift often enough to learn that
+    # reaching one pays, and the observation scales positions by arena_half, so
+    # what it learns carries over as the box grows.
+    def grow(row):
+        f = min(1.0, (row["iter"] + 1) / max(1, args.arena_iters))
+        env.task.set_arena(args.arena_start + f * (args.arena - args.arena_start))
+        log(row)
+
+    print(f"curriculum: arena {args.arena_start:.0f} -> {args.arena:.0f} m over "
+          f"{args.arena_iters} iters", flush=True)
+    env.task.set_arena(args.arena_start)
+    hist = ppo.learn(args.iters, log_every=10, on_log=grow)
+else:
+    hist = ppo.learn(args.iters, log_every=10, on_log=log)
 ppo.save(cap.dir / "search_last.pt")
 curve.close()
 wall = time.time() - t0
@@ -126,6 +147,7 @@ summary = {"iters": args.iters, "wall_s": round(wall), "envs": args.num_envs,
            "mean_return": avg("ep_return"), "found": avg("found"), "cleared": avg("cleared"),
            "coverage": avg("coverage"), "all_cleared_rate": avg("intercept_rate"),
            "time_to_clear_s": avg("time_to_intercept"), "best_cleared": round(best, 3),
+           "oob": avg("oob"), "flip": avg("flip"), "crash": avg("crash"),
            "policy": str(cap.dir / "search.pt")}
 print("DONE " + json.dumps(summary), flush=True)
 (cap.dir / "summary.json").write_text(json.dumps(summary, indent=1))

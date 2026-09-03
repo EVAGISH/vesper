@@ -67,11 +67,20 @@ class SearchCfg:
     # Ordering the shaping has to preserve, best to worst:
     #   clear every vehicle fast > clear them slowly > find some > sweep ground
     #   > run out of time > crash.
-    w_progress: float = 0.5            # per metre closed on the nearest known target
+    # The first version of these weights paid 192 for sweeping the box and 150 for
+    # three first sightings, both reachable by flying high and fast, against a
+    # reach bonus the policy had to *discover* by descending onto a 8 m sphere.
+    # It never did: 130 iterations, thousands of episodes, exactly zero reaches,
+    # coverage pinned at 0.6. Sweeping and sighting are now worth roughly a third
+    # of what they were, closing is worth more per metre, and w_proximity adds a
+    # dense pull over the last few tens of metres so the final approach has a
+    # gradient instead of being a lottery.
+    w_progress: float = 1.2            # per metre closed on the nearest known target
     w_time: float = 0.02               # per-step cost: the pressure to finish
-    w_cover: float = 3.0               # per coverage cell swept for the first time
+    w_cover: float = 1.2               # per coverage cell swept for the first time
+    w_proximity: float = 1.0           # per step, w_proximity / (1 + dist/20)
     w_foliage: float = 0.05            # per step spent inside a crown (branch strikes)
-    r_detect: float = 50.0             # first sighting of a vehicle
+    r_detect: float = 30.0             # first sighting of a vehicle
     r_reach: float = 120.0             # reaching one
     r_speed: float = 80.0              # extra on a reach, scaled by episode left
     r_complete: float = 150.0          # all vehicles reached, scaled by episode left
@@ -121,17 +130,27 @@ class SearchTask:
         self.recency = torch.zeros(n, g * g, device=device)
         self.prev_dist = torch.zeros(n, device=device)
 
-        # coverage cell centres, world metres
-        c = (torch.arange(g, device=device) + 0.5) / g * (2 * cfg.arena_half) - cfg.arena_half
+        self.tan_fov = math.tan(math.radians(cfg.fov_half_deg))
+        self.set_arena(cfg.arena_half)
+        self.obs_dim = 12 + 8 * k + g * g + 3
+
+    def set_arena(self, half: float):
+        """Resize the search box, rebuilding the coverage grid over it.
+
+        The curriculum grows the box during training, and the grid is defined in
+        world metres -- leaving it at the old size would keep scoring coverage of
+        a box that no longer exists.
+        """
+        g, dev = self.cfg.grid, self.device
+        self.cfg.arena_half = float(half)
+        c = (torch.arange(g, device=dev) + 0.5) / g * (2 * half) - half
         cx, cy = torch.meshgrid(c, c, indexing="xy")
         self.cell_xy = torch.stack([cx.reshape(-1), cy.reshape(-1)], dim=1)      # [G*G,2]
         # A cell counts as swept when the camera footprint touches it, not when
         # it happens to contain the cell's centre: with 75 m cells and a 40 m
         # footprint the centre test credits a low pass with nothing at all, and
         # the policy sees no reason to ever fly low.
-        self.cell_reach = 0.70711 * (2 * cfg.arena_half) / g
-        self.tan_fov = math.tan(math.radians(cfg.fov_half_deg))
-        self.obs_dim = 12 + 8 * k + g * g + 3
+        self.cell_reach = 0.70711 * (2 * half) / g
 
     # ------------------------------------------------------------------ reset
     def reset(self, env_ids, contrast=None):
@@ -230,7 +249,12 @@ class SearchTask:
         solid = self.world.solid_at(drone_pos[:, 0], drone_pos[:, 1])
         reaching_now = touching.any(dim=1)
         crash = (drone_pos[:, 2] < solid + cfg.min_clearance) & ~reaching_now
-        rxy = drone_pos[:, :2].norm(dim=1)
+        # The arena is a square and vehicles spawn anywhere in it, so the bound has
+        # to be square too. A radial test at arena_half + margin puts the limit at
+        # 340 m while the box's own corners are at 424 m: a drone flying to a
+        # corner of its own search area was being killed for leaving it, and an
+        # eval put 49% of all episodes on exactly that.
+        rxy = drone_pos[:, :2].abs().amax(dim=1)
         oob = (rxy > cfg.arena_half + cfg.oob_margin) | (drone_pos[:, 2] > ground + cfg.ceiling)
         tilt = tilt_from_quat(quat)
         flip = tilt > cfg.tilt_limit
@@ -245,6 +269,11 @@ class SearchTask:
         r = cfg.w_progress * progress
         r = r - cfg.w_time
         r = r + cfg.w_cover * fresh.float().sum(dim=1)
+        # dense homing on the nearest known target: without it the last 50 m of
+        # the approach carries almost no gradient and is never explored
+        r = r + torch.where(has_target,
+                            cfg.w_proximity / (1.0 + nearest_d / 20.0),
+                            torch.zeros_like(nearest_d))
         r = r + cfg.r_detect * new_find.float().sum(dim=1)
         r = r + (cfg.r_reach + cfg.r_speed * left.unsqueeze(1)).mul(new_reach.float()).sum(dim=1)
         r = r - cfg.w_foliage * in_foliage.float()
