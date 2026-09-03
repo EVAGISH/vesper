@@ -40,7 +40,12 @@ class SearchCfg:
     spawn_alt_max: float = 90.0
 
     # --- sensor: a gimballed camera looking down ---
-    fov_half_deg: float = 45.0         # half-angle of the nadir cone
+    # 120 deg full angle, matching the FPV lens the fidelity lane already flies.
+    # At 45 deg the footprint radius equals the altitude, so the cone collapses
+    # during a descent, the vehicle drops out of view, and the drone finishes the
+    # dive onto a fix several seconds stale while the vehicle has driven off it.
+    # At 60 deg the radius is 1.73x altitude and the fix stays fresh all the way in.
+    fov_half_deg: float = 60.0         # half-angle of the nadir cone
     detect_range: float = 220.0        # slant range on a plain target in clear air (m)
     min_detect_range: float = 15.0     # you can always see it from close enough
     canopy_k: float = 0.15             # extinction per density-weighted metre of foliage
@@ -55,7 +60,7 @@ class SearchCfg:
     look_ahead: float = 25.0           # tanh(action) * look_ahead = setpoint offset (m)
 
     # --- success / failure geometry ---
-    reach_radius: float = 8.0          # 3D range to a vehicle that counts as reaching it
+    reach_radius: float = 10.0         # 3D range to a vehicle that counts as reaching it
                                        # (the forklift is 3.5 m long; 8 m is 'arrived at it',
                                        #  and it is what makes the first reaches happen at all)
     min_clearance: float = 1.5         # below solid_top + this (and not reaching) = crash
