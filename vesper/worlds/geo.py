@@ -230,9 +230,22 @@ def _noise(size: int, cells: int, rng) -> np.ndarray:
     return np.asarray(img, dtype=np.float32) / 255.0
 
 
-def bake_ground_texture(site: GeoSite, osm, out_png: Path, rng) -> None:
+def bake_ground_texture(site: GeoSite, osm, out_png: Path, rng, ortho: Path | None = None) -> None:
+    """Ground albedo. With `ortho` (a NAIP orthophoto covering exactly the site
+    square) the real photograph is the albedo -- roads, field boundaries, mown
+    grass, dirt tracks and tree shadows all come for free, which no painted
+    land-cover palette can match. Without it, fall back to painting OSM polygons."""
     T = site.tex_px
     ppm = T / (2 * site.half_m)
+
+    if ortho is not None and Path(ortho).exists():
+        img = Image.open(ortho).convert("RGB").resize((T, T), Image.LANCZOS)
+        arr = np.asarray(img, dtype=np.float32) / 255.0
+        # NAIP is flown near noon and already carries baked-in sun; pull it back a
+        # little so our own sun/sky lighting doesn't double up.
+        arr = np.clip(arr * 0.92, 0, 1)
+        Image.fromarray((arr * 255).astype(np.uint8)).save(out_png, optimize=False)
+        return
 
     def w2p(xy):
         xy = np.asarray(xy)
@@ -695,7 +708,8 @@ def build_site(site: GeoSite, data_dir: Path, veg_dir: Path, out_usd: Path) -> B
     # terrain
     pts, faces, st = terrain.mesh()
     tex = out_dir / "ground.png"
-    bake_ground_texture(site, osm, tex, rng)
+    naip = data_dir / "naip.png"
+    bake_ground_texture(site, osm, tex, rng, ortho=naip if naip.exists() else None)
     tmesh = _mesh(stage, "/World/terrain", pts, np.full(len(faces) // 4, 4), faces, st=st, collide=True)
     mat = _preview_material(stage, "/World/Looks/ground", tex, out_dir, roughness=0.95)
     UsdShade.MaterialBindingAPI.Apply(tmesh.GetPrim()).Bind(mat)

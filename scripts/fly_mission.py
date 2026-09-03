@@ -95,19 +95,29 @@ camera = Camera(
     resolution=(1280, 720),
 )
 
-fpv_camera = Camera(
-    prim_path="/World/fpv_cam",
-    position=np.array([0.0, 0.0, 0.5]),
-    resolution=(1280, 720),
-)
+# The FPV camera is a real strapdown sensor: its prim is a CHILD of the moving
+# rigid body, so USD transform inheritance carries the airframe's pose into the
+# sensor every step. Nothing repositions it by hand. (/World/quadrotor itself is
+# only the static spawn transform, which is why this has to hunt for the body.)
+def _find_body_prim():
+    from pxr import UsdPhysics
+    stage = omni.usd.get_context().get_stage()
+    best = None
+    for prim in stage.Traverse():
+        path = prim.GetPath().pathString
+        if not path.startswith("/World/quadrotor/"):
+            continue
+        if prim.HasAPI(UsdPhysics.RigidBodyAPI):
+            # prefer the shallowest rigid body (the airframe, not a rotor)
+            if best is None or path.count("/") < best.count("/"):
+                best = path
+    return best
 
-def pose_fpv_camera(pos, q_wxyz):
-    """Strap the FPV cam to the body: slightly forward, pitched 25deg down."""
-    r_body = Rotation.from_quat([q_wxyz[1], q_wxyz[2], q_wxyz[3], q_wxyz[0]])
-    r_cam = r_body * Rotation.from_euler("y", 25, degrees=True)
-    cam_pos = pos + r_body.apply(np.array([0.12, 0.0, -0.02]))
-    q = r_cam.as_quat()  # xyzw
-    fpv_camera.set_world_pose(cam_pos, np.array([q[3], q[0], q[1], q[2]]))
+_body = _find_body_prim()
+if _body is None:
+    raise SystemExit("could not find the vehicle rigid body under /World/quadrotor")
+print(f"fpv camera parented to rigid body: {_body}", flush=True)
+fpv_camera = Camera(prim_path=f"{_body}/fpv_cam", resolution=(1280, 720))
 
 def pose_chase_camera(pos, q_wxyz, vel):
     """Follow from 9 m behind and 4 m above along the drone's travel direction
@@ -134,6 +144,10 @@ def aim_camera_at_drone(target):
 pg.world.reset()
 camera.initialize()
 fpv_camera.initialize()
+# fixed mount: 12 cm forward, 2 cm down, pitched 25 deg down. Set once; the body carries it.
+_q = Rotation.from_euler("y", 25, degrees=True).as_quat()          # xyzw
+fpv_camera.set_local_pose(np.array([0.12, 0.0, -0.02]),
+                          np.array([_q[3], _q[0], _q[1], _q[2]]), camera_axes="world")
 # lenses: FPV ~120 deg horizontal (action-cam wide angle); overview ~65 deg. Both see 3 km.
 FPV_HFOV_DEG, OVERVIEW_HFOV_DEG = 120.0, 65.0
 def set_hfov(cam, hfov_deg):
@@ -176,7 +190,6 @@ while sim_time < spec.max_sim_s and mission_proc.poll() is None:
             pose_chase_camera(pos, q_wxyz, np.asarray(vehicle.state.linear_velocity, dtype=float).reshape(-1)[:3])
         else:
             aim_camera_at_drone(pos)
-        pose_fpv_camera(pos, q_wxyz)
         rgba = camera.get_rgba()
         if rgba is not None and getattr(rgba, "size", 0):
             cap.add_frame(rgba)

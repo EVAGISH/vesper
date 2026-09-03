@@ -41,8 +41,7 @@ from vesper.lab.strike_env import StrikeEnv, StrikeEnvCfg  # noqa: E402
 
 cfg = StrikeEnvCfg()
 cfg.scene.num_envs = args.num_envs
-cfg.scene.env_spacing = 14.0
-cfg.spawn_targets = True
+cfg.scene.env_spacing = 90.0   # keep the independent envs visually separate
 cfg.strike = {"target_speed": args.target_speed}
 env = StrikeEnv(cfg, render_mode="rgb_array", seed=1)
 
@@ -91,7 +90,6 @@ for i in range(steps):
     obs, rew, done, info = env.ppo_step(act)
     hits += int(info["hit"][0].item()) if "hit" in info else 0
     if i % 2 == 0:
-        env.update_target_visuals()
         pos, _, _, _ = env.flight_state()
         drone = pos[0].cpu().numpy() + o0
         target = env.target_pos[0].cpu().numpy() + o0

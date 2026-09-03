@@ -38,14 +38,20 @@ class StrikeCfg:
     tilt_limit: float = 1.4           # |tilt| from upright (rad) beyond which = loss of control
     oob_margin: float = 15.0          # drone beyond arena_radius+this from origin (xy) = out of bounds
 
-    # --- reward weights ---
-    w_progress: float = 1.0           # per meter of range closed this step
-    w_time: float = 0.01              # per-step time penalty (encourages a fast run-in)
+    # --- reward weights: minimise time-to-hit ---
+    # The shaping is deliberately balanced so the ordering of outcomes is
+    #   fast hit  >  slow hit  >  time-out  >  crash / tumble / leave arena.
+    # A per-step cost alone would make dying early the cheapest way to stop the
+    # bleeding, so the failure penalties sit well above the worst-case time cost
+    # (0.05 x 750 steps = 37.5 over a full 15 s episode).
+    w_progress: float = 1.0           # per metre of range closed this step (rewards closing SPEED)
+    w_time: float = 0.05              # per-step cost -- the pressure to finish fast
     w_proximity: float = 0.5          # dense homing bonus w_proximity/(1+dist)
-    r_hit: float = 100.0              # terminal: reached the vehicle
-    r_ground: float = 10.0            # terminal penalty: flew into the ground
-    r_oob: float = 10.0               # terminal penalty: left the arena
-    r_flip: float = 10.0              # terminal penalty: tumbled
+    r_hit: float = 150.0              # terminal: reached the vehicle
+    r_hit_speed: float = 120.0        # extra, scaled by how much of the episode was left
+    r_ground: float = 60.0            # terminal penalty: flew into the ground
+    r_oob: float = 60.0               # terminal penalty: left the arena
+    r_flip: float = 60.0              # terminal penalty: tumbled
 
 
 def sample_targets(n, cfg: StrikeCfg, device, generator=None):
@@ -112,7 +118,7 @@ def setpoint(drone_pos_w, action, cfg: StrikeCfg):
     return drone_pos_w + torch.tanh(action) * cfg.look_ahead
 
 
-def evaluate(drone_pos, drone_vel, quat, target_pos, prev_dist, cfg: StrikeCfg):
+def evaluate(drone_pos, drone_vel, quat, target_pos, prev_dist, cfg: StrikeCfg, time_frac=None):
     """Reward [n] and terminal flags for one step. Returns (reward, terminated, info)
     where info has boolean masks hit/ground/oob/flip and the current dist."""
     rel = target_pos - drone_pos
@@ -129,7 +135,12 @@ def evaluate(drone_pos, drone_vel, quat, target_pos, prev_dist, cfg: StrikeCfg):
     reward = cfg.w_progress * (prev_dist - dist)
     reward = reward - cfg.w_time
     reward = reward + cfg.w_proximity / (1.0 + dist)
-    reward = reward + cfg.r_hit * hit.float()
+    # hitting sooner is worth strictly more than hitting later
+    if time_frac is None:
+        speed_bonus = torch.zeros_like(dist)
+    else:
+        speed_bonus = cfg.r_hit_speed * (1.0 - time_frac).clamp(0.0, 1.0)
+    reward = reward + (cfg.r_hit + speed_bonus) * hit.float()
     reward = reward - cfg.r_ground * ground.float()
     reward = reward - cfg.r_oob * oob.float()
     reward = reward - cfg.r_flip * flip.float()

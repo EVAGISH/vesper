@@ -45,11 +45,30 @@ async def run(spec: ScenarioSpec):
     async for health in drone.telemetry.health():
         if health.is_armable:
             break
-    for name in ("MPC_XY_CRUISE", "MPC_XY_VEL_MAX"):
+    # Fly it hard: PX4's stock multicopter limits are deliberately gentle, so raise
+    # horizontal speed, acceleration and jerk together -- speed alone just makes it
+    # accelerate slowly to a higher cruise and still look sluggish through turns.
+    v = float(spec.cruise_ms)
+    aggressive = {
+        "MPC_XY_CRUISE": v,
+        "MPC_XY_VEL_MAX": v * 1.4,
+        "MPC_ACC_HOR": 10.0,            # m/s^2 horizontal (default 3)
+        "MPC_ACC_HOR_MAX": 12.0,
+        "MPC_JERK_AUTO": 20.0,          # snappier setpoint shaping (default 4)
+        "MPC_ACC_UP_MAX": 8.0,
+        "MPC_ACC_DOWN_MAX": 6.0,
+        "MPC_Z_VEL_MAX_UP": 5.0,
+        "MPC_Z_VEL_MAX_DN": 4.0,
+        "MPC_TILTMAX_AIR": 45.0,        # deg of bank available (default 35)
+        "MPC_YAWRAUTO_MAX": 90.0,
+        "NAV_ACC_RAD": 4.0,             # cut corners instead of stopping at each one
+    }
+    for name, val in aggressive.items():
         try:
-            await drone.param.set_param_float(name, float(spec.cruise_ms))
-        except Exception as e:  # older PX4 param names; fly at defaults
+            await drone.param.set_param_float(name, float(val))
+        except Exception as e:  # param missing on this PX4 build; fly at defaults
             print(f"mission: could not set {name}: {e}", flush=True)
+    print(f"mission: flying aggressive profile, cruise {v:.0f} m/s", flush=True)
     await drone.action.arm()
     print("mission: armed", flush=True)
     await drone.action.set_takeoff_altitude(spec.takeoff_alt_m)

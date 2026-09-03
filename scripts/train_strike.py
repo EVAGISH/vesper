@@ -51,6 +51,7 @@ class Adapter:
 cfg = StrikeEnvCfg()
 cfg.scene.num_envs = args.num_envs
 cfg.strike = {"target_speed": args.target_speed}
+cfg.scene.env_spacing = 110.0   # one drone + one vehicle per env, well separated
 env = StrikeEnv(cfg, seed=args.seed)
 adapter = Adapter(env)
 
@@ -70,7 +71,7 @@ def log(row):
     steps = (row["iter"] + 1) * args.horizon * args.num_envs
     sps = steps / (time.time() - t0 + 1e-9)
     print(f"it {row['iter']:4d} | return {row['ep_return']:7.2f} | hit {row['hit_rate']:.2f} "
-          f"| eps {row['episodes']:5d} | pi {row['pi']:+.3f} vf {row['vf']:.2f} | {sps/1e3:.0f}k step/s",
+          f"| t_hit {row['time_to_hit']:5.2f}s | eps {row['episodes']:5d} | {sps/1e3:.0f}k step/s",
           flush=True)
     hr = row["hit_rate"]
     if hr == hr and hr >= best:  # not NaN and best-so-far

@@ -23,10 +23,11 @@ def quat_to_rot(q):  # q [N,4] wxyz -> R [N,3,3]
 
 class SE3Controller:
     def __init__(self, params: MultirotorParams, num_envs: int, device="cpu",
-                 kp=4.0, kv=4.5, kr=25.0, kw=9.0):
+                 kp=4.0, kv=4.5, kr=25.0, kw=9.0, accel_limit=6.0):
         self.p = params
         self.device = device
         self.kp, self.kv, self.kr, self.kw = kp, kv, kr, kw
+        self.accel_limit = accel_limit   # horizontal accel budget (m/s^2)
         self.inertia = torch.tensor(params.inertia, device=device)
         # mixer: [T, tau_x, tau_y, tau_z] = A @ omega^2
         rx = torch.tensor(params.rotor_xy, device=device)
@@ -43,7 +44,7 @@ class SE3Controller:
         N = pos.shape[0]
         p = self.p
         a_des = self.kp * (target_pos - pos) - self.kv * vel
-        a_des = a_des.clamp(-6.0, 6.0)
+        a_des = a_des.clamp(-self.accel_limit, self.accel_limit)
         f_world = p.mass * (a_des + torch.tensor([0.0, 0.0, G], device=pos.device))
         R = quat_to_rot(quat)
         b3 = R[:, :, 2]

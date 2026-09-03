@@ -112,6 +112,6 @@ def imported_scenario(usd: str, spawn_xy=(0.0, 0.0), ground_z: float = 0.0, seed
         waypoints=[[s, 0, alt_m], [s, s, alt_m], [-s, s, alt_m], [-s, -s, alt_m], [s, -s, alt_m], [0, 0, alt_m]],
         terrain={"usd": usd, "translation": [-x, -y, -ground_z], "rotation_xyz_deg": [0.0, 0.0, 0.0], "scale": 1.0},
         overview_cam=[-1.4 * s, -1.1 * s, alt_m + 8.0],
-        chase_cam=True, cruise_ms=12.0,
+        chase_cam=True, cruise_ms=18.0,
         max_sim_s=300.0,
     )

@@ -135,3 +135,44 @@ def test_ppo_learns_toy_reach():
     assert all(math.isfinite(h["pi"]) and math.isfinite(h["vf"]) for h in hist)
     assert late > early + 1.0, f"no learning: {early:.2f} -> {late:.2f}"
     assert late > 5.0, f"weak final return {late:.2f}"
+
+
+def _hit_reward(time_frac):
+    tp = torch.tensor([[10.0, 0, 1.1]])
+    vel = torch.zeros(1, 3); q = torch.tensor([[1.0, 0, 0, 0]])
+    r, _, _ = T.evaluate(tp.clone(), vel, q, tp, torch.tensor([5.0]), CFG, time_frac=torch.tensor([time_frac]))
+    return r.item()
+
+
+def _outcome_reward(kind):
+    """Reward for a non-hit terminal outcome, far from the target."""
+    tp = torch.tensor([[35.0, 0, 1.1]])
+    vel = torch.zeros(1, 3)
+    q = torch.tensor([[1.0, 0, 0, 0]])
+    dp = torch.tensor([[5.0, 0, 20.0]])
+    if kind == "ground":
+        dp = torch.tensor([[5.0, 0, 0.1]])
+    elif kind == "flip":
+        q = torch.tensor([[0.0, 1.0, 0, 0]])
+    elif kind == "oob":
+        dp = torch.tensor([[CFG.arena_radius + CFG.oob_margin + 5.0, 0, 20.0]])
+    r, _, _ = T.evaluate(dp, vel, q, tp, torch.tensor([30.0]), CFG, time_frac=torch.tensor([0.5]))
+    return r.item()
+
+
+def test_faster_hit_is_worth_more():
+    early, late = _hit_reward(0.05), _hit_reward(0.95)
+    assert early > late, f"early {early} should beat late {late}"
+    assert early - late > 50, "speed bonus should be a real incentive"
+
+
+def test_outcome_ordering_fast_hit_beats_slow_hit_beats_crash():
+    fast, slow = _hit_reward(0.05), _hit_reward(0.95)
+    worst_timeout_cost = -CFG.w_time * 750          # a full 15 s episode of time penalty
+    for kind in ("ground", "oob", "flip"):
+        crash = _outcome_reward(kind)
+        assert slow > crash, f"slow hit {slow} must beat {kind} {crash}"
+        assert worst_timeout_cost > crash, (
+            f"timing out ({worst_timeout_cost}) must beat {kind} ({crash}), "
+            "or the policy learns to die early to stop the time bleed")
+    assert fast > slow > worst_timeout_cost
