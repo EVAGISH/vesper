@@ -515,13 +515,19 @@ def _extent_from_descendants(prim) -> "Vt.Vec3fArray | None":
     return Vt.Vec3fArray([Gf.Vec3f(*lo.astype(float)), Gf.Vec3f(*hi.astype(float))])
 
 
-def _prepare_species_usd(src_usd: Path, out_dir: Path, name: str, target_h: float) -> Path:
-    """One prepared asset per species: the raw NVIDIA tree scaled to `target_h`
-    metres with its extents repaired, saved next to the world.
+def _prepare_species_usd(src_usd: Path, out_dir: Path, name: str, target_h: float):
+    """Prepare one species -> (usd_path, scale_to_metres).
 
-    Trees reference this file instanceable, so the scale and extent fixes are
-    authored once and shared by every copy (an instanceable prim cannot carry
-    overs on its own descendants, which is why this has to be a separate layer).
+    The layer holds the raw NVIDIA tree with its extents repaired; trees
+    reference it instanceable, so that repair is authored once and shared by
+    every copy (an instanceable prim cannot carry overs on its own descendants,
+    which is why this needs its own layer).
+
+    It deliberately does NOT author a scale op. A referencing prim that needs its
+    own translate/rotate has to author an xformOpOrder, and that order replaces
+    the referenced one wholesale rather than appending to it -- so a scale op
+    here would simply be dropped, leaving the tree at native centimetre scale.
+    The factor is returned instead and folded into each tree's own scale.
     """
     if _has_nested_instancer(src_usd):
         raise ValueError(
@@ -540,7 +546,6 @@ def _prepare_species_usd(src_usd: Path, out_dir: Path, name: str, target_h: floa
     stage.SetDefaultPrim(root.GetPrim())
     native = _tree_native_height_m(src_usd)
     s = target_h / max(native, 0.1) * UsdGeom.GetStageMetersPerUnit(Usd.Stage.Open(str(src_usd)))
-    root.AddScaleOp().Set(Gf.Vec3f(s, s, s))
     root.GetPrim().GetReferences().AddReference(os.path.relpath(src_usd, out.parent))
     for prim in Usd.PrimRange(root.GetPrim()):
         if not prim.IsA(UsdGeom.Mesh):
@@ -558,7 +563,7 @@ def _prepare_species_usd(src_usd: Path, out_dir: Path, name: str, target_h: floa
             if ext is not None:
                 mesh.CreateExtentAttr(ext)
     stage.GetRootLayer().Save()
-    return out
+    return out, s
 
 
 def _has_nested_instancer(usd_path: Path) -> bool:
@@ -652,17 +657,18 @@ def build_trees(stage, site: GeoSite, terrain: Terrain, osm, rng, veg_dir: Path,
     # Isaac Lab uses to clone environments -- and gives the same memory win, since all
     # trees of a species share one prototype.
     prepared = {name: _prepare_species_usd(veg_dir / "Trees" / f"{name}.usd", rel_dir, name, target_h)
-                for name, target_h, _, _ in SPECIES}
+                for name, target_h, _, _ in SPECIES}          # name -> (usd, scale_to_metres)
     UsdGeom.Scope.Define(stage, "/World/trees")
     for i in range(n):
         name = SPECIES[int(proto_idx[i])][0]
+        species_usd, species_scale = prepared[name]
         xf = UsdGeom.Xform.Define(stage, f"/World/trees/t{i:05d}")
         xf.AddTranslateOp().Set(Gf.Vec3d(float(P[i, 0]), float(P[i, 1]), float(z[i])))
         xf.AddRotateZOp().Set(float(np.degrees(yaw[i])))
-        s = float(scale[i])
+        s = float(scale[i]) * species_scale        # per-tree variation x cm->m and target height
         xf.AddScaleOp().Set(Gf.Vec3f(s, s, s))
         prim = xf.GetPrim()
-        prim.GetReferences().AddReference(os.path.relpath(prepared[name], rel_dir))
+        prim.GetReferences().AddReference(os.path.relpath(species_usd, rel_dir))
         prim.SetInstanceable(True)
 
     heights = np.array([SPECIES[i][1] for i in proto_idx]) * scale

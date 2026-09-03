@@ -66,11 +66,21 @@ def test_build_site(tmp_path):
     st = Usd.Stage.Open(rep.usd)
     terr = st.GetPrimAtPath("/World/terrain"); bld = st.GetPrimAtPath("/World/buildings")
     assert terr.HasAPI(UsdPhysics.CollisionAPI) and bld.HasAPI(UsdPhysics.CollisionAPI)
-    assert st.GetPrimAtPath("/World/trees").IsA(UsdGeom.PointInstancer)
-    # prototypes parked underground; instance positions untouched (on the terrain)
-    assert UsdGeom.Xformable(st.GetPrimAtPath("/World/trees/protos")).GetLocalTransformation()[3][2] == -10000.0
-    pos = np.array(UsdGeom.PointInstancer(st.GetPrimAtPath("/World/trees")).GetPositionsAttr().Get())
-    assert pos[:, 2].min() > -50 and pos[:, 2].max() < 100
+    # Trees are native USD instances, never a PointInstancer: Isaac additionally draws
+    # PointInstancer prototype prims as ordinary geometry, ignoring the prototype's own
+    # transform AND its ancestors', which put a ~1.7 km tree at the world origin.
+    assert not any(pr.GetTypeName() == "PointInstancer" for pr in st.Traverse()), \
+        "a PointInstancer would put a giant tree at the origin in Isaac"
+    trees = list(st.GetPrimAtPath("/World/trees").GetChildren())
+    assert len(trees) > 100 and all(pr.IsInstanceable() for pr in trees)
+    cache = UsdGeom.BBoxCache(Usd.TimeCode.Default(), ["default", "render", "proxy"], useExtentsHint=False)
+    # every tree sits on the terrain at a plausible size -- this is the giant-tree regression
+    boxes = [cache.ComputeWorldBound(pr).ComputeAlignedRange() for pr in trees[:120]]
+    heights = [b.GetMax()[2] - b.GetMin()[2] for b in boxes]
+    assert max(heights) < 40.0, f"tree {max(heights):.0f} m tall -- scale is not being applied"
+    assert min(heights) > 1.0
+    zs = [b.GetMin()[2] for b in boxes]
+    assert min(zs) > -50 and max(zs) < 100
     assert (data / "ground.png").exists() and (data / "facade_0.png").exists()
     # terrain: origin is z=0 by construction, and it rises to the east
     assert abs(ground_height(rep.usd, 0.0, 0.0)) < 0.5
