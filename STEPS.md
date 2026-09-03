@@ -103,12 +103,6 @@ The evaluation loop, minus learning.
 
 Step 3's prisms prove collisions; this step makes the worlds look and behave like the real place, so that what the sensors see in sim is what they would see on site. Kept after Sweeps so the eval loop exists before the worlds get expensive.
 
-- Pipeline A, textured: drape the aerial orthophoto over the terrain mesh and project facade imagery onto the extruded prisms; real elevation (DEM) replaces flat ground.
-- Pipeline B (photo → generative mesh) and Pipeline C (video → splat) evaluated as world sources. Test Isaac Sim 5.x's neural-reconstruction (3DGS) rendering on our splats; if it renders and collides acceptably, splats become a world type in `worlds/`, otherwise B/C are cut and A-textured is the ceiling.
-- Every world type ships with a collision proxy — splats and generative meshes get a simplified mesh so PhysX behaves the same regardless of how the world is rendered.
-- Realism is measured, not eyeballed: fly the same scenario over prism, textured, and splat versions of one site; diff the depth/range observations and the sweep outcomes from Step 7. Divergence tells you which fidelity the policy actually needs.
-- Ray-cast sensors read the collision proxy and RTX cameras read the visuals, so the two can disagree; the log records which world type produced each observation.
-
 **Inspect:** MP4 + livestream of the drone flying the Step 3 mission through a photoreal version of the same site, side by side with the prism version; a short table of sweep outcomes per world type.
 
 ---

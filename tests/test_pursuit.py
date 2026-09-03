@@ -1,13 +1,13 @@
-"""CPU tests for the strike task math and the self-contained PPO."""
+"""CPU tests for the pursuit task math and the self-contained PPO."""
 import math
 
 import torch
 
-from vesper.lab import strike_task as T
+from vesper.lab import pursuit_task as T
 from vesper.lab.ppo import PPO, PPOCfg
 
 
-CFG = T.StrikeCfg()
+CFG = T.PursuitCfg()
 
 
 def test_sample_targets_within_ring():
@@ -43,13 +43,13 @@ def test_setpoint_bounded():
     assert (sp.norm(dim=1) <= CFG.look_ahead * math.sqrt(3) + 1e-4).all()
 
 
-def test_reward_hit_terminates_with_bonus():
+def test_reward_intercept_terminates_with_bonus():
     tp = torch.tensor([[10.0, 0, 1.1]])
     dp = tp.clone()  # right on top of it
     vel = torch.zeros(1, 3); q = torch.tensor([[1.0, 0, 0, 0]])
     r, term, info = T.evaluate(dp, vel, q, tp, prev_dist=torch.tensor([5.0]), cfg=CFG)
-    assert info["hit"].item() and term.item()
-    assert r.item() > CFG.r_hit - 5
+    assert info["intercept"].item() and term.item()
+    assert r.item() > CFG.r_intercept - 5
 
 
 def test_reward_progress_positive_when_closing():
@@ -99,10 +99,10 @@ class ToyReach:
         self.x = self.x + 0.3 * torch.tanh(a)
         self.t += 1
         dist = (self.goal - self.x).norm(dim=1)
-        hit = dist < 0.3
-        done = hit | (self.t >= 30)
-        rew = (prev - dist) + 10.0 * hit.float()
-        info = {"hit": hit}
+        intercept = dist < 0.3
+        done = intercept | (self.t >= 30)
+        rew = (prev - dist) + 10.0 * intercept.float()
+        info = {"intercept": intercept}
         idx = torch.nonzero(done).flatten()
         if len(idx):
             self._spawn(idx)
@@ -121,7 +121,7 @@ def test_ppo_learns_toy_reach():
     assert late > 5.0, f"weak final return {late:.2f}"
 
 
-def _hit_reward(time_frac):
+def _intercept_reward(time_frac):
     tp = torch.tensor([[10.0, 0, 1.1]])
     vel = torch.zeros(1, 3); q = torch.tensor([[1.0, 0, 0, 0]])
     r, _, _ = T.evaluate(tp.clone(), vel, q, tp, torch.tensor([5.0]), CFG, time_frac=torch.tensor([time_frac]))
@@ -129,7 +129,7 @@ def _hit_reward(time_frac):
 
 
 def _outcome_reward(kind):
-    """Reward for a non-hit terminal outcome, far from the target."""
+    """Reward for a non-intercept terminal outcome, far from the target."""
     tp = torch.tensor([[35.0, 0, 1.1]])
     vel = torch.zeros(1, 3)
     q = torch.tensor([[1.0, 0, 0, 0]])
@@ -144,18 +144,18 @@ def _outcome_reward(kind):
     return r.item()
 
 
-def test_faster_hit_is_worth_more():
-    early, late = _hit_reward(0.05), _hit_reward(0.95)
+def test_faster_intercept_is_worth_more():
+    early, late = _intercept_reward(0.05), _intercept_reward(0.95)
     assert early > late, f"early {early} should beat late {late}"
     assert early - late > 50, "speed bonus should be a real incentive"
 
 
-def test_outcome_ordering_fast_hit_beats_slow_hit_beats_crash():
-    fast, slow = _hit_reward(0.05), _hit_reward(0.95)
+def test_outcome_ordering_fast_beats_slow_beats_crash():
+    fast, slow = _intercept_reward(0.05), _intercept_reward(0.95)
     worst_timeout_cost = -CFG.w_time * 750          # a full 15 s episode of time penalty
     for kind in ("ground", "oob", "flip"):
         crash = _outcome_reward(kind)
-        assert slow > crash, f"slow hit {slow} must beat {kind} {crash}"
+        assert slow > crash, f"slow intercept {slow} must beat {kind} {crash}"
         assert worst_timeout_cost > crash, (
             f"timing out ({worst_timeout_cost}) must beat {kind} ({crash}), "
             "or the policy learns to die early to stop the time bleed")

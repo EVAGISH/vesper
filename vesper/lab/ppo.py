@@ -102,7 +102,7 @@ class PPO:
         rew_buf = torch.zeros(T, N, device=dev)
         done_buf = torch.zeros(T, N, device=dev)
         ep_ret = torch.zeros(N, device=dev)
-        rets, hits, tth = [], [], []
+        rets, intercepts, tti = [], [], []
         for t in range(T):
             self.norm.update(obs)
             nobs = self.norm(obs)
@@ -114,18 +114,18 @@ class PPO:
             ep_ret += rew
             for i in torch.nonzero(done).flatten().tolist():
                 rets.append(ep_ret[i].item())
-                if info is not None and "hit" in info:
-                    h = float(info["hit"][i].item())
-                    hits.append(h)
-                    if h and "time_to_hit" in info:
-                        v = float(info["time_to_hit"][i].item())
+                if info is not None and "intercept" in info:
+                    h = float(info["intercept"][i].item())
+                    intercepts.append(h)
+                    if h and "time_to_intercept" in info:
+                        v = float(info["time_to_intercept"][i].item())
                         if v == v:                      # not NaN
-                            tth.append(v)
+                            tti.append(v)
                 ep_ret[i] = 0.0
             obs = nxt
         with torch.no_grad():
             last_v = self.ac.critic(self.norm(obs)).squeeze(-1)
-        return obs, (obs_buf, act_buf, logp_buf, val_buf, rew_buf, done_buf, last_v), rets, hits, tth
+        return obs, (obs_buf, act_buf, logp_buf, val_buf, rew_buf, done_buf, last_v), rets, intercepts, tti
 
     def _gae(self, val, rew, done, last_v):
         c = self.cfg
@@ -176,12 +176,12 @@ class PPO:
         obs = self.env.reset()
         history = []
         for it in range(iterations):
-            obs, batch, rets, hits, tth = self._rollout(obs)
+            obs, batch, rets, intercepts, tti = self._rollout(obs)
             stats = self.update(batch)
             row = {"iter": it,
                    "ep_return": sum(rets) / len(rets) if rets else float("nan"),
-                   "hit_rate": sum(hits) / len(hits) if hits else float("nan"),
-                   "time_to_hit": sum(tth) / len(tth) if tth else float("nan"),
+                   "intercept_rate": sum(intercepts) / len(intercepts) if intercepts else float("nan"),
+                   "time_to_intercept": sum(tti) / len(tti) if tti else float("nan"),
                    "episodes": len(rets), **stats}
             history.append(row)
             if on_log and (it % log_every == 0 or it == iterations - 1):

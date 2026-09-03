@@ -1,11 +1,11 @@
-"""Fly the trained strike policy and film it: a drone dives onto a moving tank.
+"""Fly the trained pursuit policy and film it: a drone runs down a moving ground vehicle.
 
-    /isaac-sim/python.sh scripts/fly_strike.py --policy runs/<id>/strike.pt \
+    /isaac-sim/python.sh scripts/fly_pursuit.py --policy runs/<id>/pursuit.pt \
         --num_envs 8 --seconds 20 --headless --enable_cameras
 
 Films env 0 with a cinematic chase camera that frames both the drone and its
-target through the terminal dive (isaacsim Camera sensor + get_rgba, the same
-capture path fly_mission uses). Writes runs/<id>/strike.mp4.
+target through the final approach (isaacsim Camera sensor + get_rgba, the same
+capture path fly_mission uses). Writes runs/<id>/pursuit.mp4.
 """
 import argparse
 
@@ -18,7 +18,8 @@ parser.add_argument("--seconds", type=float, default=20.0)
 parser.add_argument("--target_speed", type=float, default=4.0)
 parser.add_argument("--hfov", type=float, default=70.0)
 parser.add_argument("--stochastic", action="store_true")
-parser.add_argument("--tag", default="strike")
+parser.add_argument("--vehicle", default=None, help="forklift | cart | path to a USD")
+parser.add_argument("--tag", default="pursuit")
 AppLauncher.add_app_launcher_args(parser)
 args = parser.parse_args()
 args.enable_cameras = True
@@ -37,13 +38,14 @@ import isaacsim.core.utils.numpy.rotations as rot_utils  # noqa: E402
 
 from vesper.capture import RunCapture  # noqa: E402
 from vesper.lab.ppo import ActorCritic, RunningNorm  # noqa: E402
-from vesper.lab.strike_env import StrikeEnv, StrikeEnvCfg  # noqa: E402
+from vesper.lab.pursuit_env import PursuitEnv, PursuitEnvCfg  # noqa: E402
 
-cfg = StrikeEnvCfg()
+cfg = PursuitEnvCfg()
 cfg.scene.num_envs = args.num_envs
 cfg.scene.env_spacing = 90.0   # keep the independent envs visually separate
-cfg.strike = {"target_speed": args.target_speed}
-env = StrikeEnv(cfg, render_mode="rgb_array", seed=1)
+cfg.pursuit = {"target_speed": args.target_speed}
+cfg.vehicle_model = args.vehicle
+env = PursuitEnv(cfg, render_mode="rgb_array", seed=1)
 
 ck = torch.load(args.policy, map_location=env.device)
 ac = ActorCritic(ck["obs_dim"], ck["act_dim"]).to(env.device)
@@ -58,7 +60,7 @@ def policy(obs):
     return ac.dist(n).sample() if args.stochastic else ac.actor(n)
 
 
-cam = Camera(prim_path="/World/strike_cam", position=np.array([0.0, 0.0, 20.0]), resolution=(1280, 720))
+cam = Camera(prim_path="/World/chase_cam", position=np.array([0.0, 0.0, 20.0]), resolution=(1280, 720))
 obs = env.ppo_reset()
 cam.initialize()
 ap = cam.get_horizontal_aperture()
@@ -69,7 +71,7 @@ cap = RunCapture(args.tag)
 dt = cfg.sim.dt * cfg.decimation
 steps = int(args.seconds / dt)
 o0 = env.scene.env_origins[0].cpu().numpy()
-hits = 0
+intercepts = 0
 
 
 def frame_camera(drone, target):
@@ -88,7 +90,7 @@ def frame_camera(drone, target):
 for i in range(steps):
     act = policy(obs)
     obs, rew, done, info = env.ppo_step(act)
-    hits += int(info["hit"][0].item()) if "hit" in info else 0
+    intercepts += int(info["intercept"][0].item()) if "intercept" in info else 0
     if i % 2 == 0:
         pos, _, _, _ = env.flight_state()
         drone = pos[0].cpu().numpy() + o0
@@ -100,7 +102,7 @@ for i in range(steps):
             cap.add_frame(rgba[:, :, :3])
 
 path = cap.finish()
-print(f"strikes on env0: {hits}", flush=True)
+print(f"intercepts on env0: {intercepts}", flush=True)
 print(f"wrote {path}", flush=True)
 env.close()
 app.close()
