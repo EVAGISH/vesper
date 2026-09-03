@@ -19,7 +19,21 @@ app = SimulationApp({"headless": True})
 import carb
 # Load textures up front instead of streaming them during flight: Kit's asset streamer
 # hit a mutex assertion mid-run on a 21k-tree geo world (crash after 24 min).
-carb.settings.get_settings().set("/rtx-transient/resourcemanager/enableTextureStreaming", False)
+_settings = carb.settings.get_settings()
+_settings.set("/rtx-transient/resourcemanager/enableTextureStreaming", False)
+# RTX defaults to temporal AA, which accumulates across frames. At 18 m/s the
+# ground smeared into streaks -- the same world rendered as a static still was
+# sharp, which is what gives the motion away. FXAA is spatial only, so a moving
+# camera keeps the texture detail it actually samples.
+_settings.set("/rtx/post/aa/op", 2)
+_settings.set("/rtx/post/dlss/execMode", 0)
+# Motion blur is the actual cause of the smeared ground: a static still from the
+# same camera height is sharp, and in flight the drone (which is stationary
+# relative to the chase camera) stays crisp while only the ground streaks. That
+# is motion blur, not texture resolution. A camera sensor wants the instantaneous
+# image, so turn it off.
+_settings.set("/rtx/post/motionblur/enabled", False)
+_settings.set("/rtx/post/motionblur/maxBlurDiameterFraction", 0.0)
 
 
 import numpy as np
@@ -60,9 +74,19 @@ if spec.terrain is None:
 build_world(pg.world, spec)  # terrain reference (if any) + prism buildings
 
 stage = omni.usd.get_context().get_stage()
-dome = UsdLux.DomeLight.Define(stage, "/World/dome_light")
-dome.CreateIntensityAttr(1000.0)
-UsdLux.DistantLight.Define(stage, "/World/sun").CreateIntensityAttr(3000.0)
+# Only light the scene if the world does not light itself. A geo world ships a
+# sun and sky tuned to its ground albedo (1700 / 480); adding a second 3000 sun
+# and 1000 dome on top roughly doubled the exposure and washed the aerial
+# imagery out to flat pale green.
+_world_lights = [pr for pr in stage.Traverse()
+                 if pr.GetPath().pathString.startswith("/World/terrain")
+                 and "Light" in pr.GetTypeName()]
+if _world_lights:
+    print(f"lighting: using the world's own ({', '.join(pr.GetName() for pr in _world_lights)})", flush=True)
+else:
+    UsdLux.DomeLight.Define(stage, "/World/dome_light").CreateIntensityAttr(1000.0)
+    UsdLux.DistantLight.Define(stage, "/World/sun").CreateIntensityAttr(3000.0)
+    print("lighting: added default sun + dome", flush=True)
 
 mavlink_config = PX4MavlinkBackendConfig({
     "vehicle_id": 0,

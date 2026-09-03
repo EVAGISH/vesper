@@ -33,6 +33,8 @@ ap.add_argument("--source", choices=["auto", "us", "global"], default="auto",
                 help="auto picks USGS 3DEP+NAIP inside the US, Copernicus+painted elsewhere")
 ap.add_argument("--spawn", type=float, nargs=2, default=None, metavar=("X", "Y"),
                 help="local ENU metres from the lat/lon origin; default picks open ground automatically")
+ap.add_argument("--tex-px", type=int, default=4096,
+                help="ground albedo resolution; 8192 halves texel size at the cost of memory")
 ap.add_argument("--refetch", action="store_true")
 a = ap.parse_args()
 
@@ -75,6 +77,40 @@ if use_us and (a.refetch or not (data / "dem.npy").exists()):
     np.save(data / "dem.npy", arr)
     (data / "dem_meta.json").write_text(json.dumps({"transform": tr, "bbox": bbox, "source": "USGS 3DEP 1m"}))
     print(f"DEM (3DEP): {arr.shape} cells at ~{span_m/px:.1f} m/px, {arr.min():.0f}-{arr.max():.0f} m")
+
+NY = (40.4 < a.lat < 45.1) and (-79.9 < a.lon < -71.8)
+
+if use_us and NY and (a.refetch or not (data / "naip.png").exists()):
+    # New York publishes statewide orthoimagery far sharper than NAIP's 0.6 m
+    # (cars, crosswalks and footpaths resolve). Prefer it inside the state.
+    import requests
+    from PIL import Image as _Im
+    import io as _io
+    dlat_s = half_m / 110574.0
+    dlon_s = half_m / (111320.0 * math.cos(math.radians(a.lat)))
+    Wn, Sn, En, Nn = a.lon - dlon_s, a.lat - dlat_s, a.lon + dlon_s, a.lat + dlat_s
+    TILES = max(1, a.tex_px // 1024)
+    TPX = a.tex_px // TILES
+    canvas = _Im.new("RGB", (TILES * TPX, TILES * TPX))
+    ok = True
+    for ty in range(TILES):
+        for tx in range(TILES):
+            w0 = Wn + (En - Wn) * tx / TILES
+            w1 = Wn + (En - Wn) * (tx + 1) / TILES
+            n1 = Nn - (Nn - Sn) * ty / TILES
+            n0 = Nn - (Nn - Sn) * (ty + 1) / TILES
+            rr = requests.get("https://orthos.its.ny.gov/arcgis/rest/services/wms/Latest/MapServer/export",
+                              params={"bbox": f"{w0},{n0},{w1},{n1}", "bboxSR": 4326,
+                                      "size": f"{TPX},{TPX}", "format": "jpg", "f": "image"}, timeout=300)
+            if not rr.ok or rr.headers.get("content-type", "").startswith("application/json"):
+                print(f"  NYS ortho tile failed ({rr.status_code}); falling back to NAIP")
+                ok = False; break
+            canvas.paste(_Im.open(_io.BytesIO(rr.content)).convert("RGB"), (tx * TPX, ty * TPX))
+        if not ok:
+            break
+    if ok:
+        canvas.save(data / "naip.png")
+        print(f"NYS orthoimagery: {TILES*TPX}px mosaic at ~{2*half_m/(TILES*TPX):.2f} m/px")
 
 if use_us and (a.refetch or not (data / "naip.png").exists()):
     # NAIP true-colour orthoimagery for EXACTLY the site square, so it maps 1:1
@@ -143,7 +179,7 @@ if a.refetch or not (data / "osm.json").exists():
     print(f"OSM: {len(r.json()['elements'])} elements")
 
 t0 = time.time()
-site = GeoSite(a.lat, a.lon, half_m, res_m=a.res, seed=a.seed, leg_m=a.leg_m)
+site = GeoSite(a.lat, a.lon, half_m, res_m=a.res, seed=a.seed, leg_m=a.leg_m, tex_px=a.tex_px)
 rep = build_site(site, data, root / "assets" / "vegetation", data / f"{a.site}.usd",
                  spawn_override=a.spawn)
 print(f"built in {time.time() - t0:.0f}s: terrain {rep.terrain_verts} verts z[{rep.z_range[0]},{rep.z_range[1]}], "
