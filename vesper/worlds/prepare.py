@@ -35,8 +35,14 @@ class WorldReport:
     wrapper: str = ""
 
 
-def _mesh_prims(stage: Usd.Stage):
-    for prim in stage.Traverse():
+def _mesh_prims(stage: Usd.Stage, skip_instancer_protos: bool = False):
+    """All Mesh prims; optionally prune PointInstancer subtrees (prototypes are not
+    drawn where they sit, so they must not count as world geometry)."""
+    it = iter(Usd.PrimRange(stage.GetPseudoRoot()))
+    for prim in it:
+        if skip_instancer_protos and prim.IsA(UsdGeom.PointInstancer):
+            it.PruneChildren()
+            continue
         if prim.IsA(UsdGeom.Mesh):
             yield prim
 
@@ -120,7 +126,7 @@ def write_wrapper(usd_path: str | Path, out_path: str | Path | None = None,
 def _triangles_world(stage: Usd.Stage):
     """Yield (N,3,3) world-space triangle arrays per mesh (polygons fan-triangulated)."""
     cache = UsdGeom.XformCache(Usd.TimeCode.Default())
-    for prim in _mesh_prims(stage):
+    for prim in _mesh_prims(stage, skip_instancer_protos=True):
         mesh = UsdGeom.Mesh(prim)
         pts, counts, idx = mesh.GetPointsAttr().Get(), mesh.GetFaceVertexCountsAttr().Get(), mesh.GetFaceVertexIndicesAttr().Get()
         if not pts or not counts:

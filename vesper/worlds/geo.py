@@ -507,8 +507,8 @@ def build_trees(stage, site: GeoSite, terrain: Terrain, osm, rng, veg_dir: Path,
         s = target_h / max(native, 0.1) * UsdGeom.GetStageMetersPerUnit(Usd.Stage.Open(str(usd)))
         xf = UsdGeom.Xform.Define(stage, f"/World/trees/protos/{name}")
         xf.AddScaleOp().Set(Gf.Vec3f(s, s, s))
-        xf.GetPrim().GetReferences().AddReference(str(Path(usd).relative_to(rel_dir)) if usd.is_relative_to(rel_dir)
-                                                  else str(Path("..") / usd.relative_to(rel_dir.parent)))
+        import os
+        xf.GetPrim().GetReferences().AddReference(os.path.relpath(usd, rel_dir))
         protos.append(xf.GetPath())
         # some NVIDIA assets ship garbage extents (spruce): re-author from points so culling works
         for prim in Usd.PrimRange(xf.GetPrim()):
