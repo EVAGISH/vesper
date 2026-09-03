@@ -409,9 +409,9 @@ def build_water(stage, terrain: Terrain, osm, rel_dir):
         ring = np.asarray(poly.exterior.coords)[:-1].astype(np.float32)
         if len(ring) < 3:
             continue
-        z = float(terrain.height(ring[:, 0], ring[:, 1]).min()) + 0.15
+        zs = terrain.height(ring[:, 0], ring[:, 1]) + 0.12          # hug the (30 m DEM) terrain
         tris = earcut.triangulate_float32(ring, np.array([len(ring)], dtype=np.uint32))
-        b = len(pts); pts += [(x, y, z) for x, y in ring]
+        b = len(pts); pts += [(x, y, float(z)) for (x, y), z in zip(ring, zs)]
         for t in range(0, len(tris), 3):
             counts.append(3); idx += [b + int(tris[t]), b + int(tris[t + 1]), b + int(tris[t + 2])]
     if not pts:
@@ -484,13 +484,13 @@ def build_trees(stage, site: GeoSite, terrain: Terrain, osm, rng, veg_dir: Path,
         P = np.array([line.interpolate(i * line.length / n).coords[0] for i in range(n + 1)])
         P = allowed(P + rng.uniform(-0.8, 0.8, P.shape)); pos.append(P); kind.append(np.ones(len(P), int))
     if not pos:
-        return 0
+        return 0, np.zeros((0, 2)), np.zeros(0)
     P = np.vstack(pos); K = np.concatenate(kind)
     if len(P) > site.max_trees:
         sel = rng.choice(len(P), site.max_trees, replace=False); P, K = P[sel], K[sel]
     n = len(P)
     if n == 0:
-        return 0
+        return 0, np.zeros((0, 2)), np.zeros(0)
     # species per tree
     wood_w = np.array([s[2] for s in SPECIES]); wood_w /= wood_w.sum()
     row_w = np.array([s[3] for s in SPECIES]); row_w /= row_w.sum()
@@ -524,12 +524,14 @@ def build_trees(stage, site: GeoSite, terrain: Terrain, osm, rng, veg_dir: Path,
     q = np.column_stack([np.zeros(n), np.zeros(n), np.sin(yaw / 2), np.cos(yaw / 2)]).astype(np.float32)   # (x,y,z,w)
     inst.CreateOrientationsAttr(Vt.QuathArray.FromNumpy(q))
     inst.CreateScalesAttr(Vt.Vec3fArray.FromNumpy(np.column_stack([scale, scale, scale]).astype(np.float32)))
-    return n
+    heights = np.array([SPECIES[i][1] for i in proto_idx]) * scale
+    return n, P, heights
 
 
 # ---------------------------------------------------------------- spawn + mission planning
-def obstacle_height_map(site: GeoSite, terrain: Terrain, osm, cell=10.0):
-    """Max obstacle top (terrain + building/tree height) per cell, world-relative z."""
+def obstacle_height_map(site: GeoSite, terrain: Terrain, osm, cell=10.0, tree_xy=None, tree_h=None):
+    """Max obstacle top (terrain + building/tree height) per cell, world-relative z.
+    Trees come from the actual instances when given (gardens, rows), else from polygons."""
     n = int(2 * site.half_m / cell) + 1
     xs = np.linspace(-site.half_m, site.half_m, n)
     X, Y = np.meshgrid(xs, xs)
@@ -549,7 +551,11 @@ def obstacle_height_map(site: GeoSite, terrain: Terrain, osm, cell=10.0):
         d.polygon(w2p(np.asarray(p.exterior.coords)), fill=float(building_height(t, rng)) + 1.0)
     for line in osm["tree_rows"]:
         d.line(w2p(np.asarray(line.coords)), fill=20.0, width=2)
-    obst = np.asarray(img)
+    obst = np.asarray(img).copy()
+    if tree_xy is not None and len(tree_xy):
+        i = np.clip(((tree_xy[:, 1] + site.half_m) * ppm).astype(int), 0, n - 1)
+        j = np.clip(((tree_xy[:, 0] + site.half_m) * ppm).astype(int), 0, n - 1)
+        np.maximum.at(obst, (i, j), tree_h)
     return xs, H + obst
 
 
@@ -580,8 +586,9 @@ def choose_spawn(site: GeoSite, terrain: Terrain, osm, rng, search_r=600.0):
     return (round(best[1], 1), round(best[2], 1))
 
 
-def plan_loop(site: GeoSite, terrain: Terrain, osm, spawn_xy, leg_m=250.0, clearance=20.0, min_alt=25.0):
-    xs, top = obstacle_height_map(site, terrain, osm)
+def plan_loop(site: GeoSite, terrain: Terrain, osm, spawn_xy, leg_m=250.0, clearance=20.0, min_alt=25.0,
+              tree_xy=None, tree_h=None):
+    xs, top = obstacle_height_map(site, terrain, osm, tree_xy=tree_xy, tree_h=tree_h)
     cell = xs[1] - xs[0]
     sx, sy = spawn_xy
     gz = float(terrain.height(np.array([sx]), np.array([sy]))[0])
@@ -632,15 +639,15 @@ def build_site(site: GeoSite, data_dir: Path, veg_dir: Path, out_usd: Path) -> B
     rep.water = build_water(stage, terrain, osm, out_dir)
 
     spawn = choose_spawn(site, terrain, osm, rng)
-    rep.trees = build_trees(stage, site, terrain, osm, rng, veg_dir, out_dir, spawn)
+    rep.trees, tree_xy, tree_h = build_trees(stage, site, terrain, osm, rng, veg_dir, out_dir, spawn)
 
     sun = UsdLux.DistantLight.Define(stage, "/World/sun")
-    sun.CreateIntensityAttr(2500.0); sun.CreateAngleAttr(0.53); sun.CreateColorAttr(Gf.Vec3f(1.0, 0.96, 0.88))
+    sun.CreateIntensityAttr(1100.0); sun.CreateAngleAttr(0.53); sun.CreateColorAttr(Gf.Vec3f(1.0, 0.97, 0.92))
     sxf = UsdGeom.Xformable(sun); sxf.AddRotateXOp().Set(-50.0); sxf.AddRotateZOp().Set(140.0)   # ~40 deg elevation, from the SE
     sky = UsdLux.DomeLight.Define(stage, "/World/sky")
-    sky.CreateIntensityAttr(650.0); sky.CreateColorAttr(Gf.Vec3f(0.55, 0.70, 0.92))
+    sky.CreateIntensityAttr(350.0); sky.CreateColorAttr(Gf.Vec3f(0.42, 0.60, 0.90))
 
-    wps, tk, gz = plan_loop(site, terrain, osm, spawn)
+    wps, tk, gz = plan_loop(site, terrain, osm, spawn, tree_xy=tree_xy, tree_h=tree_h)
     rep.spawn_xy = list(spawn); rep.spawn_ground_z = round(gz, 3); rep.waypoints = wps; rep.takeoff_alt_m = tk
     stage.GetRootLayer().customLayerData = {"vesper_site": json.dumps({"lat0": site.lat0, "lon0": site.lon0, "half_m": site.half_m})}
     stage.GetRootLayer().Save()

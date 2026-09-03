@@ -157,9 +157,10 @@ timeline.play()
 render_dt = pg.world.get_rendering_dt()
 sim_time, next_frame = 0.0, 0.0
 while sim_time < spec.max_sim_s and mission_proc.poll() is None:
-    pg.world.step(render=True)
+    want_frame = sim_time + render_dt >= next_frame
+    pg.world.step(render=want_frame)          # physics every step, RTX only when a frame is due
     sim_time += render_dt
-    if sim_time >= next_frame:
+    if want_frame:
         # Pegasus vehicle state is the moving body (the /World/quadrotor xform
         # is the static spawn transform -- reading it gives a constant pose)
         pos = np.asarray(vehicle.state.position, dtype=float).reshape(-1)[:3]

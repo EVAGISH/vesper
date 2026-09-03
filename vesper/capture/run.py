@@ -5,6 +5,7 @@ capture_pull.sh rsyncs the directory from the droplet to the Mac.
 import json
 import subprocess
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import numpy as np
@@ -18,6 +19,8 @@ class RunCapture:
         self.dir.mkdir(parents=True)
         self._n: dict[str, int] = {}
         self._meta: dict = {"name": name, "started": time.time()}
+        self._pool = ThreadPoolExecutor(max_workers=4)     # PNG encoding off the sim thread
+        self._pending = []
 
     def _stream_dir(self, stream: str) -> Path:
         return self.dir / ("frames" if stream == "overview" else f"frames_{stream}")
@@ -27,14 +30,20 @@ class RunCapture:
         if stream not in self._n:
             d.mkdir(exist_ok=True)
             self._n[stream] = 0
-        img = Image.fromarray(np.asarray(rgba)[..., :3].astype(np.uint8))
-        img.save(d / f"{self._n[stream]:06d}.png")
+        frame = np.array(np.asarray(rgba)[..., :3], dtype=np.uint8, copy=True)   # detach from the GPU buffer
+        path = d / f"{self._n[stream]:06d}.png"
+        self._pending.append(self._pool.submit(lambda f=frame, p=path: Image.fromarray(f).save(p, compress_level=1)))
         self._n[stream] += 1
+        if len(self._pending) > 64:
+            self._pending = [f for f in self._pending if not f.done()]
 
     def note(self, **kv) -> None:
         self._meta.update(kv)
 
     def finish(self, fps: int = 30) -> Path:
+        for f in self._pending:
+            f.result()
+        self._pool.shutdown(wait=True)
         video = self.dir / "overview.mp4"
         for stream, count in self._n.items():
             if not count:
