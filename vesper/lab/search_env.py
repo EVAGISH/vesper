@@ -27,6 +27,7 @@ import torch
 
 import isaaclab.sim as sim_utils
 from isaaclab.assets import Articulation, RigidObject
+from isaaclab.sim import SimulationCfg
 from isaaclab.terrains import TerrainImporterCfg
 from isaaclab.utils import configclass
 
@@ -57,6 +58,9 @@ ROLES = [
 class SearchEnvCfg(VesperQuadEnvCfg):
     episode_length_s = 75.0
     decimation = 4                      # 25 Hz guidance over a 100 Hz inner loop
+    # match the render interval to the decimation: nothing renders in a
+    # headless training run, and a mismatch makes Isaac Lab warn every boot
+    sim: SimulationCfg = SimulationCfg(dt=1 / 100, render_interval=4)
     action_space = 3
     observation_space = 0               # filled from SearchTask.obs_dim at runtime
     search: dict | None = None

@@ -115,6 +115,30 @@ Only now. Residual-over-guidance (or setpoint policy — decided by what Steps 5
 
 ---
 
+## Step 10 — Search, then reach
+
+Step 9's pursuit policy is handed a vector to its target every step, so it never
+has to find anything. This step removes that.
+
+- Several forklifts scattered at random over the Cornell world every reset, by
+  concealment class: driving in the open, painted down, crawling under canopy,
+  parked against the buildings. Which slot holds which is reshuffled per episode.
+- The policy sees a *belief*, not the truth: what a downward camera cone reports,
+  denied by terrain and buildings, attenuated by foliage, scaled by contrast —
+  plus a coverage grid of what it has already swept. Under a random policy the
+  sensor denies ~97% of target-steps; `check_search.py` asserts that it stays a
+  search and does not decay into a chase.
+- One world, many drones: the site is a global prim, `env_spacing` is 0, and the
+  environments are separated by collision filtering (STACK.md §3, rule 1).
+- Tree cover comes from the site's orthophoto, not OSM tags — a campus's canopy is
+  almost entirely unmapped, and without it there is nowhere to hide.
+
+**Inspect:** `runs/<id>/chase.mp4` with the policy's own belief burned into the
+frame, `overview.mp4` of the sweep, and `track.png` — drone path, vehicle paths,
+and where each vehicle was first seen and reached, over the site's ground texture.
+
+---
+
 ## Standing rules
 
 - Every step ends with a commit on completion, and messy in-between states get committed too — the branch history should let any step be revisited.
