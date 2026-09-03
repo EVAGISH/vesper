@@ -16,6 +16,11 @@ from isaacsim import SimulationApp
 
 app = SimulationApp({"headless": True})
 
+import carb
+# Load textures up front instead of streaming them during flight: Kit's asset streamer
+# hit a mutex assertion mid-run on the 21k-tree Sloviansk world (crash after 24 min).
+carb.settings.get_settings().set("/rtx-transient/resourcemanager/enableTextureStreaming", False)
+
 import time
 
 import numpy as np
