@@ -17,11 +17,19 @@ async def wait_alt(drone, target, above):
             return
 
 
-async def wait_near_global(drone, lat, lon, tol_m=0.8):
+async def wait_near_global(drone, lat, lon, alt_rel=None, tol_m=0.8, alt_tol_m=2.0, log_every=40):
+    """Block until within tol_m horizontally (and alt_tol_m of alt_rel if given).
+    Logs relative/absolute altitude periodically so flights are auditable."""
+    i = 0
     async for p in drone.telemetry.position():
         dn = (p.latitude_deg - lat) * 111111.0
         de = (p.longitude_deg - lon) * 111111.0 * 0.7  # cos(lat) rough, fine at this scale
-        if (dn * dn + de * de) ** 0.5 < tol_m:
+        if i % log_every == 0:
+            print(f"mission: telemetry rel_alt={p.relative_altitude_m:.1f} abs_alt={p.absolute_altitude_m:.1f} "
+                  f"dist={((dn * dn + de * de) ** 0.5):.1f}", flush=True)
+        i += 1
+        near = (dn * dn + de * de) ** 0.5 < tol_m
+        if near and (alt_rel is None or abs(p.relative_altitude_m - alt_rel) < alt_tol_m):
             return
 
 
@@ -57,13 +65,14 @@ async def run(spec: ScenarioSpec):
         break
     import math
     lat0, lon0 = home.latitude_deg, home.longitude_deg
+    print(f"mission: home abs_alt={home.absolute_altitude_m:.1f} rel_alt={home.relative_altitude_m:.1f}", flush=True)
     m2lat = 1.0 / 111111.0
     m2lon = 1.0 / (111111.0 * math.cos(math.radians(lat0)))
     for n, e, alt in spec.waypoints:
         lat, lon = lat0 + n * m2lat, lon0 + e * m2lon
         abs_alt = home.absolute_altitude_m + alt
         await drone.action.goto_location(lat, lon, abs_alt, 0.0)
-        await wait_near_global(drone, lat, lon)
+        await wait_near_global(drone, lat, lon, alt_rel=alt)
         print(f"mission: corner ({n},{e})", flush=True)
     await drone.action.land()
     await wait_alt(drone, 0.3, above=False)

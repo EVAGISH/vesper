@@ -17,9 +17,11 @@ def add_terrain(spec, prim_path: str = "/World/terrain") -> None:
     from pxr import Gf, UsdGeom
 
     t = spec.terrain
-    usd_path = Path(t["usd"])
-    if not usd_path.is_absolute():
-        usd_path = Path(__file__).resolve().parents[2] / usd_path
+    usd_path = t["usd"]
+    if not str(usd_path).startswith(("http://", "https://", "omniverse://")):
+        usd_path = Path(usd_path)
+        if not usd_path.is_absolute():
+            usd_path = Path(__file__).resolve().parents[2] / usd_path
     add_reference_to_stage(str(usd_path), prim_path)
     prim = omni.usd.get_context().get_stage().GetPrimAtPath(prim_path)
     xf = UsdGeom.XformCommonAPI(prim)

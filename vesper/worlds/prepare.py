@@ -47,6 +47,10 @@ def _mesh_prims(stage: Usd.Stage, skip_instancer_protos: bool = False):
             yield prim
 
 
+def _is_url(p) -> bool:
+    return str(p).startswith(("http://", "https://", "omniverse://"))
+
+
 def inspect(usd_path: str | Path) -> WorldReport:
     stage = Usd.Stage.Open(str(usd_path))
     mpu = UsdGeom.GetStageMetersPerUnit(stage)
@@ -73,9 +77,15 @@ def write_wrapper(usd_path: str | Path, out_path: str | Path | None = None,
     """Write <stem>_world.usda next to the source: /World/level references the export
     (scaled to meters, rotated to Z-up) and every mesh gets a static triangle-mesh
     collider via `over` opinions. Returns the inspection report with the wrapper path."""
-    usd_path = Path(usd_path).resolve()
+    if _is_url(usd_path):
+        if out_path is None:
+            raise ValueError("out_path is required for URL sources")
+        src_id, rel = str(usd_path), str(usd_path)
+    else:
+        usd_path = Path(usd_path).resolve()
+        src_id, rel = str(usd_path), None
     out_path = Path(out_path) if out_path else usd_path.with_name(usd_path.stem + "_world.usda")
-    rep = inspect(usd_path)
+    rep = inspect(src_id)
 
     stage = Usd.Stage.CreateNew(str(out_path))
     UsdGeom.SetStageUpAxis(stage, UsdGeom.Tokens.z)
@@ -89,8 +99,10 @@ def write_wrapper(usd_path: str | Path, out_path: str | Path | None = None,
         s = rep.meters_per_unit
         level.AddScaleOp().Set(Gf.Vec3f(s, s, s))
     # reference the export's default prim (or its root children if it has none)
-    src = Usd.Stage.Open(str(usd_path))
-    rel = Path(usd_path.name)
+    src = Usd.Stage.Open(src_id)
+    if rel is None:
+        import os
+        rel = os.path.relpath(usd_path, out_path.parent)
     default = src.GetDefaultPrim()
     if default:
         level.GetPrim().GetReferences().AddReference(str(rel))
