@@ -104,6 +104,20 @@ def pose_fpv_camera(pos, q_wxyz):
     q = r_cam.as_quat()  # xyzw
     fpv_camera.set_world_pose(cam_pos, np.array([q[3], q[0], q[1], q[2]]))
 
+def pose_chase_camera(pos, q_wxyz, vel):
+    """Follow from 9 m behind and 4 m above along the drone's travel direction
+    (falls back to heading when hovering); look at the drone."""
+    r_body = Rotation.from_quat([q_wxyz[1], q_wxyz[2], q_wxyz[3], q_wxyz[0]])
+    fwd = np.array(vel[:2], dtype=float)
+    if np.linalg.norm(fwd) < 0.5:
+        fwd = r_body.apply(np.array([1.0, 0.0, 0.0]))[:2]
+    fwd = fwd / max(np.linalg.norm(fwd), 1e-6)
+    cam = pos - 9.0 * np.array([fwd[0], fwd[1], 0.0]) + np.array([0.0, 0.0, 4.0])
+    d = pos - cam
+    yaw = np.degrees(np.arctan2(d[1], d[0]))
+    pitch = np.degrees(np.arctan2(-d[2], np.linalg.norm(d[:2])))
+    camera.set_world_pose(cam, rot_utils.euler_angles_to_quats(np.array([0.0, pitch, yaw]), degrees=True))
+
 def aim_camera_at_drone(target):
     d = target - CAM_POS
     yaw = np.degrees(np.arctan2(d[1], d[0]))
@@ -130,7 +144,7 @@ cap = RunCapture(f"fly-{spec.world}")
 spec_path = spec.save(cap.dir / "scenario.json")
 traj = TrajectoryWriter(cap.dir)
 cap.note(scene="pegasus iris + px4 sitl", resolution=[1280, 720],
-         scenario="scenario.json", schema=1)
+         scenario="scenario.json", schema=1, streams={"overview": "chase" if spec.chase_cam else "fixed", "fpv": "120deg"})
 
 # --- mission subprocess (vanilla asyncio; kit's patched asyncio breaks MAVSDK)
 import subprocess
@@ -152,7 +166,10 @@ while sim_time < spec.max_sim_s and mission_proc.poll() is None:
         q = np.asarray(vehicle.state.attitude, dtype=float).reshape(-1)[:4]  # xyzw
         q_wxyz = [q[3], q[0], q[1], q[2]]
         traj.append(sim_time, pos, q_wxyz)
-        aim_camera_at_drone(pos)
+        if spec.chase_cam:
+            pose_chase_camera(pos, q_wxyz, np.asarray(vehicle.state.linear_velocity, dtype=float).reshape(-1)[:3])
+        else:
+            aim_camera_at_drone(pos)
         pose_fpv_camera(pos, q_wxyz)
         rgba = camera.get_rgba()
         if rgba is not None and getattr(rgba, "size", 0):

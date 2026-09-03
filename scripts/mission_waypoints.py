@@ -37,6 +37,11 @@ async def run(spec: ScenarioSpec):
     async for health in drone.telemetry.health():
         if health.is_armable:
             break
+    for name in ("MPC_XY_CRUISE", "MPC_XY_VEL_MAX"):
+        try:
+            await drone.param.set_param_float(name, float(spec.cruise_ms))
+        except Exception as e:  # older PX4 param names; fly at defaults
+            print(f"mission: could not set {name}: {e}", flush=True)
     await drone.action.arm()
     print("mission: armed", flush=True)
     await drone.action.set_takeoff_altitude(spec.takeoff_alt_m)
