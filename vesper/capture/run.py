@@ -1,8 +1,15 @@
 """Run capture: every sim run writes frames, an MP4, and a manifest to runs/<id>/.
 
 capture_pull.sh rsyncs the directory from the droplet to the Mac.
+
+The PNG sequence is scratch space for ffmpeg and is deleted once the MP4 exists.
+It is not small: at compress_level=1 a 1280x720 frame is ~800 KB, so a 30 s
+two-stream run leaves ~3 GB behind. Keeping them had grown runs/ to 68 GB --
+170x the size of the 46 MP4s they encoded -- which went straight into every
+droplet snapshot. Pass keep_frames=True if you genuinely need the stills.
 """
 import json
+import shutil
 import subprocess
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -13,10 +20,11 @@ from PIL import Image
 
 
 class RunCapture:
-    def __init__(self, name: str, root: str | Path = "runs"):
+    def __init__(self, name: str, root: str | Path = "runs", keep_frames: bool = False):
         self.run_id = f"{time.strftime('%Y%m%d-%H%M%S')}-{name}"
         self.dir = Path(root) / self.run_id
         self.dir.mkdir(parents=True)
+        self.keep_frames = keep_frames
         self._n: dict[str, int] = {}
         self._meta: dict = {"name": name, "started": time.time()}
         self._pool = ThreadPoolExecutor(max_workers=4)     # PNG encoding off the sim thread
@@ -55,6 +63,10 @@ class RunCapture:
                  "-c:v", "libx264", "-pix_fmt", "yuv420p", str(out)],
                 check=True,
             )
-        self._meta.update(frames=self._n, fps=fps, finished=time.time())
+        if not self.keep_frames:
+            for stream in self._n:
+                shutil.rmtree(self._stream_dir(stream), ignore_errors=True)
+        self._meta.update(frames=self._n, fps=fps, finished=time.time(),
+                          kept_frames=self.keep_frames)
         (self.dir / "manifest.json").write_text(json.dumps(self._meta, indent=2))
         return video
