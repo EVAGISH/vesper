@@ -31,6 +31,8 @@ ap.add_argument("--leg-m", type=float, default=90.0,
 ap.add_argument("--max-sim-s", type=float, default=75.0)
 ap.add_argument("--source", choices=["auto", "us", "global"], default="auto",
                 help="auto picks USGS 3DEP+NAIP inside the US, Copernicus+painted elsewhere")
+ap.add_argument("--spawn", type=float, nargs=2, default=None, metavar=("X", "Y"),
+                help="local ENU metres from the lat/lon origin; default picks open ground automatically")
 ap.add_argument("--refetch", action="store_true")
 a = ap.parse_args()
 
@@ -142,7 +144,8 @@ if a.refetch or not (data / "osm.json").exists():
 
 t0 = time.time()
 site = GeoSite(a.lat, a.lon, half_m, res_m=a.res, seed=a.seed, leg_m=a.leg_m)
-rep = build_site(site, data, root / "assets" / "vegetation", data / f"{a.site}.usd")
+rep = build_site(site, data, root / "assets" / "vegetation", data / f"{a.site}.usd",
+                 spawn_override=a.spawn)
 print(f"built in {time.time() - t0:.0f}s: terrain {rep.terrain_verts} verts z[{rep.z_range[0]},{rep.z_range[1]}], "
       f"{rep.buildings} buildings, {rep.water} water bodies, {rep.trees} trees")
 print(f"spawn (x,y)={rep.spawn_xy} ground z={rep.spawn_ground_z}; takeoff {rep.takeoff_alt_m} m; waypoints {rep.waypoints}")

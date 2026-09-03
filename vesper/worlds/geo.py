@@ -706,6 +706,33 @@ def obstacle_height_map(site: GeoSite, terrain: Terrain, osm, cell=10.0, tree_xy
     return xs, H + obst
 
 
+def _snap_to_open_ground(xy, osm, clear_m: float = 16.0, search_r: float = 220.0):
+    """Nearest point to `xy` that is clear of buildings, roads and water.
+
+    A hand-picked spawn is easy to place on a rooftop or inside a facade (which
+    puts the cameras inside the building and every frame is wallpaper). The
+    automatic picker already enforces this; an override has to be held to the
+    same standard rather than trusted.
+    """
+    blockers = [p.buffer(clear_m) for p, _ in osm["buildings"]]
+    blockers += [l.buffer(8.0) for l, _ in osm["roads"]]
+    blockers += [p.buffer(12.0) for p in osm["water"]]
+    if not blockers:
+        return (round(xy[0], 1), round(xy[1], 1))
+    tree = STRtree(blockers)
+    x0, y0 = xy
+    if not len(tree.query(Point(x0, y0), predicate="intersects")):
+        return (round(x0, 1), round(y0, 1))
+    for r in np.arange(5.0, search_r, 5.0):
+        for ang in np.linspace(0, 2 * np.pi, max(12, int(r / 3)), endpoint=False):
+            x, y = x0 + r * math.cos(ang), y0 + r * math.sin(ang)
+            if not len(tree.query(Point(x, y), predicate="intersects")):
+                print(f"  spawn ({x0:.0f},{y0:.0f}) was blocked (building/road/water); "
+                      f"snapped {r:.0f} m to ({x:.0f},{y:.0f})")
+                return (round(x, 1), round(y, 1))
+    raise ValueError(f"no open ground within {search_r} m of {xy}")
+
+
 def choose_spawn(site: GeoSite, terrain: Terrain, osm, rng, search_r=600.0):
     """Open ground, >=18 m from buildings/roads/woods/water, 25-90 m from the nearest wood, nearest to origin."""
     blockers = [p.buffer(18) for p, _ in osm["buildings"]] + [l.buffer(10) for l, _ in osm["roads"]]
@@ -758,7 +785,8 @@ def plan_loop(site: GeoSite, terrain: Terrain, osm, spawn_xy, leg_m=250.0, clear
 
 
 # ---------------------------------------------------------------- top level
-def build_site(site: GeoSite, data_dir: Path, veg_dir: Path, out_usd: Path) -> BuildReport:
+def build_site(site: GeoSite, data_dir: Path, veg_dir: Path, out_usd: Path,
+               spawn_override=None) -> BuildReport:
     rng = np.random.default_rng(site.seed)
     data_dir, veg_dir, out_usd = Path(data_dir), Path(veg_dir).resolve(), Path(out_usd).resolve()
     out_dir = out_usd.parent; out_dir.mkdir(parents=True, exist_ok=True)
@@ -786,7 +814,10 @@ def build_site(site: GeoSite, data_dir: Path, veg_dir: Path, out_usd: Path) -> B
     rep.buildings = build_buildings(stage, terrain, osm, rng, facades, roofs, out_dir)
     rep.water = build_water(stage, terrain, osm, out_dir)
 
-    spawn = choose_spawn(site, terrain, osm, rng)
+    if spawn_override is not None:
+        spawn = _snap_to_open_ground(tuple(spawn_override), osm)
+    else:
+        spawn = choose_spawn(site, terrain, osm, rng)
     rep.trees, tree_xy, tree_h = build_trees(stage, site, terrain, osm, rng, veg_dir, out_dir, spawn)
 
     sun = UsdLux.DistantLight.Define(stage, "/World/sun")
