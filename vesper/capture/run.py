@@ -58,7 +58,10 @@ class RunCapture:
                 continue
             out = self.dir / f"{stream}.mp4"
             subprocess.run(
-                ["ffmpeg", "-y", "-loglevel", "error", "-framerate", str(fps),
+                # -nostdin: ffmpeg reads stdin for interactive keys by default and
+                # will happily eat a caller's heredoc, corrupting scripts that
+                # pipe a render job over ssh.
+                ["ffmpeg", "-y", "-nostdin", "-loglevel", "error", "-framerate", str(fps),
                  "-i", str(self._stream_dir(stream) / "%06d.png"),
                  "-c:v", "libx264", "-pix_fmt", "yuv420p", str(out)],
                 check=True,
