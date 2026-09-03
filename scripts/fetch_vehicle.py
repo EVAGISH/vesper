@@ -1,0 +1,53 @@
+"""Bring a real armored-vehicle model into the strike task.
+
+The strike target defaults to a built olive-drab tank proxy (hull + turret +
+barrel + tracks) so nothing is blocked on an asset hunt. To fly a real mesh,
+point this at a glTF/GLB (a CC0/CC-BY tank from Poly Pizza, Quaternius, Sketchfab
+export, ...) or a local file; it stages the source and, in the container, converts
+to USD via Isaac Lab's MeshConverter, then tells you the VESPER_TARGET_USD to set.
+
+    # download + convert (run in the Isaac container so pxr/MeshConverter exist):
+    /isaac-sim/python.sh scripts/fetch_vehicle.py --url https://example/tank.glb --name t72
+    # or convert a file you already have:
+    /isaac-sim/python.sh scripts/fetch_vehicle.py --file assets/vehicles/t72.glb --name t72
+
+Then:  export VESPER_TARGET_USD=$(pwd)/assets/vehicles/t72/t72.usd
+"""
+import argparse
+import subprocess
+import sys
+import urllib.request
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+parser = argparse.ArgumentParser()
+parser.add_argument("--url", help="glTF/GLB URL to download")
+parser.add_argument("--file", help="local glTF/GLB already on disk")
+parser.add_argument("--name", default="tank")
+parser.add_argument("--no-yup", action="store_true", help="source is already Z-up")
+args = parser.parse_args()
+
+outdir = ROOT / "assets" / "vehicles" / args.name
+outdir.mkdir(parents=True, exist_ok=True)
+
+if args.file:
+    src = Path(args.file)
+elif args.url:
+    ext = ".glb" if ".glb" in args.url.lower() else ".gltf"
+    src = outdir / f"{args.name}{ext}"
+    print(f"downloading {args.url} -> {src}", flush=True)
+    urllib.request.urlretrieve(args.url, src)
+else:
+    print("give --url or --file", file=sys.stderr)
+    sys.exit(2)
+
+usd = outdir / f"{args.name}.usd"
+cmd = [sys.executable, str(ROOT / "scripts" / "convert_asset.py"), str(src), str(usd),
+       "--collision", "convexHull"]
+if not args.no_yup:
+    cmd.append("--yup")
+print("convert:", " ".join(cmd), flush=True)
+subprocess.run(cmd, check=True)
+print(f"\nOK. Set: export VESPER_TARGET_USD={usd}", flush=True)
+print("Then rebuild the strike video; the drone will dive onto this vehicle instead of the proxy.",
+      flush=True)
