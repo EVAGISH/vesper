@@ -95,3 +95,19 @@ def baylands_scenario(seed: int = 0) -> ScenarioSpec:
         sky_hdr="assets/skies/noon_grass.hdr",
         max_sim_s=240.0,
     )
+
+
+def imported_scenario(usd: str, spawn_xy=(0.0, 0.0), ground_z: float = 0.0, seed: int = 0,
+                      alt_m: float = 15.0, loop_m: float = 30.0) -> ScenarioSpec:
+    """Fly a square loop over an imported world (see docs/unreal_export.md). The
+    world is shifted so `spawn_xy` (world coords, meters) sits at the origin at z=0;
+    `ground_z` is the surface height there (scripts/prepare_world.py prints both)."""
+    x, y = spawn_xy
+    s = loop_m
+    return ScenarioSpec(
+        seed=seed, world="imported", takeoff_alt_m=alt_m,
+        waypoints=[[s, 0, alt_m], [s, s, alt_m], [-s, s, alt_m], [-s, -s, alt_m], [s, -s, alt_m], [0, 0, alt_m]],
+        terrain={"usd": usd, "translation": [-x, -y, -ground_z], "rotation_xyz_deg": [0.0, 0.0, 0.0], "scale": 1.0},
+        overview_cam=[-1.4 * s, -1.1 * s, alt_m + 8.0],
+        max_sim_s=300.0,
+    )
