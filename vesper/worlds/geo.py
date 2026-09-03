@@ -500,6 +500,11 @@ def build_trees(stage, site: GeoSite, terrain: Terrain, osm, rng, veg_dir: Path,
     z = terrain.height(P[:, 0], P[:, 1]) - 0.05
 
     inst = UsdGeom.PointInstancer.Define(stage, "/World/trees")
+    # Isaac's renderer draws the prototype prims themselves (at their world pose, without
+    # the prototype root's own xformOps), so park them 10 km underground. Instances only
+    # inherit the prototype ROOT's local ops (the scale), not this parent's translate.
+    hidden = UsdGeom.Xform.Define(stage, "/World/trees/protos")
+    hidden.AddTranslateOp().Set(Gf.Vec3d(0.0, 0.0, -10000.0))
     protos = []
     for name, target_h, _, _ in SPECIES:
         usd = veg_dir / "Trees" / f"{name}.usd"
@@ -642,10 +647,10 @@ def build_site(site: GeoSite, data_dir: Path, veg_dir: Path, out_usd: Path) -> B
     rep.trees, tree_xy, tree_h = build_trees(stage, site, terrain, osm, rng, veg_dir, out_dir, spawn)
 
     sun = UsdLux.DistantLight.Define(stage, "/World/sun")
-    sun.CreateIntensityAttr(1100.0); sun.CreateAngleAttr(0.53); sun.CreateColorAttr(Gf.Vec3f(1.0, 0.97, 0.92))
+    sun.CreateIntensityAttr(1700.0); sun.CreateAngleAttr(0.53); sun.CreateColorAttr(Gf.Vec3f(1.0, 0.97, 0.92))
     sxf = UsdGeom.Xformable(sun); sxf.AddRotateXOp().Set(-50.0); sxf.AddRotateZOp().Set(140.0)   # ~40 deg elevation, from the SE
     sky = UsdLux.DomeLight.Define(stage, "/World/sky")
-    sky.CreateIntensityAttr(350.0); sky.CreateColorAttr(Gf.Vec3f(0.42, 0.60, 0.90))
+    sky.CreateIntensityAttr(480.0); sky.CreateColorAttr(Gf.Vec3f(0.42, 0.60, 0.90))
 
     wps, tk, gz = plan_loop(site, terrain, osm, spawn, tree_xy=tree_xy, tree_h=tree_h)
     rep.spawn_xy = list(spawn); rep.spawn_ground_z = round(gz, 3); rep.waypoints = wps; rep.takeoff_alt_m = tk

@@ -68,6 +68,10 @@ def test_build_site(tmp_path):
     terr = st.GetPrimAtPath("/World/terrain"); bld = st.GetPrimAtPath("/World/buildings")
     assert terr.HasAPI(UsdPhysics.CollisionAPI) and bld.HasAPI(UsdPhysics.CollisionAPI)
     assert st.GetPrimAtPath("/World/trees").IsA(UsdGeom.PointInstancer)
+    # prototypes parked underground; instance positions untouched (on the terrain)
+    assert UsdGeom.Xformable(st.GetPrimAtPath("/World/trees/protos")).GetLocalTransformation()[3][2] == -10000.0
+    pos = np.array(UsdGeom.PointInstancer(st.GetPrimAtPath("/World/trees")).GetPositionsAttr().Get())
+    assert pos[:, 2].min() > -50 and pos[:, 2].max() < 100
     assert (data / "ground.png").exists() and (data / "facade_0.png").exists()
     # terrain: origin is z=0 by construction, and it rises to the east
     assert abs(ground_height(rep.usd, 0.0, 0.0)) < 0.5
