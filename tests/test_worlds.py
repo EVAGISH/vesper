@@ -1,4 +1,4 @@
-from vesper.scenario.spec import city_scenario, crash_scenario
+from vesper.scenario.spec import crash_scenario
 from vesper.worlds import sample_city_block
 
 

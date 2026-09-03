@@ -18,10 +18,9 @@ app = SimulationApp({"headless": True})
 
 import carb
 # Load textures up front instead of streaming them during flight: Kit's asset streamer
-# hit a mutex assertion mid-run on the 21k-tree Sloviansk world (crash after 24 min).
+# hit a mutex assertion mid-run on a 21k-tree geo world (crash after 24 min).
 carb.settings.get_settings().set("/rtx-transient/resourcemanager/enableTextureStreaming", False)
 
-import time
 
 import numpy as np
 import isaacsim.core.utils.numpy.rotations as rot_utils
@@ -62,15 +61,8 @@ build_world(pg.world, spec)  # terrain reference (if any) + prism buildings
 
 stage = omni.usd.get_context().get_stage()
 dome = UsdLux.DomeLight.Define(stage, "/World/dome_light")
-dome.CreateIntensityAttr(1000.0 if not spec.sky_hdr else 300.0)
-if spec.sky_hdr:
-    from pathlib import Path
-    hdr = Path(spec.sky_hdr)
-    if not hdr.is_absolute():
-        hdr = Path(__file__).resolve().parents[1] / hdr
-    dome.CreateTextureFileAttr(str(hdr))
-    dome.CreateTextureFormatAttr("latlong")
-UsdLux.DistantLight.Define(stage, "/World/sun").CreateIntensityAttr(3000.0 if not spec.sky_hdr else 1000.0)
+dome.CreateIntensityAttr(1000.0)
+UsdLux.DistantLight.Define(stage, "/World/sun").CreateIntensityAttr(3000.0)
 
 mavlink_config = PX4MavlinkBackendConfig({
     "vehicle_id": 0,

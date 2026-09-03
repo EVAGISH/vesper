@@ -18,22 +18,6 @@ def test_sample_targets_within_ring():
     assert v.shape == (2000, 3)
 
 
-def test_step_targets_stays_in_arena_and_on_ground():
-    g = torch.Generator().manual_seed(1)
-    p, v = T.sample_targets(500, CFG, "cpu", g)
-    for _ in range(400):
-        p, v = T.step_targets(p, v, CFG, dt=0.05, generator=g)
-    assert (p[:, :2].norm(dim=1) <= CFG.arena_radius + 1e-3).all()
-    assert torch.allclose(p[:, 2], torch.full((500,), CFG.ground_z + CFG.target_h))
-
-
-def test_static_target_does_not_move():
-    cfg = T.StrikeCfg(target_speed=0.0)
-    p0, v = T.sample_targets(10, cfg, "cpu", torch.Generator().manual_seed(2))
-    p1, _ = T.step_targets(p0.clone(), v, cfg, dt=0.1)
-    assert torch.allclose(p0, p1)
-
-
 def test_tilt_from_quat():
     upright = torch.tensor([[1.0, 0, 0, 0]])
     assert T.tilt_from_quat(upright).item() < 1e-6

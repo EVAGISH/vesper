@@ -1,8 +1,9 @@
 """Build a real-world site into a USD world + flight scenario (runs on the Mac, no Isaac).
 
-    python3 scripts/build_geo_world.py sloviansk --lat 48.845 --lon 37.635 --half-km 1.5
+    python3 scripts/build_geo_world.py cornell --lat 42.4475 --lon -76.4831 --half-km 1.0
 
-Fetches (once, cached under assets/<site>/) the Copernicus 30 m DEM crop and an
+Fetches (once, cached under assets/<site>/) an elevation crop -- USGS 3DEP 1 m
+lidar plus NAIP 1 m aerial imagery inside the US, Copernicus 30 m elsewhere -- and an
 Overpass dump of OSM buildings/roads/landuse/water, then writes
 assets/<site>/<site>.usd (+ textures) and <site>0.json (ScenarioSpec) with an
 automatically chosen open spawn next to the woods and a canopy-safe loop.

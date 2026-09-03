@@ -30,7 +30,6 @@ class ScenarioSpec:
     # overview camera position (world x,y,z); None -> script default
     overview_cam: list | None = None
     # equirectangular HDR for the dome light (repo-relative path); None -> plain dome
-    sky_hdr: str | None = None
     # chase camera: the "overview" stream follows the drone from behind/above instead of a fixed post
     chase_cam: bool = False
     cruise_ms: float = 5.0          # PX4 MPC_XY_CRUISE / MPC_XY_VEL_MAX for the mission
@@ -81,23 +80,6 @@ def crash_scenario(seed: int = 0, alt_m: float = 3.0) -> ScenarioSpec:
     spec.waypoints = [[14, 0, alt_m]]
     spec.max_sim_s = 75.0
     return spec
-
-
-def baylands_scenario(seed: int = 0) -> ScenarioSpec:
-    """Baylands Park (Sunnyvale, CA): the PX4 community's textured outdoor world,
-    converted from Gazebo (scripts/convert_asset.py --yup). The terrain is shifted
-    so a clearing inside the park's tree cluster sits at the origin at ground level.
-    Waypoint altitudes were planned against the tree canopy along each leg
-    (max canopy + 4 m), so PX4's straight-line gotos clear the trees."""
-    return ScenarioSpec(
-        seed=seed, world="baylands", takeoff_alt_m=11.1,
-        waypoints=[[0, 28, 11.1], [28, 28, 17.5], [28, -28, 17.5], [-28, -28, 17.5], [-28, 28, 9.0], [0, 0, 9.0]],
-        terrain={"usd": "assets/baylands/baylands.usd", "translation": [198.0, 58.0, -1.72],
-                 "rotation_xyz_deg": [0.0, 0.0, 0.0], "scale": 1.0},
-        overview_cam=[-38.0, -30.0, 20.0],
-        sky_hdr="assets/skies/noon_grass.hdr",
-        max_sim_s=240.0,
-    )
 
 
 def imported_scenario(usd: str, spawn_xy=(0.0, 0.0), ground_z: float = 0.0, seed: int = 0,

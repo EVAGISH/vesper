@@ -1,14 +1,14 @@
 """Emit a scenario JSON.
 
-    python3 scripts/make_scenario.py {square|city|crash|baylands} <seed> <out>
+    python3 scripts/make_scenario.py {square|city|crash} <seed> <out>
     python3 scripts/make_scenario.py imported <seed> <out> --usd assets/x/x_world.usda --spawn X Y --ground Z
 """
 import argparse
 
-from vesper.scenario.spec import baylands_scenario, city_scenario, crash_scenario, imported_scenario, square_scenario
+from vesper.scenario.spec import city_scenario, crash_scenario, imported_scenario, square_scenario
 
 ap = argparse.ArgumentParser()
-ap.add_argument("kind", choices=["square", "city", "crash", "baylands", "imported"])
+ap.add_argument("kind", choices=["square", "city", "crash", "imported"])
 ap.add_argument("seed", type=int)
 ap.add_argument("out")
 ap.add_argument("--usd", help="imported: wrapper USD from scripts/prepare_world.py (repo-relative)")
@@ -21,5 +21,5 @@ a = ap.parse_args()
 if a.kind == "imported":
     spec = imported_scenario(a.usd, tuple(a.spawn), a.ground, a.seed, a.alt, a.loop)
 else:
-    spec = {"square": square_scenario, "city": city_scenario, "crash": crash_scenario, "baylands": baylands_scenario}[a.kind](a.seed)
+    spec = {"square": square_scenario, "city": city_scenario, "crash": crash_scenario}[a.kind](a.seed)
 print(spec.save(a.out))

@@ -1,6 +1,6 @@
 """Render still frames of a scenario's world from given camera poses -- no PX4, no flight.
 
-    /isaac-sim/python.sh scripts/render_view.py sloviansk0.json --view 0 0 1.7 0 0 0 --view 50 -30 60 0 40 200
+    /isaac-sim/python.sh scripts/render_view.py cornell0.json --view 0 0 1.7 0 0 0 --view 50 -30 60 0 40 200
 
 Each --view is X Y Z PITCH YAW ROLL... simplified: X Y Z pitch_deg yaw_deg (camera looks
 along +x rotated by yaw, pitched down by pitch). Writes runs/<id>/view_<i>.png. The fast
@@ -11,8 +11,6 @@ from isaacsim import SimulationApp
 app = SimulationApp({"headless": True})
 
 import argparse
-import sys
-import time
 
 import carb
 import numpy as np
@@ -42,7 +40,7 @@ build_world(world, spec)
 stage = omni.usd.get_context().get_stage()
 if not spec.terrain:
     world.scene.add_default_ground_plane()
-if spec.sky_hdr or not stage.GetPrimAtPath("/World/terrain/sky"):
+if not stage.GetPrimAtPath("/World/terrain/sky"):
     UsdLux.DomeLight.Define(stage, "/World/dome_light").CreateIntensityAttr(600.0)
 cam = Camera(prim_path="/World/view_cam", position=np.array([0.0, 0.0, 2.0]), resolution=(1280, 720))
 world.reset()

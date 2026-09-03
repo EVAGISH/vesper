@@ -72,33 +72,6 @@ def sample_targets(n, cfg: StrikeCfg, device, generator=None):
     return pos, vel
 
 
-def step_targets(pos, vel, cfg: StrikeCfg, dt, generator=None):
-    """Advance targets one policy step: heading jitter + arena-edge bounce. In place-safe (returns new)."""
-    n = pos.shape[0]
-    device = pos.device
-    if cfg.target_speed > 0 and cfg.target_turn_std > 0:
-        dtheta = torch.randn(n, device=device, generator=generator) * cfg.target_turn_std
-        c, s = torch.cos(dtheta), torch.sin(dtheta)
-        vx, vy = vel[:, 0].clone(), vel[:, 1].clone()
-        vel = vel.clone()
-        vel[:, 0] = c * vx - s * vy
-        vel[:, 1] = s * vx + c * vy
-    pos = pos + vel * dt
-    # bounce back toward origin if beyond arena radius
-    rxy = pos[:, :2].norm(dim=1, keepdim=True)
-    out = (rxy > cfg.arena_radius).squeeze(1)
-    if out.any():
-        inward = -pos[out, :2] / rxy[out].clamp(min=1e-6)
-        speed = vel[out, :2].norm(dim=1, keepdim=True)
-        vel = vel.clone()
-        vel[out, :2] = inward * speed
-        pos = pos.clone()
-        pos[out, :2] = pos[out, :2] * (cfg.arena_radius / rxy[out]).clamp(max=1.0)
-    pos = pos.clone()
-    pos[:, 2] = cfg.ground_z + cfg.target_h
-    return pos, vel
-
-
 def tilt_from_quat(quat):
     """Angle [n] between body +z and world +z, from wxyz quat."""
     w, x, y, z = quat.unbind(dim=1)

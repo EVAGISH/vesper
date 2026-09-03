@@ -9,7 +9,7 @@ Roll/pitch torques arise from rotor positions x thrusts (Pegasus lets PhysX
 do this by applying forces at rotor prims; here it is explicit cross products).
 All tensors are batched [N, ...]; runs on CPU or GPU.
 """
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 import torch
 

@@ -25,7 +25,6 @@ args = parser.parse_args()
 args.headless = True
 app = AppLauncher(args).app
 
-import torch  # noqa: E402
 
 from vesper.capture import RunCapture  # noqa: E402
 from vesper.lab.ppo import PPO, PPOCfg  # noqa: E402

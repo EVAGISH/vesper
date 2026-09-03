@@ -10,7 +10,7 @@ around by contacts, and can be driven by a velocity controller in the env.
 """
 from pathlib import Path
 
-from pxr import Gf, Usd, UsdGeom, UsdPhysics, UsdShade
+from pxr import Gf, Sdf, Usd, UsdGeom, UsdPhysics, UsdShade
 
 
 # rough T-72/M1 class proportions, metres
@@ -25,21 +25,11 @@ def _material(stage, path, rgb, rough=0.85):
     mat = UsdShade.Material.Define(stage, path)
     sh = UsdShade.Shader.Define(stage, f"{path}/Shader")
     sh.CreateIdAttr("UsdPreviewSurface")
-    sh.CreateInput("diffuseColor", Sdf_Color3f()).Set(Gf.Vec3f(*rgb))
-    sh.CreateInput("roughness", Sdf_Float()).Set(rough)
-    sh.CreateInput("metallic", Sdf_Float()).Set(0.0)
+    sh.CreateInput("diffuseColor", Sdf.ValueTypeNames.Color3f).Set(Gf.Vec3f(*rgb))
+    sh.CreateInput("roughness", Sdf.ValueTypeNames.Float).Set(rough)
+    sh.CreateInput("metallic", Sdf.ValueTypeNames.Float).Set(0.0)
     mat.CreateSurfaceOutput().ConnectToSource(sh.ConnectableAPI(), "surface")
     return mat
-
-
-def Sdf_Color3f():
-    from pxr import Sdf
-    return Sdf.ValueTypeNames.Color3f
-
-
-def Sdf_Float():
-    from pxr import Sdf
-    return Sdf.ValueTypeNames.Float
 
 
 def _box(stage, path, size, translate, mat):
@@ -75,8 +65,7 @@ def write_tank_usd(out_path, olive=(0.26, 0.29, 0.18)) -> Path:
     mass.CreateMassAttr(MASS_KG)
     mass.CreateCenterOfMassAttr(Gf.Vec3f(0.0, 0.0, 0.35))
 
-    dark = _material(stage, "/Tank/Looks/dark", (v * 0.72 for v in olive)) if False else \
-        _material(stage, "/Tank/Looks/dark", tuple(v * 0.72 for v in olive))
+    dark = _material(stage, "/Tank/Looks/dark", tuple(v * 0.72 for v in olive))
     body = _material(stage, "/Tank/Looks/body", olive)
     rubber = _material(stage, "/Tank/Looks/track", (0.07, 0.07, 0.075), rough=0.95)
 

@@ -1,6 +1,6 @@
 """Convert a mesh (glTF/OBJ/FBX/STL) to a collidable USD, headless, inside the container.
 
-    /isaac-sim/python.sh scripts/convert_asset.py assets/baylands/baylands.gltf --yup --headless
+    /isaac-sim/python.sh scripts/convert_asset.py assets/vehicles/tank.glb --yup --headless
 
 Writes <same dir>/<stem>.usd with a static triangle-mesh collider (exact mesh;
 fine for static terrain, PhysX supports it for non-moving bodies), then prints the

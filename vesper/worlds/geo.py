@@ -1,9 +1,11 @@
 """Real-world site -> USD world (pure python: numpy, PIL, shapely, earcut, pxr).
 
 Inputs (fetched by scripts/build_geo_world.py):
-  dem.npy + dem_meta.json   Copernicus 30 m DEM crop (EPSG:4326)
+  dem.npy + dem_meta.json   elevation crop (EPSG:4326): USGS 3DEP 1 m in the US,
+                            else Copernicus GLO-30 30 m
+  naip.png                  (US only) 1 m true-colour orthophoto used as the ground albedo
   osm.json                  Overpass "out geom" dump: buildings, highways, landuse, natural, water
-  assets/vegetation/Trees   NVIDIA tree USDs (cm units) for the PointInstancer prototypes
+  assets/vegetation/Trees   NVIDIA tree USDs (cm units), plain-mesh species only
 
 Output: <site>.usd with
   /World/terrain    grid mesh from the DEM, ground albedo baked from land cover + roads
@@ -23,7 +25,7 @@ from pathlib import Path
 
 import mapbox_earcut as earcut
 import numpy as np
-from PIL import Image, ImageDraw, ImageFilter
+from PIL import Image, ImageDraw
 from pxr import Gf, Sdf, Usd, UsdGeom, UsdLux, UsdPhysics, UsdShade, Vt
 from shapely.geometry import LineString, Point, Polygon
 from shapely.strtree import STRtree
@@ -367,9 +369,15 @@ def build_buildings(stage, terrain: Terrain, osm, rng, facades, roofs, rel_dir):
     roof_faces = {i: [] for i in range(len(roofs))}
     face_id = 0
     n_b = 0
+    half = terrain.site.half_m
     for bi, (poly, tags) in enumerate(osm["buildings"]):
         ring = np.asarray(poly.exterior.coords)[:-1]
         if len(ring) < 3:
+            continue
+        # Overpass returns everything in the padded query bbox, which reaches past
+        # the terrain. A footprint outside the mesh sits on clamped edge height and
+        # floats; drop anything not (mostly) inside the world square.
+        if not (np.abs(ring[:, 0]).max() < half and np.abs(ring[:, 1]).max() < half):
             continue
         # CCW
         if Polygon(ring).exterior.is_ccw is False:
@@ -424,23 +432,47 @@ def build_buildings(stage, terrain: Terrain, osm, rng, facades, roofs, rel_dir):
 
 
 # ---------------------------------------------------------------- water
-def build_water(stage, terrain: Terrain, osm, rel_dir):
-    pts, counts, idx = [], [], []
+def build_water(stage, terrain: Terrain, osm, rel_dir, max_drape_m: float = 12.0):
+    """Flat water surfaces, clipped to the site square.
+
+    Two things have to be enforced or a big lake wrecks the world. First, OSM
+    water polygons routinely extend far outside the crop (Cayuga Lake ran 2.3 km
+    past a 1 km world), so clip to the site. Second, water is level: sampling
+    terrain height per vertex made the surface drape up the hillside as a giant
+    sheet through the flight path. Each body gets one elevation, and a body whose
+    terrain still varies more than `max_drape_m` under it is not a flat waterbody
+    inside this crop (mis-tagged, or a shoreline the DEM disagrees with) and is
+    dropped rather than drawn as a wall of water.
+    """
+    from shapely.geometry import box as _box
+    site_box = _box(-terrain.site.half_m, -terrain.site.half_m, terrain.site.half_m, terrain.site.half_m)
+    pts, counts, idx, kept = [], [], [], 0
     for poly in osm["water"]:
-        ring = np.asarray(poly.exterior.coords)[:-1].astype(np.float32)
-        if len(ring) < 3:
+        clipped = poly.intersection(site_box)
+        if clipped.is_empty:
             continue
-        zs = terrain.height(ring[:, 0], ring[:, 1]) + 0.12          # hug the (30 m DEM) terrain
-        tris = earcut.triangulate_float32(ring, np.array([len(ring)], dtype=np.uint32))
-        b = len(pts); pts += [(x, y, float(z)) for (x, y), z in zip(ring, zs)]
-        for t in range(0, len(tris), 3):
-            counts.append(3); idx += [b + int(tris[t]), b + int(tris[t + 1]), b + int(tris[t + 2])]
+        parts = list(getattr(clipped, "geoms", [clipped]))
+        for part in parts:
+            if part.geom_type != "Polygon" or part.area < 25.0:
+                continue
+            ring = np.asarray(part.exterior.coords)[:-1].astype(np.float32)
+            if len(ring) < 3:
+                continue
+            zs = terrain.height(ring[:, 0], ring[:, 1])
+            if float(zs.max() - zs.min()) > max_drape_m:
+                continue                                   # would drape over terrain
+            level = float(np.percentile(zs, 25)) + 0.12     # one flat level per body
+            tris = earcut.triangulate_float32(ring, np.array([len(ring)], dtype=np.uint32))
+            b = len(pts); pts += [(x, y, level) for x, y in ring]
+            for t in range(0, len(tris), 3):
+                counts.append(3); idx += [b + int(tris[t]), b + int(tris[t + 1]), b + int(tris[t + 2])]
+            kept += 1
     if not pts:
         return 0
     m = _mesh(stage, "/World/water", pts, counts, idx, collide=False)
     mat = _preview_material(stage, "/World/Looks/water", None, rel_dir, rgb=(0.08, 0.16, 0.22), roughness=0.08)
     UsdShade.MaterialBindingAPI.Apply(m.GetPrim()).Bind(mat)
-    return len(osm["water"])
+    return kept
 
 
 # ---------------------------------------------------------------- trees

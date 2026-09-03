@@ -5,7 +5,6 @@ import json
 from pathlib import Path
 
 import numpy as np
-import pytest
 from pxr import Usd, UsdGeom, UsdPhysics
 
 from vesper.worlds import geo
