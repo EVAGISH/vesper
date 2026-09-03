@@ -82,6 +82,7 @@ class GeoSite:
     seed: int = 0
     tree_spacing_m: float = 6.0        # woodland grid spacing (jittered)
     max_trees: int = 60000
+    imagery_canopy: bool = True   # read unmapped tree cover out of the orthophoto
     leg_m: float = 250.0               # mission loop leg length (drives flight/video length)
 
     def to_local(self, lat, lon):
@@ -595,9 +596,64 @@ def _sample_polygon(poly: Polygon, spacing: float, rng) -> np.ndarray:
     return P[keep]
 
 
+def canopy_from_imagery(img_path, site: GeoSite, rng, spacing_m=7.0, tex_thr=3.2,
+                        lum_thr=105.0, cluster_m=8.0, cover_thr=0.42):
+    """Tree positions [M,2] read out of the site's own orthophoto.
+
+    OSM tags only a fraction of a real campus's trees -- Cornell's 1.2 km square
+    has 431 of them, all in one corner, which is not a place anything can hide.
+    The orthophoto shows the rest. This crop is leaf-off, so greenness (ExG) is
+    useless; what separates woodland from grass and asphalt there is texture:
+    bare crowns over leaf litter are rough and dark, mown grass and pavement are
+    smooth. Threshold on roughness + darkness, then require the hits to form
+    clusters at crown scale so isolated speckles on parked cars and roof edges
+    drop out, and scatter trees on a jittered grid inside what survives.
+
+    Returned points are raw: the caller still applies the building/road/water
+    exclusions every other tree source goes through.
+    """
+    from PIL import Image as _Im
+    _Im.MAX_IMAGE_PIXELS = None
+
+    def box_mean(a, k):
+        """k x k running mean via an integral image (no scipy dependency)."""
+        k = max(1, int(k) | 1)
+        pad = k // 2
+        b = np.pad(a, pad + 1, mode="edge")
+        S = b.cumsum(0).cumsum(1)
+        S = np.pad(S, ((1, 0), (1, 0)))
+        h, w = a.shape
+        r0 = np.arange(h)[:, None]; c0 = np.arange(w)[None, :]
+        r1, c1 = r0 + k, c0 + k
+        tot = S[r1, c1] - S[r0, c1] - S[r1, c0] + S[r0, c0]
+        return tot / (k * k)
+    img = _Im.open(img_path).convert("RGB")
+    W = int(2 * site.half_m)                                   # work at 1 m/px
+    lum = np.asarray(img.convert("L").resize((W * 4, W * 4), _Im.BILINEAR), dtype=np.float32)
+    tex = lum.reshape(W, 4, W, 4).std(axis=(1, 3))             # roughness at ~0.5 m scale
+    grey = np.asarray(img.resize((W, W), _Im.BILINEAR), dtype=np.float32).mean(-1)
+    raw = ((tex > tex_thr) & (grey < lum_thr)).astype(np.float32)
+    cover = box_mean(raw, max(3, int(cluster_m)))              # crown-scale support
+    mask = cover > cover_thr
+
+    step = max(1.0, spacing_m)
+    gx = np.arange(step / 2, 2 * site.half_m, step)
+    X, Y = np.meshgrid(gx, gx)
+    P = np.stack([X.ravel(), Y.ravel()], 1)
+    P = P + rng.uniform(-step * 0.4, step * 0.4, P.shape)
+    col = np.clip(P[:, 0].astype(int), 0, W - 1)
+    row = np.clip(P[:, 1].astype(int), 0, W - 1)
+    keep = mask[row, col]
+    # image row 0 is the north edge; world y grows north
+    out = np.stack([P[keep, 0] - site.half_m, site.half_m - P[keep, 1]], 1)
+    print(f"  imagery canopy: {100 * mask.mean():.0f}% of the site, {len(out)} candidate trees")
+    return out
+
+
 def build_trees(stage, site: GeoSite, terrain: Terrain, osm, rng, veg_dir: Path, rel_dir: Path,
-                spawn_xy, clear_radius=15.0):
-    """PointInstancer over woodland polygons, scrub, tree rows and gardens."""
+                spawn_xy, clear_radius=15.0, canopy_xy=None):
+    """Instanced trees over woodland polygons, scrub, tree rows, gardens, and
+    (when given) canopy read from the site's orthophoto."""
     exclusion = [p.buffer(2.5) for p, _ in osm["buildings"]]
     exclusion += [l.buffer(ROAD_STYLE.get(t.get("highway"), (4, None))[0] / 2 + 1.0) for l, t in osm["roads"]]
     exclusion += [p for p in osm["water"]]
@@ -629,6 +685,8 @@ def build_trees(stage, site: GeoSite, terrain: Terrain, osm, rng, veg_dir: Path,
         n = max(1, int(line.length / 7.0))
         P = np.array([line.interpolate(i * line.length / n).coords[0] for i in range(n + 1)])
         P = allowed(P + rng.uniform(-0.8, 0.8, P.shape)); pos.append(P); kind.append(np.ones(len(P), int))
+    if canopy_xy is not None and len(canopy_xy):
+        P = allowed(np.asarray(canopy_xy, dtype=float)); pos.append(P); kind.append(np.zeros(len(P), int))
     if not pos:
         return 0, np.zeros((0, 2)), np.zeros(0)
     P = np.vstack(pos); K = np.concatenate(kind)
@@ -818,7 +876,10 @@ def build_site(site: GeoSite, data_dir: Path, veg_dir: Path, out_usd: Path,
         spawn = _snap_to_open_ground(tuple(spawn_override), osm)
     else:
         spawn = choose_spawn(site, terrain, osm, rng)
-    rep.trees, tree_xy, tree_h = build_trees(stage, site, terrain, osm, rng, veg_dir, out_dir, spawn)
+    ortho = next((data_dir / f for f in ("naip.png", "imagery.png") if (data_dir / f).exists()), None)
+    canopy_xy = canopy_from_imagery(ortho, site, rng) if (ortho and site.imagery_canopy) else None
+    rep.trees, tree_xy, tree_h = build_trees(stage, site, terrain, osm, rng, veg_dir, out_dir, spawn,
+                                             canopy_xy=canopy_xy)
 
     sun = UsdLux.DistantLight.Define(stage, "/World/sun")
     sun.CreateIntensityAttr(1700.0); sun.CreateAngleAttr(0.53); sun.CreateColorAttr(Gf.Vec3f(1.0, 0.97, 0.92))

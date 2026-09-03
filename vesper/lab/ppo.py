@@ -80,6 +80,10 @@ class PPOCfg:
     vf_coef: float = 1.0
     max_grad_norm: float = 1.0
     init_std: float = 1.0
+    # extra per-episode scalars to average into the log row. Any info key whose
+    # value is a [num_envs] tensor works; the search task reports how much of the
+    # map got swept and how many vehicles were found and reached.
+    track: tuple = ()
 
 
 class PPO:
@@ -103,6 +107,7 @@ class PPO:
         done_buf = torch.zeros(T, N, device=dev)
         ep_ret = torch.zeros(N, device=dev)
         rets, intercepts, tti = [], [], []
+        extra = {k: [] for k in self.cfg.track}
         for t in range(T):
             self.norm.update(obs)
             nobs = self.norm(obs)
@@ -121,11 +126,17 @@ class PPO:
                         v = float(info["time_to_intercept"][i].item())
                         if v == v:                      # not NaN
                             tti.append(v)
+                for k in extra:
+                    if info is not None and k in info:
+                        v = float(info[k][i].item())
+                        if v == v:
+                            extra[k].append(v)
                 ep_ret[i] = 0.0
             obs = nxt
         with torch.no_grad():
             last_v = self.ac.critic(self.norm(obs)).squeeze(-1)
-        return obs, (obs_buf, act_buf, logp_buf, val_buf, rew_buf, done_buf, last_v), rets, intercepts, tti
+        return (obs, (obs_buf, act_buf, logp_buf, val_buf, rew_buf, done_buf, last_v),
+                rets, intercepts, tti, extra)
 
     def _gae(self, val, rew, done, last_v):
         c = self.cfg
@@ -176,13 +187,15 @@ class PPO:
         obs = self.env.reset()
         history = []
         for it in range(iterations):
-            obs, batch, rets, intercepts, tti = self._rollout(obs)
+            obs, batch, rets, intercepts, tti, extra = self._rollout(obs)
             stats = self.update(batch)
             row = {"iter": it,
                    "ep_return": sum(rets) / len(rets) if rets else float("nan"),
                    "intercept_rate": sum(intercepts) / len(intercepts) if intercepts else float("nan"),
                    "time_to_intercept": sum(tti) / len(tti) if tti else float("nan"),
-                   "episodes": len(rets), **stats}
+                   "episodes": len(rets),
+                   **{k: (sum(v) / len(v) if v else float("nan")) for k, v in extra.items()},
+                   **stats}
             history.append(row)
             if on_log and (it % log_every == 0 or it == iterations - 1):
                 on_log(row)
