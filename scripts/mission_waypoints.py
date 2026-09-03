@@ -65,12 +65,18 @@ async def run(spec: ScenarioSpec):
         break
     import math
     lat0, lon0 = home.latitude_deg, home.longitude_deg
-    print(f"mission: home abs_alt={home.absolute_altitude_m:.1f} rel_alt={home.relative_altitude_m:.1f}", flush=True)
+    # AMSL of the ground, taken from the same estimator stream the goto altitude is judged
+    # against (home.absolute_altitude_m disagreed with it: flights ended up ~20 m low)
+    async for p in drone.telemetry.position():
+        ground_amsl = p.absolute_altitude_m - p.relative_altitude_m
+        print(f"mission: home abs_alt={home.absolute_altitude_m:.1f}; position abs={p.absolute_altitude_m:.1f} "
+              f"rel={p.relative_altitude_m:.1f} -> ground_amsl={ground_amsl:.1f}", flush=True)
+        break
     m2lat = 1.0 / 111111.0
     m2lon = 1.0 / (111111.0 * math.cos(math.radians(lat0)))
     for n, e, alt in spec.waypoints:
         lat, lon = lat0 + n * m2lat, lon0 + e * m2lon
-        abs_alt = home.absolute_altitude_m + alt
+        abs_alt = ground_amsl + alt
         await drone.action.goto_location(lat, lon, abs_alt, 0.0)
         await wait_near_global(drone, lat, lon, alt_rel=alt)
         print(f"mission: corner ({n},{e})", flush=True)
