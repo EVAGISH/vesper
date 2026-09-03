@@ -51,12 +51,21 @@ pg = PegasusInterface()
 from isaacsim.core.api import World  # noqa: E402  (after app init)
 
 pg._world = World(**pg._world_settings)
-pg.load_environment(SIMULATION_ENVIRONMENTS["Default Environment"])
-build_world(pg.world, spec)
+if spec.terrain is None:
+    pg.load_environment(SIMULATION_ENVIRONMENTS["Default Environment"])
+build_world(pg.world, spec)  # terrain reference (if any) + prism buildings
 
 stage = omni.usd.get_context().get_stage()
-UsdLux.DomeLight.Define(stage, "/World/dome_light").CreateIntensityAttr(1500.0)
-UsdLux.DistantLight.Define(stage, "/World/sun").CreateIntensityAttr(3000.0)
+dome = UsdLux.DomeLight.Define(stage, "/World/dome_light")
+dome.CreateIntensityAttr(1000.0 if not spec.sky_hdr else 300.0)
+if spec.sky_hdr:
+    from pathlib import Path
+    hdr = Path(spec.sky_hdr)
+    if not hdr.is_absolute():
+        hdr = Path(__file__).resolve().parents[1] / hdr
+    dome.CreateTextureFileAttr(str(hdr))
+    dome.CreateTextureFormatAttr("latlong")
+UsdLux.DistantLight.Define(stage, "/World/sun").CreateIntensityAttr(3000.0 if not spec.sky_hdr else 1000.0)
 
 mavlink_config = PX4MavlinkBackendConfig({
     "vehicle_id": 0,
@@ -74,7 +83,7 @@ vehicle = Multirotor(
     config=config,
 )
 
-CAM_POS = np.array([-12.0, 7.0, 22.0])  # high vantage west of the corridor (corridor runs +y)
+CAM_POS = np.array(spec.overview_cam or [-12.0, 7.0, 22.0])  # default: high vantage west of the corridor
 camera = Camera(
     prim_path="/World/overview_cam",
     position=CAM_POS,
@@ -84,13 +93,13 @@ camera = Camera(
 fpv_camera = Camera(
     prim_path="/World/fpv_cam",
     position=np.array([0.0, 0.0, 0.5]),
-    resolution=(640, 360),
+    resolution=(1280, 720),
 )
 
 def pose_fpv_camera(pos, q_wxyz):
-    """Strap the FPV cam to the body: slightly forward, pitched 15deg down."""
+    """Strap the FPV cam to the body: slightly forward, pitched 25deg down."""
     r_body = Rotation.from_quat([q_wxyz[1], q_wxyz[2], q_wxyz[3], q_wxyz[0]])
-    r_cam = r_body * Rotation.from_euler("y", 15, degrees=True)
+    r_cam = r_body * Rotation.from_euler("y", 25, degrees=True)
     cam_pos = pos + r_body.apply(np.array([0.12, 0.0, -0.02]))
     q = r_cam.as_quat()  # xyzw
     fpv_camera.set_world_pose(cam_pos, np.array([q[3], q[0], q[1], q[2]]))
@@ -106,6 +115,15 @@ def aim_camera_at_drone(target):
 pg.world.reset()
 camera.initialize()
 fpv_camera.initialize()
+# lenses: FPV ~120 deg horizontal (action-cam wide angle); overview ~65 deg. Both see 3 km.
+FPV_HFOV_DEG, OVERVIEW_HFOV_DEG = 120.0, 65.0
+def set_hfov(cam, hfov_deg):
+    ap = cam.get_horizontal_aperture()
+    cam.set_focal_length(ap / (2.0 * np.tan(np.radians(hfov_deg) / 2.0)))
+    cam.set_clipping_range(0.05, 3000.0)
+set_hfov(fpv_camera, FPV_HFOV_DEG)
+set_hfov(camera, OVERVIEW_HFOV_DEG)
+print(f"hfov: fpv {np.degrees(fpv_camera.get_horizontal_fov()):.0f} deg, overview {np.degrees(camera.get_horizontal_fov()):.0f} deg", flush=True)
 
 # --- run artifacts: capture + scenario + trajectory --------------------------
 cap = RunCapture(f"fly-{spec.world}")
