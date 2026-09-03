@@ -86,7 +86,9 @@ def resolve_vehicle(name_or_path: str = None) -> dict:
     """Vehicle spec from a VEHICLE_SPECS key or a bare USD path."""
     key = name_or_path or DEFAULT_VEHICLE
     spec = dict(VEHICLE_SPECS.get(key, {"usd": os.path.abspath(key), "yaw_offset": 0.0}))
-    if key == "cart" and not os.path.exists(spec["usd"]):
+    if key == "cart":
+        # Always regenerate: assets/ is gitignored and excluded from the droplet
+        # rsync, so a cached copy silently masks edits to the generator.
         from vesper.worlds.vehicle import write_vehicle_usd
         write_vehicle_usd(spec["usd"])
     if spec.pop("needs_rigid_wrapper", False):
@@ -100,7 +102,12 @@ def vehicle_cfg(spec: dict) -> RigidObjectCfg:
     kw = dict(
         usd_path=spec["usd"],
         rigid_props=sim_utils.RigidBodyPropertiesCfg(
-            disable_gravity=False, max_linear_velocity=40.0, max_angular_velocity=4.0,
+            # max_angular_velocity is in DEG/S (max_linear_velocity is m/s). The
+            # old value of 4.0 was meant as rad/s and clamped the hull to
+            # 4 deg/s = 0.07 rad/s, so it could not turn at all -- that, not the
+            # missing yaw command, was the real cause of the crab-walk. 360 deg/s
+            # leaves headroom above the servo's 3.6 rad/s (206 deg/s) authority.
+            disable_gravity=False, max_linear_velocity=40.0, max_angular_velocity=360.0,
             linear_damping=0.2, angular_damping=1.0,
         ),
     )
