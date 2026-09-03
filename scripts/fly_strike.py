@@ -33,7 +33,7 @@ import torch  # noqa: E402
 from isaacsim.core.utils.extensions import enable_extension  # noqa: E402
 enable_extension("isaacsim.sensors.camera")
 from isaacsim.sensors.camera import Camera  # noqa: E402
-from isaacsim.core.utils import rotations as rot_utils  # noqa: E402
+import isaacsim.core.utils.numpy.rotations as rot_utils  # noqa: E402
 
 from vesper.capture import RunCapture  # noqa: E402
 from vesper.lab.ppo import ActorCritic, RunningNorm  # noqa: E402

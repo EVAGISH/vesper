@@ -52,13 +52,20 @@ WATER_KEYS = {"water", "reservoir", "basin"}
 WOOD_KEYS = {"wood", "forest"}
 
 # tree species: (file stem, target height m, share in woods, share in gardens/rows)
+#
+# Every entry MUST be a plain-mesh asset -- no PointInstancers of its own, or Isaac
+# hangs a 100x-oversized branch cluster over the map (see _has_nested_instancer,
+# which enforces this at build time). Of the 19 NVIDIA trees fetched only these 6
+# qualify; Yellow_Pine / Black_Oak / Fraxinus / the maples / oaks / firs all nest.
+# Target heights are kept near each asset's native height so the uniform scale
+# stays ~1x and leaf detail doesn't stretch.
 SPECIES = [
-    ("Yellow_Pine", 20.0, 0.45, 0.05),
-    ("Norway_Spruce", 18.0, 0.15, 0.05),
-    ("Gray_Birch", 12.0, 0.15, 0.25),
-    ("Black_Oak", 15.0, 0.12, 0.15),
-    ("Lombardy_Poplar", 20.0, 0.05, 0.30),
-    ("Fraxinus", 10.0, 0.08, 0.20),
+    ("Norway_Spruce", 18.0, 0.34, 0.05),      # native 17.7 m
+    ("Lombardy_Poplar", 15.0, 0.20, 0.28),    # native 13.7 m
+    ("Largetooth_Aspen", 9.0, 0.20, 0.14),    # native  7.9 m
+    ("American_Beech", 7.0, 0.16, 0.15),      # native  6.0 m
+    ("Hawthorn", 8.0, 0.06, 0.24),            # native  8.6 m
+    ("Gray_Birch", 4.0, 0.04, 0.14),          # native  3.3 m -- scrub/understory
 ]
 
 
@@ -72,6 +79,7 @@ class GeoSite:
     seed: int = 0
     tree_spacing_m: float = 6.0        # woodland grid spacing (jittered)
     max_trees: int = 60000
+    leg_m: float = 250.0               # mission loop leg length (drives flight/video length)
 
     def to_local(self, lat, lon):
         x = (np.asarray(lon) - self.lon0) * 111320.0 * math.cos(math.radians(self.lat0))
@@ -437,6 +445,47 @@ def _tree_native_height_m(usd_path: Path) -> float:
     return float((zmax - zmin) * UsdGeom.GetStageMetersPerUnit(st))
 
 
+def _extent_from_descendants(prim) -> "Vt.Vec3fArray | None":
+    """Bounding extent of every descendant mesh's points, expressed in `prim`'s own space."""
+    cache = UsdGeom.XformCache()
+    inv = np.array(cache.GetLocalToWorldTransform(prim)).T
+    try:
+        inv = np.linalg.inv(inv)
+    except np.linalg.LinAlgError:
+        return None
+    lo = np.full(3, np.inf); hi = np.full(3, -np.inf)
+    for d in Usd.PrimRange(prim):
+        if d == prim or not d.IsA(UsdGeom.Mesh):
+            continue
+        pts = UsdGeom.Mesh(d).GetPointsAttr().Get()
+        if not pts:
+            continue
+        m = np.array(cache.GetLocalToWorldTransform(d))
+        w = np.asarray(pts) @ m[:3, :3] + m[3, :3]                  # -> world
+        local = w @ inv[:3, :3].T + inv[:3, 3]                      # -> prim space
+        lo = np.minimum(lo, local.min(axis=0)); hi = np.maximum(hi, local.max(axis=0))
+    if not np.isfinite(lo).all():
+        return None
+    return Vt.Vec3fArray([Gf.Vec3f(*lo.astype(float)), Gf.Vec3f(*hi.astype(float))])
+
+
+def _has_nested_instancer(usd_path: Path) -> bool:
+    """True if a tree asset contains PointInstancers of its own (branch clusters).
+
+    Isaac's renderer draws PointInstancer prototype prims directly, in addition to
+    instancing them. We hide our top-level prototypes by parking them under an
+    Xform 10 km down, which works because instances inherit only the prototype
+    ROOT's local ops. That trick does NOT reach instancers nested *inside* a
+    prototype: Isaac draws those branch prototypes without the ancestor
+    transforms, so they land at the origin at native (centimetre) scale -- a
+    ~100x-oversized branch cluster hanging over the entire map, with a matching
+    kilometre-wide shadow. Such assets are unusable as prototypes; pick a
+    species whose geometry is plain meshes.
+    """
+    st = Usd.Stage.Open(str(usd_path))
+    return any(p.GetTypeName() == "PointInstancer" for p in st.Traverse())
+
+
 def _sample_polygon(poly: Polygon, spacing: float, rng) -> np.ndarray:
     minx, miny, maxx, maxy = poly.bounds
     xs = np.arange(minx, maxx, spacing); ys = np.arange(miny, maxy, spacing)
@@ -508,6 +557,12 @@ def build_trees(stage, site: GeoSite, terrain: Terrain, osm, rng, veg_dir: Path,
     protos = []
     for name, target_h, _, _ in SPECIES:
         usd = veg_dir / "Trees" / f"{name}.usd"
+        if _has_nested_instancer(usd):
+            raise ValueError(
+                f"tree species {name!r} contains nested PointInstancers; Isaac would draw its "
+                f"branch prototypes at origin at native scale (giant tree in the sky). "
+                f"Use a plain-mesh species -- see _has_nested_instancer()."
+            )
         native = _tree_native_height_m(usd)
         s = target_h / max(native, 0.1) * UsdGeom.GetStageMetersPerUnit(Usd.Stage.Open(str(usd)))
         xf = UsdGeom.Xform.Define(stage, f"/World/trees/protos/{name}")
@@ -521,8 +576,15 @@ def build_trees(stage, site: GeoSite, terrain: Terrain, osm, rng, veg_dir: Path,
                 mesh = UsdGeom.Mesh(prim); pts_ = mesh.GetPointsAttr().Get()
                 if pts_:
                     mesh.CreateExtentAttr(UsdGeom.PointBased(mesh).ComputeExtent(pts_))
-                else:   # empty mesh with a garbage extent (spruce trunk): neutralize it
-                    mesh.CreateExtentAttr(Vt.Vec3fArray([Gf.Vec3f(0, 0, 0), Gf.Vec3f(0, 0, 0)]))
+                else:
+                    # A Mesh with no points of its own but real geometry underneath
+                    # (Norway_Spruce's "sprucetrunk" parents all 854k points). USD treats
+                    # a Mesh as a leaf boundable, so whatever extent sits here is the
+                    # bound for everything below: zeroing it culls the whole tree, and the
+                    # asset's shipped value is garbage. Author the union of the descendants.
+                    ext = _extent_from_descendants(prim)
+                    mesh.CreateExtentAttr(ext if ext is not None
+                                          else Vt.Vec3fArray([Gf.Vec3f(0, 0, 0), Gf.Vec3f(0, 0, 0)]))
     inst.CreatePrototypesRel().SetTargets(protos)
     inst.CreateProtoIndicesAttr(Vt.IntArray.FromNumpy(proto_idx.astype(np.int32)))
     inst.CreatePositionsAttr(Vt.Vec3fArray.FromNumpy(np.column_stack([P, z]).astype(np.float32)))
@@ -652,7 +714,7 @@ def build_site(site: GeoSite, data_dir: Path, veg_dir: Path, out_usd: Path) -> B
     sky = UsdLux.DomeLight.Define(stage, "/World/sky")
     sky.CreateIntensityAttr(480.0); sky.CreateColorAttr(Gf.Vec3f(0.42, 0.60, 0.90))
 
-    wps, tk, gz = plan_loop(site, terrain, osm, spawn, tree_xy=tree_xy, tree_h=tree_h)
+    wps, tk, gz = plan_loop(site, terrain, osm, spawn, leg_m=site.leg_m, tree_xy=tree_xy, tree_h=tree_h)
     rep.spawn_xy = list(spawn); rep.spawn_ground_z = round(gz, 3); rep.waypoints = wps; rep.takeoff_alt_m = tk
     stage.GetRootLayer().customLayerData = {"vesper_site": json.dumps({"lat0": site.lat0, "lon0": site.lon0, "half_m": site.half_m})}
     stage.GetRootLayer().Save()
