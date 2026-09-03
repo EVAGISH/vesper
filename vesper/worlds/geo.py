@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import json
 import math
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -514,6 +515,52 @@ def _extent_from_descendants(prim) -> "Vt.Vec3fArray | None":
     return Vt.Vec3fArray([Gf.Vec3f(*lo.astype(float)), Gf.Vec3f(*hi.astype(float))])
 
 
+def _prepare_species_usd(src_usd: Path, out_dir: Path, name: str, target_h: float) -> Path:
+    """One prepared asset per species: the raw NVIDIA tree scaled to `target_h`
+    metres with its extents repaired, saved next to the world.
+
+    Trees reference this file instanceable, so the scale and extent fixes are
+    authored once and shared by every copy (an instanceable prim cannot carry
+    overs on its own descendants, which is why this has to be a separate layer).
+    """
+    if _has_nested_instancer(src_usd):
+        raise ValueError(
+            f"tree species {name!r} contains nested PointInstancers; Isaac draws their branch "
+            f"prototypes at the origin at native scale (the giant tree in the sky). "
+            f"Use a plain-mesh species -- see _has_nested_instancer()."
+        )
+    out = Path(out_dir) / "species" / f"{name}.usd"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    if out.exists():
+        out.unlink()
+    stage = Usd.Stage.CreateNew(str(out))
+    UsdGeom.SetStageUpAxis(stage, UsdGeom.Tokens.z)
+    UsdGeom.SetStageMetersPerUnit(stage, 1.0)
+    root = UsdGeom.Xform.Define(stage, "/Tree")
+    stage.SetDefaultPrim(root.GetPrim())
+    native = _tree_native_height_m(src_usd)
+    s = target_h / max(native, 0.1) * UsdGeom.GetStageMetersPerUnit(Usd.Stage.Open(str(src_usd)))
+    root.AddScaleOp().Set(Gf.Vec3f(s, s, s))
+    root.GetPrim().GetReferences().AddReference(os.path.relpath(src_usd, out.parent))
+    for prim in Usd.PrimRange(root.GetPrim()):
+        if not prim.IsA(UsdGeom.Mesh):
+            continue
+        mesh = UsdGeom.Mesh(prim)
+        pts = mesh.GetPointsAttr().Get()
+        if pts:
+            mesh.CreateExtentAttr(UsdGeom.PointBased(mesh).ComputeExtent(pts))
+        else:
+            # A Mesh with no points of its own but real geometry underneath (the spruce's
+            # "sprucetrunk" parents 854k points). USD treats a Mesh as a leaf boundable, so
+            # this extent bounds everything below it: zeroing it culls the whole tree and the
+            # asset's shipped value is garbage. Author the union of the descendants.
+            ext = _extent_from_descendants(prim)
+            if ext is not None:
+                mesh.CreateExtentAttr(ext)
+    stage.GetRootLayer().Save()
+    return out
+
+
 def _has_nested_instancer(usd_path: Path) -> bool:
     """True if a tree asset contains PointInstancers of its own (branch clusters).
 
@@ -593,49 +640,31 @@ def build_trees(stage, site: GeoSite, terrain: Terrain, osm, rng, veg_dir: Path,
     yaw = rng.uniform(0, 2 * np.pi, n)
     z = terrain.height(P[:, 0], P[:, 1]) - 0.05
 
-    inst = UsdGeom.PointInstancer.Define(stage, "/World/trees")
-    # Isaac's renderer draws the prototype prims themselves (at their world pose, without
-    # the prototype root's own xformOps), so park them 10 km underground. Instances only
-    # inherit the prototype ROOT's local ops (the scale), not this parent's translate.
-    hidden = UsdGeom.Xform.Define(stage, "/World/trees/protos")
-    hidden.AddTranslateOp().Set(Gf.Vec3d(0.0, 0.0, -10000.0))
-    protos = []
-    for name, target_h, _, _ in SPECIES:
-        usd = veg_dir / "Trees" / f"{name}.usd"
-        if _has_nested_instancer(usd):
-            raise ValueError(
-                f"tree species {name!r} contains nested PointInstancers; Isaac would draw its "
-                f"branch prototypes at origin at native scale (giant tree in the sky). "
-                f"Use a plain-mesh species -- see _has_nested_instancer()."
-            )
-        native = _tree_native_height_m(usd)
-        s = target_h / max(native, 0.1) * UsdGeom.GetStageMetersPerUnit(Usd.Stage.Open(str(usd)))
-        xf = UsdGeom.Xform.Define(stage, f"/World/trees/protos/{name}")
+    # One Xform per tree holding an *instanceable* reference to a prepared species
+    # asset -- deliberately NOT a PointInstancer.
+    #
+    # Isaac draws PointInstancer prototype prims as ordinary geometry in addition to
+    # instancing them, and it does so ignoring the prototype root's own xformOps AND
+    # the transforms of its ancestors. So neither scaling the prototype nor parking it
+    # under an Xform 10 km down removes it: the asset lands at the world origin at its
+    # native (centimetre) scale, which is the ~1.7 km pine that hung over every frame.
+    # Native USD scenegraph instancing has no such problem -- it is the same mechanism
+    # Isaac Lab uses to clone environments -- and gives the same memory win, since all
+    # trees of a species share one prototype.
+    prepared = {name: _prepare_species_usd(veg_dir / "Trees" / f"{name}.usd", rel_dir, name, target_h)
+                for name, target_h, _, _ in SPECIES}
+    UsdGeom.Scope.Define(stage, "/World/trees")
+    for i in range(n):
+        name = SPECIES[int(proto_idx[i])][0]
+        xf = UsdGeom.Xform.Define(stage, f"/World/trees/t{i:05d}")
+        xf.AddTranslateOp().Set(Gf.Vec3d(float(P[i, 0]), float(P[i, 1]), float(z[i])))
+        xf.AddRotateZOp().Set(float(np.degrees(yaw[i])))
+        s = float(scale[i])
         xf.AddScaleOp().Set(Gf.Vec3f(s, s, s))
-        import os
-        xf.GetPrim().GetReferences().AddReference(os.path.relpath(usd, rel_dir))
-        protos.append(xf.GetPath())
-        # some NVIDIA assets ship garbage extents (spruce): re-author from points so culling works
-        for prim in Usd.PrimRange(xf.GetPrim()):
-            if prim.IsA(UsdGeom.Mesh):
-                mesh = UsdGeom.Mesh(prim); pts_ = mesh.GetPointsAttr().Get()
-                if pts_:
-                    mesh.CreateExtentAttr(UsdGeom.PointBased(mesh).ComputeExtent(pts_))
-                else:
-                    # A Mesh with no points of its own but real geometry underneath
-                    # (Norway_Spruce's "sprucetrunk" parents all 854k points). USD treats
-                    # a Mesh as a leaf boundable, so whatever extent sits here is the
-                    # bound for everything below: zeroing it culls the whole tree, and the
-                    # asset's shipped value is garbage. Author the union of the descendants.
-                    ext = _extent_from_descendants(prim)
-                    mesh.CreateExtentAttr(ext if ext is not None
-                                          else Vt.Vec3fArray([Gf.Vec3f(0, 0, 0), Gf.Vec3f(0, 0, 0)]))
-    inst.CreatePrototypesRel().SetTargets(protos)
-    inst.CreateProtoIndicesAttr(Vt.IntArray.FromNumpy(proto_idx.astype(np.int32)))
-    inst.CreatePositionsAttr(Vt.Vec3fArray.FromNumpy(np.column_stack([P, z]).astype(np.float32)))
-    q = np.column_stack([np.zeros(n), np.zeros(n), np.sin(yaw / 2), np.cos(yaw / 2)]).astype(np.float32)   # (x,y,z,w)
-    inst.CreateOrientationsAttr(Vt.QuathArray.FromNumpy(q))
-    inst.CreateScalesAttr(Vt.Vec3fArray.FromNumpy(np.column_stack([scale, scale, scale]).astype(np.float32)))
+        prim = xf.GetPrim()
+        prim.GetReferences().AddReference(os.path.relpath(prepared[name], rel_dir))
+        prim.SetInstanceable(True)
+
     heights = np.array([SPECIES[i][1] for i in proto_idx]) * scale
     return n, P, heights
 
