@@ -26,6 +26,7 @@ import isaaclab.sim as sim_utils
 from isaaclab.assets import Articulation, RigidObject, RigidObjectCfg
 from isaaclab.utils import configclass
 from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR
+from pxr import Usd, UsdGeom, UsdPhysics
 
 from vesper.control.se3 import SE3Controller
 from vesper.lab.vesper_quad import VesperQuadEnv, VesperQuadEnvCfg
@@ -37,29 +38,62 @@ _CART_USD = os.path.abspath(
 # yaw_offset rotates the model so its nose points +X, which is the heading
 # convention the drive controller and the reset pose both use.
 VEHICLE_SPECS = {
-    # NVIDIA's stock forklift prop. A plain Xform with collision meshes -- not an
-    # articulation -- so it drops straight into a RigidObject. Modelled Z-up in
-    # metres, 1.2 x 3.5 x 2.2 m, long axis Y, hence the -90 deg yaw.
-    # It already ships convexHull colliders (a triangle mesh would be illegal on a
-    # dynamic body), so the collision setup needs no overriding here.
+    # NVIDIA's stock forklift prop: a plain Xform, not an articulation, modelled
+    # Z-up in metres at 1.2 x 3.5 x 2.2 m with long axis Y (hence the -90 deg
+    # yaw). Its colliders are already convexHull, so nothing needs
+    # re-approximating, but it has no RigidBodyAPI -- see make_rigid_wrapper.
     "forklift": {"usd": f"{ISAAC_NUCLEUS_DIR}/Props/Forklift/forklift.usd",
-                 "yaw_offset": -math.pi / 2, "mass": 2700.0},
-    # Generated fallback (vesper.worlds.vehicle): box collider, cheap to clone.
-    "cart": {"usd": _CART_USD, "yaw_offset": 0.0, "mass": None},
+                 "yaw_offset": -math.pi / 2, "mass": 2700.0,
+                 "needs_rigid_wrapper": True},
+    # Generated fallback (vesper.worlds.vehicle): box collider, cheap to clone,
+    # and it authors its own RigidBodyAPI and mass.
+    "cart": {"usd": _CART_USD, "yaw_offset": 0.0},
 }
 DEFAULT_VEHICLE = os.environ.get("VESPER_VEHICLE", "forklift")
+
+
+def make_rigid_wrapper(src_usd: str, out_path: str, mass: float | None = None) -> str:
+    """Wrap a prop USD in a prim that carries RigidBodyAPI, and return its path.
+
+    Isaac Lab's USD spawner only *modifies* rigid-body properties -- it never
+    applies the schema (schemas.define_* does, but spawn_from_usd calls
+    schemas.modify_*). Stock props like the forklift ship with colliders but no
+    RigidBodyAPI, so spawning one straight from UsdFileCfg dies with "Failed to
+    find a rigid body when resolving ...". Authoring a thin local layer that
+    references the asset and applies the schema is the same trick geo.py uses
+    for tree species, and it keeps the fix in USD rather than in Isaac internals.
+    """
+    out = os.path.abspath(out_path)
+    os.makedirs(os.path.dirname(out), exist_ok=True)
+    if os.path.exists(out):
+        os.remove(out)
+    stage = Usd.Stage.CreateNew(out)
+    UsdGeom.SetStageUpAxis(stage, UsdGeom.Tokens.z)
+    UsdGeom.SetStageMetersPerUnit(stage, 1.0)
+    root = UsdGeom.Xform.Define(stage, "/Vehicle")
+    stage.SetDefaultPrim(root.GetPrim())
+    root.GetPrim().GetReferences().AddReference(src_usd)
+    UsdPhysics.RigidBodyAPI.Apply(root.GetPrim())
+    if mass is not None:
+        # Author mass here too: modify_mass_properties would likewise skip a
+        # prim with no MassAPI, and PhysX would infer ~9 t from hull volume.
+        UsdPhysics.MassAPI.Apply(root.GetPrim()).CreateMassAttr(float(mass))
+    stage.GetRootLayer().Save()
+    return out
 
 
 def resolve_vehicle(name_or_path: str = None) -> dict:
     """Vehicle spec from a VEHICLE_SPECS key or a bare USD path."""
     key = name_or_path or DEFAULT_VEHICLE
-    if key in VEHICLE_SPECS:
-        spec = dict(VEHICLE_SPECS[key])
-        if key == "cart" and not os.path.exists(_CART_USD):
-            from vesper.worlds.vehicle import write_vehicle_usd
-            write_vehicle_usd(_CART_USD)
-        return spec
-    return {"usd": os.path.abspath(key), "yaw_offset": 0.0, "mass": None}
+    spec = dict(VEHICLE_SPECS.get(key, {"usd": os.path.abspath(key), "yaw_offset": 0.0}))
+    if key == "cart" and not os.path.exists(spec["usd"]):
+        from vesper.worlds.vehicle import write_vehicle_usd
+        write_vehicle_usd(spec["usd"])
+    if spec.pop("needs_rigid_wrapper", False):
+        spec["usd"] = make_rigid_wrapper(
+            spec["usd"], os.path.join(os.path.dirname(_CART_USD), f"{key}_rb.usd"),
+            spec.pop("mass", None))
+    return spec
 
 
 def vehicle_cfg(spec: dict) -> RigidObjectCfg:
@@ -70,10 +104,6 @@ def vehicle_cfg(spec: dict) -> RigidObjectCfg:
             linear_damping=0.2, angular_damping=1.0,
         ),
     )
-    if spec.get("mass"):
-        # Otherwise PhysX infers mass from collider volume x default density,
-        # which makes a forklift-sized hull weigh about nine tonnes.
-        kw["mass_props"] = sim_utils.MassPropertiesCfg(mass=spec["mass"])
     return RigidObjectCfg(
         prim_path="/World/envs/env_.*/Vehicle",
         spawn=sim_utils.UsdFileCfg(**kw),
@@ -108,6 +138,7 @@ class PursuitEnv(VesperQuadEnv):
         self.ctrl.accel_limit = cfg.accel_limit
         self.spawn_offsets = torch.zeros(self.num_envs, 3, device=self.device)
         self.veh_heading = torch.zeros(self.num_envs, device=self.device)
+        self.veh_turn_rate = torch.zeros(self.num_envs, device=self.device)
         self.prev_dist = torch.full((self.num_envs,), self.tcfg.target_max_r, device=self.device)
         self._setpoint = torch.zeros(self.num_envs, 3, device=self.device)
         self._reward = torch.zeros(self.num_envs, device=self.device)
@@ -170,7 +201,13 @@ class PursuitEnv(VesperQuadEnv):
         c = self.tcfg
         if c.target_speed <= 0:
             return
-        self.veh_heading += torch.randn(self.num_envs, device=self.device, generator=self.gen) * c.target_turn_std
+        # Steer at a bounded rate: the heading is the integral of a steering rate
+        # the hull can actually deliver, not a random walk it has to chase.
+        noise = torch.randn(self.num_envs, device=self.device, generator=self.gen)
+        self.veh_turn_rate = (self.veh_turn_rate * c.target_turn_decay
+                              + noise * c.target_turn_jitter).clamp(-c.target_yaw_rate,
+                                                                    c.target_yaw_rate)
+        self.veh_heading = self.veh_heading + self.veh_turn_rate * self._dt
         # steer back toward the arena before driving out of it
         p = self.target_pos
         r = p[:, :2].norm(dim=1)
@@ -178,6 +215,7 @@ class PursuitEnv(VesperQuadEnv):
         if out.any():
             inward = torch.atan2(-p[out, 1], -p[out, 0])
             self.veh_heading[out] = inward
+            self.veh_turn_rate[out] = 0.0
         vel = self._vehicle.data.root_vel_w.clone()
         vel[:, 0] = c.target_speed * torch.cos(self.veh_heading)
         vel[:, 1] = c.target_speed * torch.sin(self.veh_heading)
@@ -189,7 +227,11 @@ class PursuitEnv(VesperQuadEnv):
                           1 - 2 * (q[:, 2] ** 2 + q[:, 3] ** 2))
         want = self.veh_heading + self._veh_yaw_offset
         err = torch.atan2(torch.sin(want - yaw), torch.cos(want - yaw))
-        vel[:, 5] = (err / self._dt).clamp(-c.target_yaw_rate, c.target_yaw_rate)
+        # Correction authority, not a physical turn limit: the steering rate above
+        # is already capped at target_yaw_rate, so the servo needs headroom above
+        # it to close residual error instead of trailing at exactly the cap.
+        lim = 3.0 * c.target_yaw_rate
+        vel[:, 5] = (err / self._dt).clamp(-lim, lim)
         self._vehicle.write_root_velocity_to_sim(vel)
 
     def _apply_action(self):
@@ -243,6 +285,7 @@ class PursuitEnv(VesperQuadEnv):
         tp, _ = T.sample_targets(k, self.tcfg, dev, g)
         heading = torch.rand(k, device=dev, generator=g) * (2 * torch.pi)
         self.veh_heading[env_ids] = heading
+        self.veh_turn_rate[env_ids] = 0.0
         root = torch.zeros(k, 13, device=dev)
         root[:, :3] = tp + self.scene.env_origins[env_ids]
         root[:, 2] = self.scene.env_origins[env_ids][:, 2] + self.tcfg.target_h

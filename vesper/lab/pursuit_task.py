@@ -26,9 +26,13 @@ class PursuitCfg:
 
     # --- moving target (constant-velocity with heading jitter; bounces at arena edge) ---
     target_speed: float = 4.0         # m/s (0 -> parked vehicle)
-    target_turn_std: float = 0.03     # rad/step heading noise; small enough that
-                                      # the hull's yaw rate can actually track it
-    target_yaw_rate: float = 1.2      # max rad/s the hull turns to face its travel
+    # The vehicle steers at a bounded rate rather than teleporting its heading:
+    # the old per-step heading noise (0.03 rad at 50 Hz = 1.5 rad/s) demanded
+    # more turn rate than any hull could deliver, so the model lagged ~40 deg
+    # behind its own velocity and visibly crabbed.
+    target_yaw_rate: float = 1.2      # rad/s cap on steering (3.3 m radius at 4 m/s)
+    target_turn_jitter: float = 0.06  # rad/s of steering-rate noise per step
+    target_turn_decay: float = 0.995  # steering relaxes back toward straight
 
     # --- guidance action ---
     look_ahead: float = 10.0          # tanh(action) * look_ahead = setpoint offset from drone (m)

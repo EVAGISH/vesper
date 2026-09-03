@@ -81,9 +81,16 @@ def write_vehicle_usd(out_path, paint=(0.82, 0.45, 0.10)) -> Path:
     dark = _material(stage, "/Vehicle/Looks/dark", (0.16, 0.17, 0.19))
     rubber = _material(stage, "/Vehicle/Looks/rubber", (0.07, 0.07, 0.075), rough=0.95)
 
-    # chassis carries the collider; everything else is visual
-    chassis = _box(stage, "/Vehicle/chassis", CHASSIS, (0.0, 0.0, CHASSIS_Z), body)
-    UsdPhysics.CollisionAPI.Apply(chassis.GetPrim())
+    # Everything drawn is visual. The single collider is an invisible box that
+    # spans wheel-bottom to chassis-top: putting it on the chassis instead left
+    # the collider floor 0.28 m above the model origin, so the body rested with
+    # its origin at -0.28 and the wheels buried in the terrain.
+    _box(stage, "/Vehicle/chassis", CHASSIS, (0.0, 0.0, CHASSIS_Z), body)
+    col_h = CHASSIS_Z + CHASSIS[2] / 2
+    col = _box(stage, "/Vehicle/collision", (CHASSIS[0], TRACK_W, col_h),
+               (0.0, 0.0, col_h / 2), body)
+    UsdPhysics.CollisionAPI.Apply(col.GetPrim())
+    UsdGeom.Imageable(col).CreateVisibilityAttr(UsdGeom.Tokens.invisible)
 
     deck_z = CHASSIS_Z + CHASSIS[2] / 2 + DECK[2] / 2
     _box(stage, "/Vehicle/deck", DECK, (-0.72, 0.0, deck_z), dark)
