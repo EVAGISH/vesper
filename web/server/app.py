@@ -186,7 +186,7 @@ JOB_KINDS = {
     "live": "scripts/live_world.py assets/cornell/cornell.usd",
     # persistent sim: world stays loaded, feeds + /state stay up, deploy/reset
     # are instant commands instead of a fresh Isaac boot
-    "warm": "scripts/warm_session.py --num_envs 16",
+    "warm": "scripts/warm_session.py --num_envs 8 --cameras --policy runs/friend-checkpoints/search.pt",
 }
 SCENARIO_FILE = re.compile(r"^[\w.-]+\.json$")
 

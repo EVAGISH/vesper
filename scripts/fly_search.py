@@ -19,6 +19,7 @@ Only environment 0 is filmed; the rest run alongside it for context.
 """
 import argparse
 import json
+import os
 
 from isaaclab.app import AppLauncher
 
@@ -41,9 +42,16 @@ app = AppLauncher(args).app
 
 import carb  # noqa: E402
 
-# Same guard as fly_mission.py: Kit's asset streamer dies mid-flight on big
-# tree worlds (cubric HtoD assert) -- load textures up front instead.
-carb.settings.get_settings().set("/rtx-transient/resourcemanager/enableTextureStreaming", False)
+# Full RTX settings copied from fly_mission.py, which renders this same 16k-tree
+# world without the cubric HtoD / CUDA illegal-access crash the Lab render path
+# hits. Textures up front (no streaming), DLSS off (execMode 0 -> no DLSS buffer
+# allocation), FXAA instead of temporal AA, motion blur off.
+_s = carb.settings.get_settings()
+_s.set("/rtx-transient/resourcemanager/enableTextureStreaming", False)
+_s.set("/rtx/post/aa/op", 2)
+_s.set("/rtx/post/dlss/execMode", 0)
+_s.set("/rtx/post/motionblur/enabled", False)
+_s.set("/rtx/post/motionblur/maxBlurDiameterFraction", 0.0)
 
 import numpy as np  # noqa: E402
 import torch  # noqa: E402
@@ -59,6 +67,14 @@ from vesper.lab.ppo import ActorCritic, RunningNorm  # noqa: E402
 from vesper.lab.search_env import SearchEnv, SearchEnvCfg  # noqa: E402
 
 cfg = SearchEnvCfg()
+# The RTX-render crash on the 16k-tree world faults inside omni.physx.fabric's
+# GPU sync (DirectGpuHelper). Fabric is a throughput optimization we don't need
+# for a small render run -- turning it off avoids that path entirely.
+if not os.environ.get("VESPER_KEEP_FABRIC"):
+    try:
+        cfg.sim.use_fabric = False
+    except Exception:                                      # older/newer cfg shape
+        pass
 cfg.scene.num_envs = args.num_envs
 cfg.scene.env_spacing = 0.0
 cfg.n_targets = args.targets
