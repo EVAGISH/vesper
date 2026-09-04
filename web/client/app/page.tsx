@@ -3,12 +3,13 @@
 import Link from "next/link";
 import { useEffect, useState } from "react";
 import { JobButton, JobsPanel } from "@/components/job-controls";
+import { LiveViewport } from "@/components/live-viewport";
 import { SiteMap } from "@/components/site-map";
 import { useVesper } from "@/components/vesper-provider";
 import { fetchJSON, fmtTime, KIND_COLOR, runKind } from "@/lib/vesper";
 
 // Operator home: downlink + AO map. Live sessions start with one click; the
-// embedded in-page WebRTC viewport is the next step on this page.
+// in-page WebRTC viewport connects once a live session is up on the box.
 
 const LIVE_POLL_MS = 15000;
 
@@ -34,6 +35,12 @@ function Panel({ title, right, children }: {
 export default function Live() {
   const { runs } = useVesper();
   const [ip, setIp] = useState<string | null | undefined>(undefined);
+  const [viewport, setViewport] = useState(false);
+
+  // /?viewport=1 opens the stream immediately (bookmarkable operator view)
+  useEffect(() => {
+    if (new URLSearchParams(window.location.search).get("viewport")) setViewport(true);
+  }, []);
 
   useEffect(() => {
     let alive = true;
@@ -65,21 +72,33 @@ export default function Live() {
           }
         >
           <div className="relative flex aspect-video items-center justify-center bg-black">
+            {viewport && ip ? (
+              <div className="absolute inset-0">
+                <LiveViewport ip={ip} />
+              </div>
+            ) : (
             <div className="text-center">
               <div className="font-mono text-sm tracking-[0.3em] text-muted-foreground">
                 {ip ? "AWAITING STREAM" : "STANDBY"}
               </div>
               <div className="mx-auto mt-2 max-w-sm px-6 text-xs text-muted-foreground">
                 {ip
-                  ? "Start a live session, then connect the Isaac WebRTC viewer to the box. In-page video is next."
+                  ? "Start a live session on the box, give it ~2 min to load the world, then connect the viewport."
                   : "No GPU box is up — bring one up to fly live."}
               </div>
               {ip && (
-                <div className="mt-4">
+                <div className="mt-4 flex items-center justify-center gap-2">
                   <JobButton label="▶ START LIVE SESSION" body={{ kind: "live" }} />
+                  <button
+                    onClick={() => setViewport(true)}
+                    className="rounded border border-border bg-secondary px-3 py-1.5 font-mono text-[11px] text-secondary-foreground hover:text-foreground"
+                  >
+                    ⧉ CONNECT VIEWPORT
+                  </button>
                 </div>
               )}
             </div>
+            )}
             <div className="pointer-events-none absolute left-3 top-3 h-4 w-4 border-l border-t border-[#4a4a44]" />
             <div className="pointer-events-none absolute right-3 top-3 h-4 w-4 border-r border-t border-[#4a4a44]" />
             <div className="pointer-events-none absolute bottom-3 left-3 h-4 w-4 border-b border-l border-[#4a4a44]" />
