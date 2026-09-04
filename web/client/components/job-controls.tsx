@@ -86,7 +86,7 @@ const KIND_LABEL: Record<Job["kind"], string> = {
   train: "training", fly: "sortie", eval: "evaluation", mission: "mission", live: "live session",
 };
 
-export function JobsPanel({ pollMs = 6000 }: { pollMs?: number }) {
+export function JobsPanel({ pollMs = 6000, className }: { pollMs?: number; className?: string }) {
   const [jobs, setJobs] = useState<Job[] | null>(null);
   const [nowS, setNowS] = useState<number | null>(null); // clock frozen per poll, pure render
 
@@ -113,8 +113,13 @@ export function JobsPanel({ pollMs = 6000 }: { pollMs?: number }) {
   };
 
   return (
-    <section className="hud-corners rounded-lg border border-border bg-card">
-      <h3 className="flex items-center border-b border-border px-3 py-1.5 font-mono text-[10px] font-semibold uppercase tracking-[0.14em] text-secondary-foreground">
+    <section
+      className={cn(
+        "hud-corners flex flex-col rounded-lg border border-border bg-card",
+        className,
+      )}
+    >
+      <h3 className="flex shrink-0 items-center border-b border-border px-3 py-1.5 font-mono text-[10px] font-semibold uppercase tracking-[0.14em] text-secondary-foreground">
         <span className="mr-1.5 text-muted-foreground">▮</span>Jobs on the box
         <span className="ml-auto"><SyncButton /></span>
       </h3>
@@ -125,7 +130,7 @@ export function JobsPanel({ pollMs = 6000 }: { pollMs?: number }) {
           nothing launched yet — deploy a model or start a mission
         </div>
       ) : (
-        <div>
+        <div className="min-h-0 overflow-y-auto">
           {jobs.map((j) => (
             <div key={j.id} className="border-b border-border/50 px-3 py-2 last:border-0">
               <div className="flex items-center gap-2 text-xs">

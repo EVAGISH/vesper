@@ -327,8 +327,10 @@ export function SiteMap() {
     );
 
   return (
-    <div>
-      <div className="relative aspect-square w-full overflow-hidden bg-black">
+    // square on stacked layouts; on desktop it fills whatever height the
+    // parent panel grants and letterboxes the ortho inside the canvas
+    <div className="flex flex-col lg:h-full lg:min-h-0 lg:flex-1">
+      <div className="relative aspect-square w-full overflow-hidden bg-black lg:min-h-0 lg:flex-1 lg:aspect-auto">
         <canvas
           ref={canvasRef}
           className="absolute inset-0 h-full w-full cursor-crosshair touch-none"
@@ -419,7 +421,7 @@ export function SiteMap() {
           </span>
         )}
       </div>
-      <div className="flex flex-wrap gap-x-4 gap-y-1 border-t border-border px-3 py-1.5 font-mono text-[9px] uppercase tracking-[0.1em] text-muted-foreground">
+      <div className="flex shrink-0 flex-wrap gap-x-4 gap-y-1 border-t border-border px-3 py-1.5 font-mono text-[9px] uppercase tracking-[0.1em] text-muted-foreground">
         <span><span className="text-[#3987e5]">—</span> track</span>
         <span><span className="text-white">◇</span> waypoints</span>
         <span><span className="text-[#c98500]">△</span> sighted</span>

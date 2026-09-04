@@ -91,7 +91,7 @@ export function DroneFeeds({ ip }: { ip: string }) {
             <button
               key={s}
               onClick={() => setChosen(s)}
-              className="relative flex-1 cursor-pointer"
+              className="relative basis-1/4 cursor-pointer"
               title={`show ${s} large`}
             >
               {/* eslint-disable-next-line @next/next/no-img-element */}

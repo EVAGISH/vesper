@@ -17,11 +17,11 @@ import { fetchJSON, fmtTime, KIND_COLOR, runKind } from "@/lib/vesper";
 
 const LIVE_POLL_MS = 15000;
 
-function Panel({ title, right, children }: {
-  title: string; right?: React.ReactNode; children: React.ReactNode;
+function Panel({ title, right, children, className }: {
+  title: string; right?: React.ReactNode; children: React.ReactNode; className?: string;
 }) {
   return (
-    <section className="hud-corners rounded-lg border border-border bg-card">
+    <section className={`hud-corners rounded-lg border border-border bg-card ${className ?? ""}`}>
       <h3 className="flex items-center border-b border-border px-3 py-1.5 font-mono text-[10px] font-semibold uppercase tracking-[0.14em] text-secondary-foreground">
         <span className="mr-1.5 text-muted-foreground">▮</span>
         {title}
@@ -62,10 +62,11 @@ export default function Live() {
   const latest = runs?.[0];
 
   return (
-    <main className="min-h-0 flex-1 overflow-y-auto p-4">
-      <div className="grid grid-cols-1 items-start gap-3 lg:grid-cols-[minmax(0,3fr)_minmax(0,2fr)]">
-        {/* ── left column: watch, then reference ─────────────────── */}
-        <div className="flex min-w-0 flex-col gap-3">
+    <main className="flex min-h-0 flex-1 overflow-y-auto p-4 lg:overflow-hidden">
+      <div className="grid min-h-0 flex-1 grid-cols-1 items-start gap-3 lg:grid-cols-[minmax(0,3fr)_minmax(0,2fr)] lg:items-stretch">
+        {/* ── left column: watch, then reference. Fits the fold; only an
+              opened world inspector makes it scroll. ─────────────── */}
+        <div className="flex min-w-0 flex-col gap-3 lg:min-h-0 lg:overflow-y-auto">
           <Panel
             title="Live downlink"
             right={
@@ -151,12 +152,17 @@ export default function Live() {
           </Panel>
         </div>
 
-        {/* ── right rail: situate, then control ──────────────────── */}
-        <div className="flex min-w-0 flex-col gap-3">
-          <Panel title="AO map" right="site frame · N up">
+        {/* ── right rail: situate, then control. The map takes whatever
+              height the jobs rail leaves; the jobs list scrolls inside. ── */}
+        <div className="flex min-w-0 flex-col gap-3 lg:h-full lg:min-h-0">
+          <Panel
+            title="AO map"
+            right="site frame · N up"
+            className="lg:flex lg:min-h-0 lg:flex-1 lg:flex-col"
+          >
             <SiteMap />
           </Panel>
-          <JobsPanel />
+          <JobsPanel className="lg:max-h-[45%] lg:min-h-0 lg:shrink-0" />
         </div>
       </div>
     </main>
