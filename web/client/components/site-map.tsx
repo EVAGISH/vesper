@@ -24,13 +24,13 @@ export function SiteMap() {
   const [events, setEvents] = useState<RunEvent[]>([]);
   const [waypoints, setWaypoints] = useState<[number, number, number][]>([]);
   const [imgReady, setImgReady] = useState(false);
-  const [readout, setReadout] = useState<[number, number] | null>(null);
   const [picked, setPicked] = useState<Pick | null>(null);
 
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const imgRef = useRef<HTMLImageElement | null>(null);
   const view = useRef({ cx: 0, cy: 0, zoom: 1 }); // zoom 1 = whole site fits
   const drag = useRef({ on: false, x: 0, y: 0, moved: 0 });
+  const hover = useRef<{ sx: number; sy: number } | null>(null);
 
   // one source run for every overlay, so the layers agree with each other
   const sortie = useMemo(
@@ -190,6 +190,34 @@ export function SiteMap() {
       }
     }
 
+    // hover reticle: hairline crosshair with the E/N readout on its own axes
+    if (hover.current && !drag.current.on) {
+      const { sx, sy } = hover.current;
+      g.strokeStyle = "rgba(255,255,255,0.28)";
+      g.lineWidth = 1;
+      g.beginPath();
+      g.moveTo(sx, 0); g.lineTo(sx, m.H);
+      g.moveTo(0, sy); g.lineTo(m.W, sy);
+      g.stroke();
+      g.strokeStyle = "rgba(255,255,255,0.85)";
+      g.beginPath();
+      g.moveTo(sx - 7, sy); g.lineTo(sx - 2, sy);
+      g.moveTo(sx + 2, sy); g.lineTo(sx + 7, sy);
+      g.moveTo(sx, sy - 7); g.lineTo(sx, sy - 2);
+      g.moveTo(sx, sy + 2); g.lineTo(sx, sy + 7);
+      g.stroke();
+      const [wx, wy] = m.toWorld(sx, sy);
+      g.font = "9px ui-monospace, monospace";
+      const eTxt = `${wx.toFixed(0)} E`, nTxt = `${wy.toFixed(0)} N`;
+      const eW = g.measureText(eTxt).width, nW = g.measureText(nTxt).width;
+      g.fillStyle = "rgba(0,0,0,0.65)";
+      g.fillRect(Math.min(sx + 4, m.W - eW - 8), 2, eW + 6, 12);
+      g.fillRect(2, Math.max(sy - 14, 2), nW + 6, 12);
+      g.fillStyle = "#ffffff";
+      g.fillText(eTxt, Math.min(sx + 7, m.W - eW - 5), 11);
+      g.fillText(nTxt, 5, Math.max(sy - 5, 11));
+    }
+
     // scale bar: a round number of meters near 90 screen px
     const raw = 90 / m.ppm;
     const step = 10 ** Math.floor(Math.log10(raw));
@@ -303,7 +331,7 @@ export function SiteMap() {
       <div className="relative aspect-square w-full overflow-hidden bg-black">
         <canvas
           ref={canvasRef}
-          className="absolute inset-0 h-full w-full cursor-grab active:cursor-grabbing"
+          className="absolute inset-0 h-full w-full cursor-crosshair touch-none"
           onPointerDown={(e) => {
             drag.current = { on: true, x: e.clientX, y: e.clientY, moved: 0 };
             (e.target as HTMLElement).setPointerCapture(e.pointerId);
@@ -311,6 +339,7 @@ export function SiteMap() {
           onPointerMove={(e) => {
             const cv = canvasRef.current!;
             const r = cv.getBoundingClientRect();
+            const sx = e.clientX - r.left, sy = e.clientY - r.top;
             if (drag.current.on) {
               const m = mapping();
               const dx = e.clientX - drag.current.x, dy = e.clientY - drag.current.y;
@@ -319,22 +348,29 @@ export function SiteMap() {
               view.current.cy += dy / m.ppm;
               drag.current.x = e.clientX;
               drag.current.y = e.clientY;
-              draw();
+              cv.style.cursor = "grabbing";
+            } else {
+              // pointer over a clickable marker beats the crosshair
+              cv.style.cursor = hitTest(sx, sy) ? "pointer" : "crosshair";
             }
-            const m = mapping();
-            setReadout(m.toWorld(e.clientX - r.left, e.clientY - r.top));
+            hover.current = { sx, sy };
+            draw();
           }}
           onPointerUp={(e) => {
             const was = drag.current;
             drag.current = { on: false, x: 0, y: 0, moved: 0 };
+            const cv = canvasRef.current!;
+            cv.style.cursor = "crosshair";
             if (was.moved < 5) {
-              const r = canvasRef.current!.getBoundingClientRect();
+              const r = cv.getBoundingClientRect();
               setPicked(hitTest(e.clientX - r.left, e.clientY - r.top));
             }
+            draw();
           }}
           onPointerLeave={() => {
             drag.current.on = false;
-            setReadout(null);
+            hover.current = null;
+            draw();
           }}
         />
         {picked && (
@@ -377,18 +413,11 @@ export function SiteMap() {
             ⌂
           </button>
         </div>
-        <div className="absolute bottom-2 left-2 flex flex-col gap-1">
-          {sortie && (
-            <span className="w-fit bg-black/60 px-1.5 py-0.5 font-mono text-[9px] text-muted-foreground">
-              last sortie: {sortie.id}
-            </span>
-          )}
-          {readout && (
-            <span className="w-fit bg-black/60 px-1.5 py-0.5 font-mono text-[9px] tabular-nums text-secondary-foreground">
-              {readout[0].toFixed(0)} E · {readout[1].toFixed(0)} N
-            </span>
-          )}
-        </div>
+        {sortie && (
+          <span className="absolute bottom-2 left-2 bg-black/60 px-1.5 py-0.5 font-mono text-[9px] text-muted-foreground">
+            last sortie: {sortie.id}
+          </span>
+        )}
       </div>
       <div className="flex flex-wrap gap-x-4 gap-y-1 border-t border-border px-3 py-1.5 font-mono text-[9px] uppercase tracking-[0.1em] text-muted-foreground">
         <span><span className="text-[#3987e5]">—</span> track</span>
