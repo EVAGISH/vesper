@@ -1,7 +1,11 @@
 "use client";
 
+import { useMemo, useState } from "react";
 import { Badge } from "@/components/ui/badge";
-import { artifactLabel, fmtDur, fmtTime, KIND_COLOR, runKind, type Run } from "@/lib/vesper";
+import {
+  artifactLabel, fmtDur, fmtTime, KIND_COLOR, runKind, runLane,
+  type Run, type RunLane,
+} from "@/lib/vesper";
 import { cn } from "@/lib/utils";
 
 function dayLabel(ts?: number) {
@@ -12,6 +16,12 @@ function dayLabel(ts?: number) {
     : "undated";
 }
 
+const LANES: { id: RunLane | "all"; label: string }[] = [
+  { id: "all", label: "All" },
+  { id: "operations", label: "Sorties" },
+  { id: "lab", label: "Lab" },
+];
+
 export function RunRail({
   runs,
   activeId,
@@ -21,16 +31,48 @@ export function RunRail({
   activeId: string | null;
   onSelect: (id: string) => void;
 }) {
+  const [lane, setLane] = useState<RunLane | "all">("all");
+  const counts = useMemo(() => {
+    const c = { operations: 0, lab: 0 };
+    for (const r of runs) c[runLane(r)]++;
+    return c;
+  }, [runs]);
+  const shown = useMemo(
+    () => (lane === "all" ? runs : runs.filter((r) => runLane(r) === lane)),
+    [runs, lane],
+  );
+
   return (
     <aside className="flex w-[292px] shrink-0 flex-col overflow-y-auto border-r border-border bg-card">
-      {runs.length === 0 && (
+      <div className="sticky top-0 z-10 flex gap-0.5 border-b border-border bg-card p-1.5">
+        {LANES.map((l) => {
+          const n = l.id === "all" ? runs.length : counts[l.id];
+          return (
+            <button
+              key={l.id}
+              onClick={() => setLane(l.id)}
+              className={cn(
+                "flex-1 cursor-pointer rounded px-2 py-1 font-mono text-[10px] uppercase tracking-[0.1em]",
+                lane === l.id
+                  ? "bg-secondary text-foreground"
+                  : "text-muted-foreground hover:text-foreground",
+              )}
+            >
+              {l.label} <span className="opacity-60">{n}</span>
+            </button>
+          );
+        })}
+      </div>
+      {shown.length === 0 && (
         <div className="p-8 text-center text-muted-foreground">
-          No runs yet — pull artifacts from the box (Jobs panel)
+          {runs.length === 0
+            ? "No runs yet — pull artifacts from the box (Jobs panel)"
+            : `No ${lane === "operations" ? "sorties" : "lab runs"} yet`}
         </div>
       )}
-      {runs.map((r, i) => {
+      {shown.map((r, i) => {
         const day = dayLabel(r.manifest.started);
-        const head = i === 0 || day !== dayLabel(runs[i - 1].manifest.started);
+        const head = i === 0 || day !== dayLabel(shown[i - 1].manifest.started);
         const kind = runKind(r);
         return (
           <div key={r.id}>
