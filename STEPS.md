@@ -139,6 +139,40 @@ and where each vehicle was first seen and reached, over the site's ground textur
 
 ---
 
+## Step 11 — Eyes on the airframe
+
+Step 10's drone found forklifts with a geometric detector fed the truth, and
+navigated on its own world position. This step makes the environment honest
+before any policy is trained on it: the actor gets a camera and its own
+instruments, nothing else.
+
+- The camera is body-fixed and pitched 40° forward-down with a 110° lens, so the
+  drone sees where it is flying and the ground ahead. The SE3 inner loop yaws
+  the nose onto the velocity, and the action is a body-frame velocity command.
+- No GPS. The actor's observation is the rendered frame (`pixels`) plus what the
+  airframe measures (`policy`): body velocity, gravity direction, rates,
+  rangefinder height, clock. World position, the belief and the coverage grid
+  live in a separate `privileged` vector for the critic and a state-based
+  teacher only.
+- A first sighting is decided by the camera's segmentation mask, not a cone.
+  The geometric cone stays, pitched to the same axis, for training a teacher
+  at thousands of environments without rendering.
+- One shared world means every camera sees every vehicle, so vehicles come in
+  `--groups`: G sets on the site, environment i hunts set i % G, a group's
+  episodes start and end together. Forklifts follow the roads, park along
+  facades, ramp their speed and cannot spin on the spot.
+- Trees are physical: a trunk capsule and a crown sphere per species, authored
+  once and shared by every instance; the map's solid layer carries the same
+  geometry so a crash in the task is a contact in PhysX.
+- Worlds are repeatable: `<site>_build.json` records seed, variant and input
+  hashes; `--variant` reshuffles trees and building heights from one fetch.
+
+**Inspect:** `check_search.py --camera` passes on the box and reports env-steps/s
+and VRAM with 64 tiled cameras; `fpv.mp4` from `fly_search.py --camera` shows
+the forward view with the policy's 128 px input inset, rolling with the hull.
+
+---
+
 ## Standing rules
 
 - Every step ends with a commit on completion, and messy in-between states get committed too — the branch history should let any step be revisited.

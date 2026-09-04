@@ -23,15 +23,19 @@ parser.add_argument("--arena", type=float, default=300.0)
 parser.add_argument("--episode_s", type=float, default=90.0)
 parser.add_argument("--seed", type=int, default=11)
 parser.add_argument("--stochastic", action="store_true")
+parser.add_argument("--groups", type=int, default=0)
+parser.add_argument("--camera", action="store_true", help="sightings from rendered pixels")
 parser.add_argument("--out", default=None)
 AppLauncher.add_app_launcher_args(parser)
 args = parser.parse_args()
 args.headless = True
+if args.camera:
+    args.enable_cameras = True
 app = AppLauncher(args).app
 
 import torch  # noqa: E402
 
-from vesper.lab.ppo import ActorCritic, RunningNorm  # noqa: E402
+from vesper.lab.ppo import load_policy  # noqa: E402
 from vesper.lab.search_env import SearchEnv, SearchEnvCfg  # noqa: E402
 
 cfg = SearchEnvCfg()
@@ -40,11 +44,14 @@ cfg.scene.env_spacing = 0.0
 cfg.n_targets = args.targets
 cfg.episode_length_s = args.episode_s
 cfg.search = {"arena_half": args.arena}
+cfg.n_groups = args.groups
+cfg.camera = args.camera
 env = SearchEnv(cfg, seed=args.seed)
 
 ck = torch.load(args.policy, map_location=env.device)
-ac = ActorCritic(ck["obs_dim"], ck["act_dim"]).to(env.device); ac.load_state_dict(ck["ac"]); ac.eval()
-norm = RunningNorm(ck["obs_dim"]).to(env.device); norm.load_state_dict(ck["norm"])
+ac, norm = load_policy(ck, env.device)
+if ck["obs_dim"] != env.num_obs:
+    raise SystemExit(f"policy expects {ck['obs_dim']}-wide observations, env gives {env.num_obs}")
 
 
 @torch.no_grad()

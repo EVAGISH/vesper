@@ -34,10 +34,20 @@ parser.add_argument("--world", default=None, help="world USD (default the Cornel
 parser.add_argument("--map", default=None, help="world map npz (default beside the USD)")
 parser.add_argument("--vehicle", default=None, help="forklift | cart | path to a USD")
 parser.add_argument("--resume", default=None, help="checkpoint to warm-start from")
+parser.add_argument("--hidden", default="256,256,128",
+                    help="MLP widths, comma-separated; 1024,1024,512 is ~3.4M parameters")
+parser.add_argument("--groups", type=int, default=0,
+                    help="vehicle sets shared by groups of envs (0 = one per env); needed once cameras render")
+parser.add_argument("--camera", action="store_true",
+                    help="render the body-fixed camera and decide sightings from its pixels (implies --enable_cameras)")
+parser.add_argument("--obs", choices=["privileged", "policy"], default="privileged",
+                    help="which observation PPO trains on: the state-based teacher's, or the honest proprio vector")
 parser.add_argument("--tag", default="search-train")
 AppLauncher.add_app_launcher_args(parser)
 args = parser.parse_args()
 args.headless = True
+if args.camera:
+    args.enable_cameras = True
 app = AppLauncher(args).app
 
 import torch  # noqa: E402
@@ -71,6 +81,9 @@ cfg.n_targets = args.targets
 cfg.episode_length_s = args.episode_s
 cfg.search = {"arena_half": args.arena}
 cfg.vehicle_model = args.vehicle
+cfg.n_groups = args.groups
+cfg.camera = args.camera
+cfg.ppo_key = args.obs
 if args.world:
     cfg.world_usd = args.world
 if args.map:
@@ -80,8 +93,10 @@ env = SearchEnv(cfg, seed=args.seed)
 adapter = Adapter(env)
 
 track = ("found", "cleared", "coverage", "oob", "flip", "crash")
+hidden = tuple(int(h) for h in args.hidden.split(","))
 ppo = PPO(adapter, PPOCfg(horizon=args.horizon, lr=args.lr, gamma=args.gamma, track=track),
-          device=env.device, seed=args.seed)
+          hidden=hidden, device=env.device, seed=args.seed)
+print(f"policy: {sum(p.numel() for p in ppo.ac.parameters())/1e6:.2f}M parameters, hidden {hidden}", flush=True)
 if args.resume:
     ck = torch.load(args.resume, map_location=env.device)
     ppo.ac.load_state_dict(ck["ac"]); ppo.norm.load_state_dict(ck["norm"])
@@ -89,7 +104,8 @@ if args.resume:
 
 cap = RunCapture(args.tag)
 cap.note(num_envs=args.num_envs, iters=args.iters, targets=args.targets, arena=args.arena,
-         episode_s=args.episode_s, gamma=args.gamma, world=cfg.world_usd, seed=args.seed)
+         episode_s=args.episode_s, gamma=args.gamma, world=cfg.world_usd, seed=args.seed,
+         hidden=list(hidden), groups=env.G, camera=args.camera, obs=args.obs)
 curve = open(cap.dir / "curve.jsonl", "w")
 print(f"train: {args.num_envs} envs x {args.iters} iters, {args.targets} targets in a "
       f"{2*args.arena:.0f} m box, obs {env.num_obs} -> {cap.dir}", flush=True)

@@ -11,13 +11,21 @@ Output: <site>.usd with
   /World/terrain    grid mesh from the DEM, ground albedo baked from land cover + roads
   /World/buildings  OSM footprints extruded (height tags / levels / type defaults), facade + roof textures
   /World/water      flat water polygons
-  /World/trees      PointInstancer: woodland polygons, tree rows, scrub, gardens
+  /World/trees      instanceable references: woodland polygons, tree rows, scrub, gardens
   /World/sun, /World/sky
-  static triangle-mesh colliders on terrain and buildings.
+  static triangle-mesh colliders on terrain and buildings; a trunk capsule and a
+  crown sphere per tree species (authored once, shared by every instance).
 Local frame: ENU meters, origin at (lat0, lon0), z = DEM height minus DEM height at the origin.
+
+Repeatability: the same cached inputs, seed and variant give the same USD.
+`seed` drives everything random; `variant` reseeds only the scatter (building
+heights within their type ranges, tree placement, species, size), so one data
+fetch yields many worlds. <site>_build.json beside the USD records the seed,
+the variant, the site parameters and a hash of every input file.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import os
@@ -28,6 +36,8 @@ import mapbox_earcut as earcut
 import numpy as np
 from PIL import Image, ImageDraw
 from pxr import Gf, Sdf, Usd, UsdGeom, UsdLux, UsdPhysics, UsdShade, Vt
+
+from vesper.worlds.rasters import CROWN_Z, DEFAULT_CROWN, SPECIES_CROWN, TRUNK_R, TRUNK_TOP
 from shapely.geometry import LineString, Point, Polygon
 from shapely.strtree import STRtree
 
@@ -80,6 +90,8 @@ class GeoSite:
     res_m: float = 5.0                 # terrain grid spacing
     tex_px: int = 4096                 # ground albedo resolution
     seed: int = 0
+    variant: int = 0                   # reseeds the scatter only (trees, building heights)
+    tree_colliders: bool = True        # trunk + crown colliders on every species
     tree_spacing_m: float = 6.0        # woodland grid spacing (jittered)
     max_trees: int = 60000
     imagery_canopy: bool = True   # read unmapped tree cover out of the orthophoto
@@ -103,6 +115,7 @@ class BuildReport:
     waypoints: list = field(default_factory=list)
     takeoff_alt_m: float = 0.0
     usd: str = ""
+    manifest: str = ""
 
 
 # ---------------------------------------------------------------- terrain
@@ -365,8 +378,13 @@ def _mesh(stage, path, pts, counts, indices, st=None, collide=True):
 
 # ---------------------------------------------------------------- buildings
 def build_buildings(stage, terrain: Terrain, osm, rng, facades, roofs, rel_dir):
-    """All footprints into one mesh with GeomSubsets per facade/roof material."""
+    """All footprints into one mesh with GeomSubsets per facade/roof material.
+
+    Returns (count, heights): heights is {footprint index: height drawn}, so the
+    obstacle map used for flight planning sees the buildings that were actually
+    built rather than a second random draw."""
     pts, counts, idx, st = [], [], [], []
+    heights = {}
     wall_faces = {i: [] for i in range(len(facades))}
     roof_faces = {i: [] for i in range(len(roofs))}
     face_id = 0
@@ -385,6 +403,7 @@ def build_buildings(stage, terrain: Terrain, osm, rng, facades, roofs, rel_dir):
         if Polygon(ring).exterior.is_ccw is False:
             ring = ring[::-1]
         h = building_height(tags, rng)
+        heights[bi] = h
         gz = terrain.height(ring[:, 0], ring[:, 1])
         base = float(gz.min()) - 0.4
         top = float(gz.max()) + h if h < 4 else base + 0.4 + h
@@ -414,7 +433,7 @@ def build_buildings(stage, terrain: Terrain, osm, rng, facades, roofs, rel_dir):
             roof_faces[ri].append(face_id); face_id += 1
         n_b += 1
     if not pts:
-        return 0
+        return 0, heights
     mesh = _mesh(stage, "/World/buildings", pts, counts, idx, st=st, collide=True)
     # per-vertex st here is faceVarying-sized? we appended one st per point -> vertex interpolation
     for i, p in enumerate(facades):
@@ -430,7 +449,7 @@ def build_buildings(stage, terrain: Terrain, osm, rng, facades, roofs, rel_dir):
         mat = _preview_material(stage, f"/World/Looks/roof_{i}", p, rel_dir, roughness=0.8)
         UsdShade.MaterialBindingAPI.Apply(sub.GetPrim()).Bind(mat)
     UsdGeom.Subset.SetFamilyType(mesh, "materialBind", UsdGeom.Tokens.partition)
-    return n_b
+    return n_b, heights
 
 
 # ---------------------------------------------------------------- water
@@ -516,13 +535,22 @@ def _extent_from_descendants(prim) -> "Vt.Vec3fArray | None":
     return Vt.Vec3fArray([Gf.Vec3f(*lo.astype(float)), Gf.Vec3f(*hi.astype(float))])
 
 
-def _prepare_species_usd(src_usd: Path, out_dir: Path, name: str, target_h: float):
+def _prepare_species_usd(src_usd: Path, out_dir: Path, name: str, target_h: float,
+                         colliders: bool = True):
     """Prepare one species -> (usd_path, scale_to_metres).
 
     The layer holds the raw NVIDIA tree with its extents repaired; trees
     reference it instanceable, so that repair is authored once and shared by
     every copy (an instanceable prim cannot carry overs on its own descendants,
     which is why this needs its own layer).
+
+    With `colliders` the layer also carries the tree's physics: a capsule for
+    the trunk and a sphere for the crown, invisible, static. Every instance of
+    the species shares them, so 16k trees cost six colliders' worth of authoring
+    and PhysX gets primitives rather than 800k-point leaf meshes. The same
+    fractions (vesper.worlds.rasters TRUNK_R / TRUNK_TOP / CROWN_Z / crown
+    ratio) build the map's tree_z layer, so what the task calls a crash is what
+    PhysX actually stops.
 
     It deliberately does NOT author a scale op. A referencing prim that needs its
     own translate/rotate has to author an xformOpOrder, and that order replaces
@@ -540,7 +568,14 @@ def _prepare_species_usd(src_usd: Path, out_dir: Path, name: str, target_h: floa
     out.parent.mkdir(parents=True, exist_ok=True)
     if out.exists():
         out.unlink()
-    stage = Usd.Stage.CreateNew(str(out))
+    # a second build in the same process (tests, variants) finds the old layer
+    # still registered under this path: start it over rather than tripping on it
+    stale = Sdf.Layer.Find(str(out))
+    if stale:
+        stale.Clear()
+        stage = Usd.Stage.Open(stale)
+    else:
+        stage = Usd.Stage.CreateNew(str(out))
     UsdGeom.SetStageUpAxis(stage, UsdGeom.Tokens.z)
     UsdGeom.SetStageMetersPerUnit(stage, 1.0)
     root = UsdGeom.Xform.Define(stage, "/Tree")
@@ -563,8 +598,45 @@ def _prepare_species_usd(src_usd: Path, out_dir: Path, name: str, target_h: floa
             ext = _extent_from_descendants(prim)
             if ext is not None:
                 mesh.CreateExtentAttr(ext)
+    if colliders:
+        _author_tree_colliders(stage, root, src_usd, name)
     stage.GetRootLayer().Save()
     return out, s
+
+
+def _tree_native_bounds(usd_path: Path):
+    """(zmin, zmax) of every mesh point in the asset's own units."""
+    st = Usd.Stage.Open(str(usd_path))
+    cache = UsdGeom.XformCache()
+    zmax, zmin = -1e9, 1e9
+    for p in st.Traverse():
+        if p.IsA(UsdGeom.Mesh):
+            pts = UsdGeom.Mesh(p).GetPointsAttr().Get()
+            if not pts:
+                continue
+            m = np.array(cache.GetLocalToWorldTransform(p)); w = np.asarray(pts) @ m[:3, :3] + m[3, :3]
+            zmax, zmin = max(zmax, w[:, 2].max()), min(zmin, w[:, 2].min())
+    return float(zmin), float(zmax)
+
+
+def _author_tree_colliders(stage, root, src_usd: Path, name: str):
+    """Trunk capsule + crown sphere under the species root, in the asset's units."""
+    zmin, zmax = _tree_native_bounds(src_usd)
+    H = max(zmax - zmin, 1e-3)
+    crown = SPECIES_CROWN.get(name, DEFAULT_CROWN) * H
+    r_t = TRUNK_R * H
+    trunk_len = max(TRUNK_TOP * H - 2 * r_t, r_t)
+    cap = UsdGeom.Capsule.Define(stage, root.GetPath().AppendChild("trunk_col"))
+    cap.CreateAxisAttr("Z"); cap.CreateRadiusAttr(r_t); cap.CreateHeightAttr(trunk_len)
+    UsdGeom.Xformable(cap).AddTranslateOp().Set(Gf.Vec3d(0.0, 0.0, zmin + r_t + trunk_len / 2))
+    sph = UsdGeom.Sphere.Define(stage, root.GetPath().AppendChild("crown_col"))
+    sph.CreateRadiusAttr(crown)
+    UsdGeom.Xformable(sph).AddTranslateOp().Set(Gf.Vec3d(0.0, 0.0, zmin + CROWN_Z * H))
+    for prim in (cap.GetPrim(), sph.GetPrim()):
+        UsdPhysics.CollisionAPI.Apply(prim)
+        img = UsdGeom.Imageable(prim)
+        img.CreatePurposeAttr(UsdGeom.Tokens.guide)          # renderers skip guides; PhysX does not
+        img.CreateVisibilityAttr(UsdGeom.Tokens.invisible)
 
 
 def _has_nested_instancer(usd_path: Path) -> bool:
@@ -714,7 +786,8 @@ def build_trees(stage, site: GeoSite, terrain: Terrain, osm, rng, veg_dir: Path,
     # Native USD scenegraph instancing has no such problem -- it is the same mechanism
     # Isaac Lab uses to clone environments -- and gives the same memory win, since all
     # trees of a species share one prototype.
-    prepared = {name: _prepare_species_usd(veg_dir / "Trees" / f"{name}.usd", rel_dir, name, target_h)
+    prepared = {name: _prepare_species_usd(veg_dir / "Trees" / f"{name}.usd", rel_dir, name, target_h,
+                                           colliders=site.tree_colliders)
                 for name, target_h, _, _ in SPECIES}          # name -> (usd, scale_to_metres)
     UsdGeom.Scope.Define(stage, "/World/trees")
     for i in range(n):
@@ -734,9 +807,11 @@ def build_trees(stage, site: GeoSite, terrain: Terrain, osm, rng, veg_dir: Path,
 
 
 # ---------------------------------------------------------------- spawn + mission planning
-def obstacle_height_map(site: GeoSite, terrain: Terrain, osm, cell=10.0, tree_xy=None, tree_h=None):
+def obstacle_height_map(site: GeoSite, terrain: Terrain, osm, cell=10.0, tree_xy=None, tree_h=None,
+                        building_h: dict | None = None):
     """Max obstacle top (terrain + building/tree height) per cell, world-relative z.
-    Trees come from the actual instances when given (gardens, rows), else from polygons."""
+    Trees come from the actual instances when given (gardens, rows), else from polygons;
+    building heights from what build_buildings drew, else a fresh draw from the site seed."""
     n = int(2 * site.half_m / cell) + 1
     xs = np.linspace(-site.half_m, site.half_m, n)
     X, Y = np.meshgrid(xs, xs)
@@ -751,9 +826,10 @@ def obstacle_height_map(site: GeoSite, terrain: Terrain, osm, cell=10.0, tree_xy
             d.polygon(w2p(np.asarray(p.exterior.coords)), fill=22.0)
         elif k == "scrub":
             d.polygon(w2p(np.asarray(p.exterior.coords)), fill=6.0)
-    rng = np.random.default_rng(0)
-    for p, t in osm["buildings"]:
-        d.polygon(w2p(np.asarray(p.exterior.coords)), fill=float(building_height(t, rng)) + 1.0)
+    rng = np.random.default_rng(site.seed)
+    for bi, (p, t) in enumerate(osm["buildings"]):
+        h = building_h[bi] if building_h and bi in building_h else building_height(t, rng)
+        d.polygon(w2p(np.asarray(p.exterior.coords)), fill=float(h) + 1.0)
     for line in osm["tree_rows"]:
         d.line(w2p(np.asarray(line.coords)), fill=20.0, width=2)
     obst = np.asarray(img).copy()
@@ -819,8 +895,8 @@ def choose_spawn(site: GeoSite, terrain: Terrain, osm, rng, search_r=600.0):
 
 
 def plan_loop(site: GeoSite, terrain: Terrain, osm, spawn_xy, leg_m=250.0, clearance=20.0, min_alt=25.0,
-              tree_xy=None, tree_h=None):
-    xs, top = obstacle_height_map(site, terrain, osm, tree_xy=tree_xy, tree_h=tree_h)
+              tree_xy=None, tree_h=None, building_h=None):
+    xs, top = obstacle_height_map(site, terrain, osm, tree_xy=tree_xy, tree_h=tree_h, building_h=building_h)
     cell = xs[1] - xs[0]
     sx, sy = spawn_xy
     gz = float(terrain.height(np.array([sx]), np.array([sy]))[0])
@@ -843,9 +919,33 @@ def plan_loop(site: GeoSite, terrain: Terrain, osm, spawn_xy, leg_m=250.0, clear
 
 
 # ---------------------------------------------------------------- top level
+def _sha256(path: Path) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def build_manifest(site: GeoSite, data_dir: Path, rep: "BuildReport") -> dict:
+    """What went into a world: seed, variant, site parameters, input hashes.
+
+    Rebuilding from the same manifest reproduces the USD; a differing hash says
+    the cached fetch changed underneath it (OSM edits, a re-download)."""
+    inputs = {}
+    for name in ("dem.npy", "dem_meta.json", "osm.json", "naip.png", "imagery.png"):
+        f = Path(data_dir) / name
+        if f.exists():
+            inputs[name] = {"sha256": _sha256(f), "bytes": f.stat().st_size}
+    return {"site": {k: getattr(site, k) for k in site.__dataclass_fields__},
+            "inputs": inputs, "species": [s[0] for s in SPECIES],
+            "report": {k: v for k, v in rep.__dict__.items()}}
+
+
 def build_site(site: GeoSite, data_dir: Path, veg_dir: Path, out_usd: Path,
                spawn_override=None) -> BuildReport:
-    rng = np.random.default_rng(site.seed)
+    rng = np.random.default_rng(site.seed)                     # textures, spawn
+    vrng = np.random.default_rng([site.seed, site.variant])    # the scatter: heights, trees
     data_dir, veg_dir, out_usd = Path(data_dir), Path(veg_dir).resolve(), Path(out_usd).resolve()
     out_dir = out_usd.parent; out_dir.mkdir(parents=True, exist_ok=True)
     dem = np.load(data_dir / "dem.npy"); meta = json.loads((data_dir / "dem_meta.json").read_text())
@@ -869,7 +969,7 @@ def build_site(site: GeoSite, data_dir: Path, veg_dir: Path, out_usd: Path,
     rep.terrain_verts = len(pts); rep.z_range = [round(float(pts[:, 2].min()), 1), round(float(pts[:, 2].max()), 1)]
 
     facades, roofs = bake_facade_textures(out_dir, rng)
-    rep.buildings = build_buildings(stage, terrain, osm, rng, facades, roofs, out_dir)
+    rep.buildings, building_h = build_buildings(stage, terrain, osm, vrng, facades, roofs, out_dir)
     rep.water = build_water(stage, terrain, osm, out_dir)
 
     if spawn_override is not None:
@@ -877,8 +977,8 @@ def build_site(site: GeoSite, data_dir: Path, veg_dir: Path, out_usd: Path,
     else:
         spawn = choose_spawn(site, terrain, osm, rng)
     ortho = next((data_dir / f for f in ("naip.png", "imagery.png") if (data_dir / f).exists()), None)
-    canopy_xy = canopy_from_imagery(ortho, site, rng) if (ortho and site.imagery_canopy) else None
-    rep.trees, tree_xy, tree_h = build_trees(stage, site, terrain, osm, rng, veg_dir, out_dir, spawn,
+    canopy_xy = canopy_from_imagery(ortho, site, vrng) if (ortho and site.imagery_canopy) else None
+    rep.trees, tree_xy, tree_h = build_trees(stage, site, terrain, osm, vrng, veg_dir, out_dir, spawn,
                                              canopy_xy=canopy_xy)
 
     sun = UsdLux.DistantLight.Define(stage, "/World/sun")
@@ -887,9 +987,13 @@ def build_site(site: GeoSite, data_dir: Path, veg_dir: Path, out_usd: Path,
     sky = UsdLux.DomeLight.Define(stage, "/World/sky")
     sky.CreateIntensityAttr(480.0); sky.CreateColorAttr(Gf.Vec3f(0.42, 0.60, 0.90))
 
-    wps, tk, gz = plan_loop(site, terrain, osm, spawn, leg_m=site.leg_m, tree_xy=tree_xy, tree_h=tree_h)
+    wps, tk, gz = plan_loop(site, terrain, osm, spawn, leg_m=site.leg_m, tree_xy=tree_xy, tree_h=tree_h,
+                            building_h=building_h)
     rep.spawn_xy = list(spawn); rep.spawn_ground_z = round(gz, 3); rep.waypoints = wps; rep.takeoff_alt_m = tk
     stage.GetRootLayer().customLayerData = {"vesper_site": json.dumps({"lat0": site.lat0, "lon0": site.lon0, "half_m": site.half_m})}
     stage.GetRootLayer().Save()
     rep.usd = str(out_usd)
+    manifest = out_usd.with_name(out_usd.stem + "_build.json")
+    manifest.write_text(json.dumps(build_manifest(site, data_dir, rep), indent=1))
+    rep.manifest = str(manifest)
     return rep

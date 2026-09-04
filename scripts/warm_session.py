@@ -29,6 +29,8 @@ parser.add_argument("--arena", type=float, default=300.0)
 parser.add_argument("--hfov", type=float, default=75.0)
 parser.add_argument("--policy", default=None, help="initial checkpoint (optional)")
 parser.add_argument("--every", type=int, default=2, help="render 1 frame per N control steps")
+parser.add_argument("--groups", type=int, default=1,
+                    help="vehicle sets shared by groups of envs; 1 = every drone hunts the same three")
 parser.add_argument("--cameras", action="store_true",
                     help="also render + publish drone camera feeds. Off by default: "
                          "rendering RTX cameras in this env on the 16k-tree world "
@@ -54,8 +56,9 @@ if args.cameras:
     from isaacsim.sensors.camera import Camera
 
 from vesper.capture.live import LiveFrameServer  # noqa: E402
-from vesper.lab.ppo import ActorCritic, RunningNorm  # noqa: E402
+from vesper.lab.ppo import load_policy  # noqa: E402
 from vesper.lab.search_env import SearchEnv, SearchEnvCfg  # noqa: E402
+from vesper.lab.search_task import sensor_pose  # noqa: E402
 
 cfg = SearchEnvCfg()
 # The RTX-render crash on the 16k-tree world faults inside omni.physx.fabric's
@@ -70,6 +73,7 @@ cfg.scene.num_envs = args.num_envs
 cfg.scene.env_spacing = 0.0
 cfg.n_targets = args.targets
 cfg.search = {"arena_half": args.arena}
+cfg.n_groups = args.groups
 env = SearchEnv(cfg, render_mode="rgb_array", seed=args.seed)
 
 
@@ -83,10 +87,9 @@ class Policy:
 
     def load(self, path):
         ck = torch.load(path, map_location=env.device)
-        ac = ActorCritic(ck["obs_dim"], ck["act_dim"]).to(env.device)
-        ac.load_state_dict(ck["ac"]); ac.eval()
-        norm = RunningNorm(ck["obs_dim"]).to(env.device)
-        norm.load_state_dict(ck["norm"])
+        if ck["obs_dim"] != env.num_obs:
+            raise ValueError(f"policy expects {ck['obs_dim']}-wide observations, env gives {env.num_obs}")
+        ac, norm = load_policy(ck, env.device)
         self.ac, self.norm, self.name = ac, norm, path.split("/")[-1]
 
     @torch.no_grad()
@@ -168,7 +171,10 @@ while app.is_running():
 
     if args.cameras and step % args.every == 0:
         d0 = drones[0]
-        look_at(fpv, d0 + np.array([0.0, 0.0, -0.6]), d0 + np.array([0.0, 0.0, -50.0]))
+        # the drone's own camera: body-fixed, pitched forward-down, same lens as the task
+        cp, cq = sensor_pose(env._robot.data.root_pos_w[:1], env._robot.data.root_quat_w[:1],
+                             env.task.cfg.cam_pitch_deg, tuple(cfg.cam_offset))
+        fpv.set_world_pose(cp[0].cpu().numpy(), cq[0].cpu().numpy())
         look_at(chase, d0 + np.array([-45.0, -45.0, 30.0]), d0)
         env.sim.render()
         srv.publish(np.asarray(fpv.get_rgba()[..., :3], dtype=np.uint8), "fpv")
