@@ -6,7 +6,7 @@ import { EventsTimeline } from "@/components/events-timeline";
 import { SweepTable } from "@/components/sweep-table";
 import { TrajectoryPlot } from "@/components/trajectory-plot";
 import {
-  fetchJSON, fmtDur, fmtTime, KIND_COLOR, media, runKind, type Run,
+  artifactLabel, fetchJSON, fmtDur, fmtTime, KIND_COLOR, media, runKind, type Run,
 } from "@/lib/vesper";
 
 function Panel({
@@ -116,7 +116,7 @@ export function RunDetail({ run }: { run: Run }) {
           return (
             <Panel
               key={v}
-              title={stream}
+              title={artifactLabel(v)}
               right={
                 m.streams?.[stream]
                   ? `${m.streams[stream]}${m.frames?.[stream] ? ` · ${m.frames[stream]} frames` : ""}`
@@ -134,7 +134,7 @@ export function RunDetail({ run }: { run: Run }) {
         })}
 
         {pngs.map((p) => (
-          <Panel key={p} title={p.replace(/\.png$/, "")}>
+          <Panel key={p} title={artifactLabel(p)}>
             {/* eslint-disable-next-line @next/next/no-img-element -- streamed from /media, never optimized/copied */}
             <img src={media(run.id, p)} alt={p} className="block w-full bg-black" />
           </Panel>
@@ -153,7 +153,7 @@ export function RunDetail({ run }: { run: Run }) {
         )}
 
         {run.files.includes("curve.jsonl") && (
-          <Panel title="Training curves" right="curve.jsonl" wide>
+          <Panel title="Training progress" right="per iteration" wide>
             <CurveCharts runId={run.id} />
           </Panel>
         )}

@@ -84,9 +84,9 @@ export function SweepTable({ runId, files }: { runId: string; files: string[] })
         </div>
       )}
       {!files.includes("results.jsonl") ? (
-        <div className="p-4 text-sm text-muted-foreground">no results.jsonl in this run</div>
+        <div className="p-4 text-sm text-muted-foreground">no per-variant results recorded</div>
       ) : rows === null ? (
-        <div className="p-4 text-sm text-muted-foreground">loading results.jsonl…</div>
+        <div className="p-4 text-sm text-muted-foreground">loading variants…</div>
       ) : rows.length === 0 ? (
         <div className="p-4 text-sm text-muted-foreground">no per-variant results</div>
       ) : (

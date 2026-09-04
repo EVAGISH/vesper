@@ -8,6 +8,7 @@ const nextConfig: NextConfig = {
     return Promise.resolve([
       { source: "/api/:path*", destination: `${API}/api/:path*` },
       { source: "/media/:path*", destination: `${API}/media/:path*` },
+      { source: "/site/:path*", destination: `${API}/site/:path*` },
     ]);
   },
 };

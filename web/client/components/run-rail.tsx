@@ -1,7 +1,7 @@
 "use client";
 
 import { Badge } from "@/components/ui/badge";
-import { fmtDur, fmtTime, KIND_COLOR, runKind, type Run } from "@/lib/vesper";
+import { artifactLabel, fmtDur, fmtTime, KIND_COLOR, runKind, type Run } from "@/lib/vesper";
 import { cn } from "@/lib/utils";
 
 function dayLabel(ts?: number) {
@@ -25,7 +25,7 @@ export function RunRail({
     <aside className="flex w-[292px] shrink-0 flex-col overflow-y-auto border-r border-border bg-card">
       {runs.length === 0 && (
         <div className="p-8 text-center text-muted-foreground">
-          No runs. Pull some with scripts/capture_pull.sh
+          No runs yet — pull artifacts from the box (Jobs panel)
         </div>
       )}
       {runs.map((r, i) => {
@@ -68,7 +68,7 @@ export function RunRail({
                       variant="outline"
                       className="rounded-none bg-background px-1.5 py-0 font-mono text-[9px] font-normal text-secondary-foreground"
                     >
-                      {f.replace(/\.[^.]+$/, "")}
+                      {artifactLabel(f)}
                     </Badge>
                   ))}
               </div>

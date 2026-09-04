@@ -2,12 +2,12 @@
 
 import Link from "next/link";
 import { useEffect, useState } from "react";
-import { CommandBar } from "@/components/command-bar";
-import { fetchJSON, fmtBytes, fmtTime, SIM, type Model } from "@/lib/vesper";
+import { JobButton, JobsPanel } from "@/components/job-controls";
+import { fetchJSON, fmtBytes, fmtTime, modelLabel, type Model } from "@/lib/vesper";
 import { cn } from "@/lib/utils";
 
-// The train → deploy loop. Checkpoints are what train_* writes into runs/<id>/
-// (*.pt); deploying one means flying or scoring it with that checkpoint path.
+// The train → deploy loop, point and click. Checkpoints are what training
+// writes into runs/<id>/ (*.pt); deploying one flies or scores it on the box.
 
 const POLL_MS = 15000;
 
@@ -34,28 +34,28 @@ export default function Models() {
       <div className="mb-3.5 flex items-baseline gap-3">
         <h2 className="text-base font-bold">Models</h2>
         <span className="text-xs text-muted-foreground">
-          policy checkpoints written by training runs — pick one to deploy
+          trained flight models — pick one, deploy it
         </span>
       </div>
 
-      <div className="grid grid-cols-1 gap-3 lg:grid-cols-[minmax(0,1fr)_420px]">
+      <div className="grid grid-cols-1 gap-3 lg:grid-cols-[minmax(0,1fr)_400px]">
         <section className="hud-corners rounded-lg border border-border bg-card">
           <h3 className="flex items-center border-b border-border px-3 py-1.5 font-mono text-[10px] font-semibold uppercase tracking-[0.14em] text-secondary-foreground">
-            <span className="mr-1.5 text-muted-foreground">▮</span>Checkpoints
+            <span className="mr-1.5 text-muted-foreground">▮</span>Model library
           </h3>
           {models === null ? (
             <div className="p-6 text-sm text-muted-foreground">loading…</div>
           ) : models.length === 0 ? (
             <div className="p-6 text-sm text-muted-foreground">
-              No checkpoints under runs/ yet — train one (panel on the right), then
-              pull it with scripts/capture_pull.sh.
+              No models in the library yet — start a training job, then pull
+              artifacts (Jobs panel).
             </div>
           ) : (
             <table className="w-full border-collapse text-xs">
               <thead>
                 <tr className="border-b border-border font-mono text-[10px] uppercase tracking-[0.1em] text-muted-foreground">
-                  <th className="px-3 py-1.5 text-left font-normal">checkpoint</th>
-                  <th className="px-3 py-1.5 text-left font-normal">training run</th>
+                  <th className="px-3 py-1.5 text-left font-normal">model</th>
+                  <th className="px-3 py-1.5 text-left font-normal">trained by</th>
                   <th className="px-3 py-1.5 text-right font-normal">final metrics</th>
                   <th className="px-3 py-1.5 text-right font-normal">size</th>
                   <th className="px-3 py-1.5 text-right font-normal">trained</th>
@@ -71,7 +71,7 @@ export default function Models() {
                       active?.path === m.path && "bg-secondary shadow-[inset_2px_0_0_#3987e5]",
                     )}
                   >
-                    <td className="px-3 py-2 font-mono">{m.file}</td>
+                    <td className="px-3 py-2 font-mono">{modelLabel(m)}</td>
                     <td className="px-3 py-2">
                       <Link
                         href={`/runs?run=${encodeURIComponent(m.run)}`}
@@ -106,33 +106,37 @@ export default function Models() {
             <h3 className="flex items-center border-b border-border px-3 py-1.5 font-mono text-[10px] font-semibold uppercase tracking-[0.14em] text-secondary-foreground">
               <span className="mr-1.5 text-muted-foreground">▮</span>Deploy
               {active && (
-                <span className="ml-auto font-mono font-normal normal-case tracking-normal text-muted-foreground">
-                  {active.path}
+                <span className="ml-auto truncate font-mono font-normal normal-case tracking-normal text-muted-foreground">
+                  {modelLabel(active)} · {active.run}
                 </span>
               )}
             </h3>
             {active ? (
-              <div className="p-3">
-                <div className="font-mono text-[10px] uppercase tracking-[0.12em] text-muted-foreground">
-                  Fly it — filmed sortie (fpv + chase + track + events)
+              <div className="flex flex-col gap-3 p-3">
+                <div>
+                  <JobButton
+                    label="▶ FLY SORTIE"
+                    body={{ kind: "fly", policy: active.path }}
+                  />
+                  <div className="mt-1 text-[11px] text-muted-foreground">
+                    Filmed search-and-reach flight — fpv, chase, track and events
+                    land in Runs when it finishes.
+                  </div>
                 </div>
-                <CommandBar
-                  command={`${SIM} scripts/fly_search.py --policy ${active.path} --seconds 90 --headless --enable_cameras`}
-                />
-                <div className="mt-3 font-mono text-[10px] uppercase tracking-[0.12em] text-muted-foreground">
-                  Score it — full funnel over 400 episodes
-                </div>
-                <CommandBar
-                  command={`${SIM} scripts/eval_search.py --policy ${active.path} --num_envs 256 --episodes 400 --headless`}
-                />
-                <div className="mt-3 text-[11px] text-muted-foreground">
-                  Run on the GPU box; the sortie lands in Runs after
-                  scripts/capture_pull.sh. One-click launch from here is the next
-                  backend step (run-trigger endpoint).
+                <div>
+                  <JobButton
+                    label="◎ SCORE POLICY"
+                    variant="secondary"
+                    body={{ kind: "eval", policy: active.path }}
+                  />
+                  <div className="mt-1 text-[11px] text-muted-foreground">
+                    Full funnel over 400 episodes — swept, found, reached, and how
+                    each episode ended.
+                  </div>
                 </div>
               </div>
             ) : (
-              <div className="p-3 text-xs text-muted-foreground">select a checkpoint</div>
+              <div className="p-3 text-xs text-muted-foreground">select a model</div>
             )}
           </section>
 
@@ -141,17 +145,15 @@ export default function Models() {
               <span className="mr-1.5 text-muted-foreground">▮</span>Train a new model
             </h3>
             <div className="p-3">
-              <div className="font-mono text-[10px] uppercase tracking-[0.12em] text-muted-foreground">
-                Search-and-reach on the Cornell world (writes search.pt + curve.jsonl)
-              </div>
-              <CommandBar
-                command={`${SIM} scripts/train_search.py --num_envs 1024 --iters 1500 --headless`}
-              />
-              <div className="mt-2 text-[11px] text-muted-foreground">
-                Training progress shows up in Runs as the curve.jsonl chart once pulled.
+              <JobButton label="▲ START TRAINING" body={{ kind: "train" }} />
+              <div className="mt-1 text-[11px] text-muted-foreground">
+                Search-and-reach on the Cornell world, 1500 iterations. Progress
+                appears in Runs as a training curve; the model lands here.
               </div>
             </div>
           </section>
+
+          <JobsPanel />
         </div>
       </div>
     </main>

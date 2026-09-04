@@ -39,8 +39,33 @@ export type Model = {
 export const fmtBytes = (b: number) =>
   b >= 1 << 20 ? `${(b / (1 << 20)).toFixed(1)} MB` : `${Math.round(b / 1024)} KB`;
 
-// The docker lane every launch command runs through on the GPU box.
-export const SIM = "docker compose run --rm sim /isaac-sim/python.sh";
+export type Job = {
+  id: string;
+  kind: "train" | "fly" | "eval" | "mission" | "live";
+  policy?: string | null;
+  started: number;
+  finished?: number | null;
+  status: "running" | "done" | "stopped" | "failed";
+  log: string;
+};
+
+export type Site = { world: string; half_m: number; ground: string };
+
+export async function postJSON<T>(url: string, body?: unknown): Promise<T> {
+  const r = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
+  if (!r.ok) {
+    let detail = r.statusText;
+    try {
+      detail = ((await r.json()) as { detail?: string }).detail ?? detail;
+    } catch {}
+    throw new Error(detail);
+  }
+  return (await r.json()) as T;
+}
 
 export type RunKind = "flight" | "search" | "training" | "sweep" | "view";
 
@@ -65,6 +90,30 @@ export function runKind(run: Run): RunKind {
 }
 
 export const media = (runId: string, file: string) => `/media/${runId}/${file}`;
+
+// Operator-facing names for run artifacts — never show raw file names in the UI.
+const ARTIFACT_LABELS: Record<string, string> = {
+  "overview.mp4": "chase cam",
+  "chase.mp4": "chase cam",
+  "fpv.mp4": "fpv",
+  "track.png": "track map",
+  "trajectory.parquet": "track",
+  "scenario.json": "mission",
+  "curve.jsonl": "training",
+  "events.json": "events",
+  "report.json": "sweep",
+  "results.jsonl": "variants",
+};
+
+export function artifactLabel(file: string): string {
+  if (file.startsWith("view_")) return `still ${file.replace(/\D/g, "")}`;
+  return ARTIFACT_LABELS[file] ?? file.replace(/\.[^.]+$/, "");
+}
+
+/** "runs/<id>/search.pt" → "search — <id>" for operator-facing model names. */
+export function modelLabel(m: { run: string; file: string }): string {
+  return m.file.replace(/\.pt$/, "");
+}
 
 export const fmtTime = (ts?: number) =>
   ts
@@ -103,7 +152,7 @@ export function parseJSONL(text: string): Record<string, unknown>[] {
   return out;
 }
 
-export type RunEvent = { t: number; label: string; vehicle?: string };
+export type RunEvent = { t: number; label: string; vehicle?: string; xy?: [number, number] };
 
 /** Normalize events.json (array of events, or {events: [...]}) into {t, label}. */
 export function parseEvents(raw: unknown): RunEvent[] {
@@ -125,7 +174,17 @@ export function parseEvents(raw: unknown): RunEvent[] {
     const vehicle = [o.vehicle, o.target, o.id].find(
       (v) => typeof v === "string" || typeof v === "number",
     );
-    out.push({ t, label: label ?? "event", vehicle: vehicle !== undefined ? String(vehicle) : undefined });
+    const xy =
+      Array.isArray(o.xy) && o.xy.length >= 2 &&
+      typeof o.xy[0] === "number" && typeof o.xy[1] === "number"
+        ? ([o.xy[0], o.xy[1]] as [number, number])
+        : undefined;
+    out.push({
+      t,
+      label: label ?? "event",
+      vehicle: vehicle !== undefined ? String(vehicle) : undefined,
+      xy,
+    });
   }
   return out.sort((a, b) => a.t - b.t);
 }

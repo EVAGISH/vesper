@@ -32,7 +32,7 @@ export function EventsTimeline({
   }, [events, simDuration]);
 
   if (events === null)
-    return <div className="p-4 text-sm text-muted-foreground">loading events.json…</div>;
+    return <div className="p-4 text-sm text-muted-foreground">loading events…</div>;
   if (!events.length)
     return <div className="p-4 text-sm text-muted-foreground">no events recorded</div>;
 

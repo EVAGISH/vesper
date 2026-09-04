@@ -2,13 +2,13 @@
 
 import Link from "next/link";
 import { useEffect, useState } from "react";
-import { CommandBar } from "@/components/command-bar";
+import { JobButton, JobsPanel } from "@/components/job-controls";
+import { SiteMap } from "@/components/site-map";
 import { useVesper } from "@/components/vesper-provider";
-import { fetchJSON, fmtTime, KIND_COLOR, runKind, SIM } from "@/lib/vesper";
+import { fetchJSON, fmtTime, KIND_COLOR, runKind } from "@/lib/vesper";
 
-// Operator home: the live downlink front and center. Until the embedded WebRTC
-// viewport (V2 stretch) ships, this reports the GPU box state, gives the exact
-// session commands, and points the Isaac WebRTC client at the box.
+// Operator home: downlink + AO map. Live sessions start with one click; the
+// embedded in-page WebRTC viewport is the next step on this page.
 
 const LIVE_POLL_MS = 15000;
 
@@ -33,7 +33,7 @@ function Panel({ title, right, children }: {
 
 export default function Live() {
   const { runs } = useVesper();
-  const [ip, setIp] = useState<string | null | undefined>(undefined); // undefined = checking
+  const [ip, setIp] = useState<string | null | undefined>(undefined);
 
   useEffect(() => {
     let alive = true;
@@ -53,7 +53,7 @@ export default function Live() {
 
   return (
     <main className="min-h-0 flex-1 overflow-y-auto p-4">
-      <div className="grid grid-cols-1 gap-3 lg:grid-cols-[minmax(0,1fr)_340px]">
+      <div className="grid grid-cols-1 items-start gap-3 lg:grid-cols-[minmax(0,7fr)_minmax(0,5fr)]">
         <Panel
           title="Live downlink"
           right={
@@ -69,27 +69,28 @@ export default function Live() {
               <div className="font-mono text-sm tracking-[0.3em] text-muted-foreground">
                 {ip ? "AWAITING STREAM" : "STANDBY"}
               </div>
-              <div className="mt-2 max-w-md px-6 text-xs text-muted-foreground">
+              <div className="mx-auto mt-2 max-w-sm px-6 text-xs text-muted-foreground">
                 {ip
-                  ? `A live session on the box streams over WebRTC (port 49100). Start one below, then connect the Isaac Sim WebRTC client to ${ip}. Embedded in-page viewport is V2.`
-                  : "No GPU box is up. Launch one (infra/do/launch.sh), then start a live session below."}
+                  ? "Start a live session, then connect the Isaac WebRTC viewer to the box. In-page video is next."
+                  : "No GPU box is up — bring one up to fly live."}
               </div>
+              {ip && (
+                <div className="mt-4">
+                  <JobButton label="▶ START LIVE SESSION" body={{ kind: "live" }} />
+                </div>
+              )}
             </div>
-            {/* HUD frame ticks */}
             <div className="pointer-events-none absolute left-3 top-3 h-4 w-4 border-l border-t border-[#4a4a44]" />
             <div className="pointer-events-none absolute right-3 top-3 h-4 w-4 border-r border-t border-[#4a4a44]" />
             <div className="pointer-events-none absolute bottom-3 left-3 h-4 w-4 border-b border-l border-[#4a4a44]" />
             <div className="pointer-events-none absolute bottom-3 right-3 h-4 w-4 border-b border-r border-[#4a4a44]" />
           </div>
-          <div className="border-t border-border p-3">
-            <div className="font-mono text-[10px] uppercase tracking-[0.12em] text-muted-foreground">
-              Start a live session on the box
-            </div>
-            <CommandBar command={`${SIM} scripts/live_world.py assets/cornell/cornell.usd`} />
-          </div>
         </Panel>
 
-        <div className="flex flex-col gap-3">
+        <div className="row-span-2 flex min-w-0 flex-col gap-3">
+          <Panel title="AO map" right="site frame · N up">
+            <SiteMap />
+          </Panel>
           <Panel title="Latest sortie">
             {latest ? (
               <Link
@@ -115,14 +116,9 @@ export default function Live() {
               <div className="p-3 text-xs text-muted-foreground">no runs yet</div>
             )}
           </Panel>
-
-          <Panel title="Pull fresh artifacts">
-            <div className="p-3 text-xs text-muted-foreground">
-              Runs land here when synced from the box:
-              <CommandBar command="scripts/capture_pull.sh" />
-            </div>
-          </Panel>
         </div>
+
+        <JobsPanel />
       </div>
     </main>
   );

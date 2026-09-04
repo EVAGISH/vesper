@@ -1,6 +1,6 @@
 "use client";
 
-import { CommandBar } from "@/components/command-bar";
+import { JobButton } from "@/components/job-controls";
 import { useVesper } from "@/components/vesper-provider";
 import type { Scenario } from "@/lib/vesper";
 
@@ -9,10 +9,10 @@ function ScenarioCard({ s }: { s: Scenario }) {
     <section className="hud-corners rounded-lg border border-border bg-card">
       <h3 className="flex items-center border-b border-border px-3 py-1.5 font-mono text-[10px] font-semibold uppercase tracking-[0.14em] text-secondary-foreground">
         <span className="mr-1.5 text-muted-foreground">▮</span>
-        {s.file}
+        {s.file.replace(/\.json$/, "").replace(/[_-]/g, " ")}
         {s.world && (
           <span className="ml-auto font-normal normal-case tracking-normal text-muted-foreground">
-            {s.world}
+            {s.world} site
           </span>
         )}
       </h3>
@@ -21,7 +21,7 @@ function ScenarioCard({ s }: { s: Scenario }) {
           <tbody>
             {(
               [
-                ["terrain", s.terrain_usd ? <span key="t" className="font-mono">{s.terrain_usd}</span> : "flat"],
+                ["terrain", s.terrain_usd ? "site terrain" : "flat"],
                 ["waypoints", s.waypoints],
                 ["wind", `${s.wind_ms ?? 0} m/s`],
                 ["visibility", s.visibility_m != null ? `${s.visibility_m} m` : "∞"],
@@ -36,7 +36,12 @@ function ScenarioCard({ s }: { s: Scenario }) {
             ))}
           </tbody>
         </table>
-        <CommandBar command={s.command} />
+        <div className="mt-3">
+          <JobButton label="▶ LAUNCH MISSION" body={{ kind: "mission", scenario: s.file }} />
+          <div className="mt-1 text-[11px] text-muted-foreground">
+            Flies the waypoint mission on the box; the filmed run lands in Runs.
+          </div>
+        </div>
       </div>
     </section>
   );
@@ -49,7 +54,7 @@ export default function Environments() {
       <div className="mb-3.5 flex items-baseline gap-3">
         <h2 className="text-base font-bold">Environments</h2>
         <span className="text-xs text-muted-foreground">
-          scenario specs at the repo root — copy a command to launch on the GPU box
+          mission scenarios for this site — launch straight to the GPU box
         </span>
       </div>
       {scenarios === null ? (

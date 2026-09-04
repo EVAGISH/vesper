@@ -47,9 +47,9 @@ export function CurveCharts({ runId }: { runId: string }) {
   }, [rows]);
 
   if (rows === null)
-    return <div className="p-6 text-sm text-muted-foreground">loading curve.jsonl…</div>;
+    return <div className="p-6 text-sm text-muted-foreground">loading training progress…</div>;
   if (!series.length)
-    return <div className="p-6 text-sm text-muted-foreground">no plottable metrics in curve.jsonl</div>;
+    return <div className="p-6 text-sm text-muted-foreground">no training metrics recorded</div>;
 
   return (
     <div className="grid gap-3 p-3 sm:grid-cols-2">
