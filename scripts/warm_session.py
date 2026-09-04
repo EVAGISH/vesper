@@ -12,11 +12,17 @@ Serves on VESPER_LIVE_PORT (8180):
     GET  /streams          cameras being published
     GET  /fpv.mjpeg        drone's own view (nadir, cone lens) -- annotated
     GET  /overview.mjpeg   chase of drone 0
-    GET  /state            {t, drones:[{x,y,z}], targets:[{x,y,found,reached}], policy, found, reached}
+    GET  /state            {t, drones:[{x,y,z}], targets:[{x,y,found,reached}], policy, found,
+                            reached, manual, teleop_age_s}
     POST /command          {"kind":"reset"} | {"kind":"deploy","policy":"runs/<id>/<f>.pt"}
+                           {"kind":"manual","on":true|false}   hand drone 0 to the operator
+                           {"kind":"teleop","axes":[fwd,left,up]} in [-1,1], body frame;
+                           re-sent every ~100 ms by the page. Older than --deadman_s: hover.
 """
 import argparse
+import math
 import os
+import time
 
 os.environ.setdefault("VESPER_LIVE_PORT", "8180")
 
@@ -37,6 +43,10 @@ parser.add_argument("--cameras", action="store_true",
                          "hits a CUDA illegal-access crash (~2 min in). The AO map "
                          "(/state) needs no rendering and is solid without this.")
 parser.add_argument("--seed", type=int, default=7)
+parser.add_argument("--teleop_gain", type=float, default=0.6,
+                    help="full stick = tanh^-1(gain) of the action range; 0.6 is ~13 m/s")
+parser.add_argument("--deadman_s", type=float, default=0.7,
+                    help="manual mode hovers when no teleop command arrived for this long")
 AppLauncher.add_app_launcher_args(parser)
 args = parser.parse_args()
 args.headless = True
@@ -99,7 +109,11 @@ class Policy:
         return self.ac.actor(self.norm(obs))
 
 
-policy = Policy(args.policy)
+try:
+    policy = Policy(args.policy)
+except Exception as e:                                       # noqa: BLE001
+    print(f"[warm] initial policy not loaded ({e}); flying with zero action until a deploy", flush=True)
+    policy = Policy(None)
 srv = LiveFrameServer(int(os.environ["VESPER_LIVE_PORT"]), run_id="warm-session")
 
 fpv = chase = None
@@ -127,11 +141,27 @@ def look_at(cam, pos, target):
         np.array([0.0, pitch, yaw]), degrees=True))
 
 
+manual = False
+teleop = {"axes": [0.0, 0.0, 0.0], "t": 0.0}
+stick = math.atanh(min(max(args.teleop_gain, 0.05), 0.99))
+
+
 def apply_commands():
-    global obs, t0, step
+    global obs, t0, step, manual
     for cmd in srv.drain_commands():
         kind = cmd.get("kind")
-        if kind == "reset":
+        if kind == "manual":
+            manual = bool(cmd.get("on", True))
+            teleop["axes"] = [0.0, 0.0, 0.0]
+            print(f"[warm] manual {'ON: drone 0 is the operator' if manual else 'off: policy flies'}", flush=True)
+        elif kind == "teleop":
+            ax = cmd.get("axes") or [0.0, 0.0, 0.0]
+            try:
+                teleop["axes"] = [min(max(float(v), -1.0), 1.0) for v in ax[:3]] + [0.0] * (3 - len(ax[:3]))
+                teleop["t"] = time.time()
+            except (TypeError, ValueError):
+                pass
+        elif kind == "reset":
             obs = env.ppo_reset()
             t0, step = 0.0, 0
             print("[warm] reset", flush=True)
@@ -149,6 +179,12 @@ def apply_commands():
 while app.is_running():
     apply_commands()
     act = policy.act(obs)
+    if manual:
+        # drone 0 belongs to the operator: body-frame stick through the same
+        # action the policy uses, so WASD flies exactly what the policy would
+        fresh = (time.time() - teleop["t"]) < args.deadman_s
+        ax = teleop["axes"] if fresh else [0.0, 0.0, 0.0]
+        act[0] = torch.tensor(ax, device=env.device) * stick
     obs, rew, done, info = env.ppo_step(act)
     step += 1
     t = step * dt
@@ -158,9 +194,14 @@ while app.is_running():
     tp = env.target_pos[0].cpu().numpy()
     known = env.task.known[0].cpu().numpy()
     reached = env.task.reached[0].cpu().numpy()
+    v0 = env._robot.data.root_lin_vel_w[0]
     srv.set_state({
         "t": round(float(t), 1),
         "policy": policy.name,
+        "manual": manual,
+        "teleop_age_s": round(time.time() - teleop["t"], 2) if teleop["t"] else None,
+        "drone0": {"speed": round(float(v0[:2].norm()), 1), "vz": round(float(v0[2]), 1),
+                   "agl": round(float(info["agl"][0]), 1)},
         "found": int(known.sum()), "reached": int(reached.sum()), "targets": int(args.targets),
         "drones": [{"x": round(float(x), 1), "y": round(float(y), 1), "z": round(float(z), 1)}
                    for x, y, z in drones],

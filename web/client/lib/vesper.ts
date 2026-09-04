@@ -55,6 +55,9 @@ export type Site = { world: string; half_m: number; ground: string };
 export type LiveState = {
   t: number;
   policy?: string;
+  manual?: boolean;
+  teleop_age_s?: number | null;
+  drone0?: { speed: number; vz: number; agl: number };
   found: number;
   reached: number;
   targets: number;
