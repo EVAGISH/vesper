@@ -92,6 +92,10 @@ steps = int(args.seconds / dt)
 drone_path, veh_paths = [], [[] for _ in range(args.targets)]
 events = []
 smooth = None
+# Peak belief, sampled every step. Reading env.task.known at the end reports
+# zeros: DirectRLEnv auto-resets the moment the episode ends and the reset
+# clears the belief, so the final state is the *next* episode's, not this one's.
+peak_found = peak_reached = 0
 
 
 def look_at(cam, pos, target, up_bias=0.0):
@@ -130,6 +134,8 @@ for i in range(steps):
     reached = env.task.reached[0].cpu().numpy().copy()
     vis = info["visible"][0].cpu().numpy()
     drone_path.append(d.copy())
+    peak_found = max(peak_found, int(known.sum()))
+    peak_reached = max(peak_reached, int(reached.sum()))
     for k in range(args.targets):
         veh_paths[k].append(tp[k].copy())
     for k in range(args.targets):
@@ -210,11 +216,10 @@ except Exception as exc:                                   # a plot is never wor
 
 (cap.dir / "events.json").write_text(json.dumps(
     {"events": events, "targets": args.targets, "seconds": args.seconds,
-     "found": int(env.task.known[0].sum()), "reached": int(env.task.reached[0].sum())}, indent=1))
-cap.note(found=int(env.task.known[0].sum()), reached=int(env.task.reached[0].sum()), events=events)
+     "found": peak_found, "reached": peak_reached}, indent=1))
+cap.note(found=peak_found, reached=peak_reached, events=events)
 path = cap.finish()
-print(f"found {int(env.task.known[0].sum())}/{args.targets}, "
-      f"reached {int(env.task.reached[0].sum())}/{args.targets}", flush=True)
+print(f"found {peak_found}/{args.targets}, reached {peak_reached}/{args.targets}", flush=True)
 print(f"wrote {path}", flush=True)
 env.close()
 app.close()
