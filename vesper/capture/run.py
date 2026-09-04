@@ -9,6 +9,7 @@ two-stream run leaves ~3 GB behind. Keeping them had grown runs/ to 68 GB --
 droplet snapshot. Pass keep_frames=True if you genuinely need the stills.
 """
 import json
+import os
 import shutil
 import subprocess
 import time
@@ -29,6 +30,16 @@ class RunCapture:
         self._meta: dict = {"name": name, "started": time.time()}
         self._pool = ThreadPoolExecutor(max_workers=4)     # PNG encoding off the sim thread
         self._pending = []
+        # VESPER_LIVE_PORT: serve every stream's latest frame over HTTP while
+        # the run is in flight (vesper.capture.live) -- the UI's drone feeds.
+        self._live = None
+        port = os.environ.get("VESPER_LIVE_PORT")
+        if port:
+            try:
+                from vesper.capture.live import LiveFrameServer
+                self._live = LiveFrameServer(int(port), self.run_id)
+            except OSError:
+                pass                                       # port taken: capture still works
 
     def _stream_dir(self, stream: str) -> Path:
         return self.dir / ("frames" if stream == "overview" else f"frames_{stream}")
@@ -39,6 +50,8 @@ class RunCapture:
             d.mkdir(exist_ok=True)
             self._n[stream] = 0
         frame = np.array(np.asarray(rgba)[..., :3], dtype=np.uint8, copy=True)   # detach from the GPU buffer
+        if self._live:
+            self._pool.submit(self._live.publish, frame, stream)
         path = d / f"{self._n[stream]:06d}.png"
         self._pending.append(self._pool.submit(lambda f=frame, p=path: Image.fromarray(f).save(p, compress_level=1)))
         self._n[stream] += 1
@@ -49,6 +62,8 @@ class RunCapture:
         self._meta.update(kv)
 
     def finish(self, fps: int = 30) -> Path:
+        if self._live:
+            self._live.close()
         for f in self._pending:
             f.result()
         self._pool.shutdown(wait=True)

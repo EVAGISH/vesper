@@ -39,6 +39,12 @@ args = parser.parse_args()
 args.enable_cameras = True
 app = AppLauncher(args).app
 
+import carb  # noqa: E402
+
+# Same guard as fly_mission.py: Kit's asset streamer dies mid-flight on big
+# tree worlds (cubric HtoD assert) -- load textures up front instead.
+carb.settings.get_settings().set("/rtx-transient/resourcemanager/enableTextureStreaming", False)
+
 import numpy as np  # noqa: E402
 import torch  # noqa: E402
 from PIL import Image, ImageDraw  # noqa: E402

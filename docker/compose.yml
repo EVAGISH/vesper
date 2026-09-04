@@ -15,6 +15,7 @@ services:
     environment:
       - ACCEPT_EULA=Y
       - PRIVACY_CONSENT=Y
+      - VESPER_LIVE_PORT=8180   # in-flight drone-camera feeds (vesper.capture.live)
     volumes:
       - ..:/workspace/vesper
       - ../runs:/workspace/vesper/runs
