@@ -119,7 +119,7 @@ export function SweepTable({ runId, files }: { runId: string; files: string[] })
                         >
                           {isRunCol && link ? (
                             <Link
-                              href={`/?run=${encodeURIComponent(link)}`}
+                              href={`/runs?run=${encodeURIComponent(link)}`}
                               className="text-[#3987e5] underline-offset-2 hover:underline"
                             >
                               {fmtCell(r[c])} ↗

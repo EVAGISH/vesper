@@ -48,14 +48,39 @@ export function TrajectoryPlot({ runId }: { runId: string }) {
       const X = (v: number) => pad + (v - x0) * s + (W - 2 * pad - (x1 - x0) * s) / 2;
       const Y = (v: number) => H - pad - (v - y0) * s - (H - 2 * pad - (y1 - y0) * s) / 2;
 
-      g.strokeStyle = "#2c2c2a";
+      // graticule with meter readouts at each line (invert the affine map)
       g.lineWidth = 1;
+      g.font = "9px ui-monospace, monospace";
       for (let i = 0; i <= 4; i++) {
         const gx = pad + ((W - 2 * pad) * i) / 4;
         const gy = pad + ((H - 2 * pad) * i) / 4;
+        g.strokeStyle = "#2c2c2a";
         g.beginPath(); g.moveTo(gx, pad); g.lineTo(gx, H - pad); g.stroke();
         g.beginPath(); g.moveTo(pad, gy); g.lineTo(W - pad, gy); g.stroke();
+        g.fillStyle = "#5f5e56";
+        const wx = x0 + (gx - X(x0)) / s;
+        const wy = y0 - (gy - Y(y0)) / s;
+        if (i > 0 && i < 4) {
+          const prec = span < 20 ? 1 : 0; // small arenas need sub-meter ticks
+          g.textAlign = "center";
+          g.fillText(wx.toFixed(prec), gx, H - pad + 11);
+          g.textAlign = "right";
+          g.fillText(wy.toFixed(prec), pad - 4, gy + 3);
+        }
       }
+      g.textAlign = "left";
+
+      // north arrow (world +y is north, which is screen-up)
+      g.strokeStyle = "#8a897f";
+      g.fillStyle = "#8a897f";
+      g.lineWidth = 1;
+      const nx = W - pad + 8, nyTop = pad + 2, nyBot = pad + 18;
+      g.beginPath(); g.moveTo(nx, nyBot); g.lineTo(nx, nyTop + 4); g.stroke();
+      g.beginPath();
+      g.moveTo(nx, nyTop); g.lineTo(nx - 3, nyTop + 6); g.lineTo(nx + 3, nyTop + 6);
+      g.closePath(); g.fill();
+      g.font = "9px ui-monospace, monospace";
+      g.fillText("N", nx - 3, nyBot + 10);
 
       // sequential ramp on the accent hue: light early → dark late
       g.lineWidth = 2;
@@ -75,10 +100,10 @@ export function TrajectoryPlot({ runId }: { runId: string }) {
       g.beginPath(); g.arc(X(xs[n - 1]), Y(ys[n - 1]), 5, 0, 7); g.fill();
 
       g.fillStyle = "#8a897f";
-      g.font = "11px system-ui, sans-serif";
-      g.fillText("start", X(xs[0]) + 8, Y(ys[0]) + 4);
-      g.fillText("end", X(xs[n - 1]) + 8, Y(ys[n - 1]) + 4);
-      g.fillText(`${Math.round(span)} m across · +x east, +y north`, pad, H - 8);
+      g.font = "10px ui-monospace, monospace";
+      g.fillText("START", X(xs[0]) + 8, Y(ys[0]) + 4);
+      g.fillText("END", X(xs[n - 1]) + 8, Y(ys[n - 1]) + 4);
+      g.fillText(`${Math.round(span)} M ACROSS · +X EAST · +Y NORTH`, pad, H - 6);
     };
 
     draw();
@@ -123,8 +148,21 @@ export function TrajectoryPlot({ runId }: { runId: string }) {
         onMouseLeave={() => setTip(null)}
       />
       {tip && (
+        <>
+          {/* reticle crosshair through the hovered sample */}
+          <div
+            className="pointer-events-none absolute inset-y-0 w-px bg-[#8a897f]/35"
+            style={{ left: tip.x }}
+          />
+          <div
+            className="pointer-events-none absolute inset-x-0 h-px bg-[#8a897f]/35"
+            style={{ top: tip.y }}
+          />
+        </>
+      )}
+      {tip && (
         <div
-          className="pointer-events-none absolute z-10 rounded-md border border-border bg-popover px-2.5 py-1.5 text-xs shadow-lg"
+          className="pointer-events-none absolute z-10 border border-border bg-popover px-2.5 py-1.5 font-mono text-[11px] shadow-lg"
           style={{ left: tip.x + 14, top: tip.y + 14 }}
         >
           <span className="text-muted-foreground">t=</span>{tip.t.toFixed(1)} s<br />

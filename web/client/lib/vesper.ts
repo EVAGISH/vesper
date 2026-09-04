@@ -27,6 +27,21 @@ export type Scenario = {
 
 export type Trajectory = { t: number[]; px: number[]; py: number[]; pz: number[] };
 
+export type Model = {
+  run: string;
+  file: string;
+  path: string;
+  bytes: number;
+  mtime: number;
+  metrics: Record<string, number>;
+};
+
+export const fmtBytes = (b: number) =>
+  b >= 1 << 20 ? `${(b / (1 << 20)).toFixed(1)} MB` : `${Math.round(b / 1024)} KB`;
+
+// The docker lane every launch command runs through on the GPU box.
+export const SIM = "docker compose run --rm sim /isaac-sim/python.sh";
+
 export type RunKind = "flight" | "search" | "training" | "sweep" | "view";
 
 // Fixed categorical hue per kind (dark-surface steps of the reference palette).

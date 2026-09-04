@@ -1,37 +1,14 @@
 "use client";
 
-import { useState } from "react";
-import { Button } from "@/components/ui/button";
+import { CommandBar } from "@/components/command-bar";
 import { useVesper } from "@/components/vesper-provider";
 import type { Scenario } from "@/lib/vesper";
 
-function CommandBar({ command }: { command: string }) {
-  const [copied, setCopied] = useState(false);
-  return (
-    <div className="mt-2.5 flex items-center gap-2 overflow-hidden rounded-md border border-border bg-background">
-      <code className="flex-1 overflow-x-auto whitespace-nowrap px-2.5 py-1.5 font-mono text-[11px] text-secondary-foreground">
-        {command}
-      </code>
-      <Button
-        variant="secondary"
-        size="sm"
-        className="mr-1 h-6 shrink-0 cursor-pointer px-2 text-[10px]"
-        onClick={() => {
-          navigator.clipboard.writeText(command);
-          setCopied(true);
-          setTimeout(() => setCopied(false), 1200);
-        }}
-      >
-        {copied ? "copied" : "copy"}
-      </Button>
-    </div>
-  );
-}
-
 function ScenarioCard({ s }: { s: Scenario }) {
   return (
-    <section className="overflow-hidden rounded-lg border border-border bg-card">
-      <h3 className="flex items-center border-b border-border px-3 py-1.5 text-[10px] font-semibold uppercase tracking-[0.12em] text-secondary-foreground">
+    <section className="hud-corners rounded-lg border border-border bg-card">
+      <h3 className="flex items-center border-b border-border px-3 py-1.5 font-mono text-[10px] font-semibold uppercase tracking-[0.14em] text-secondary-foreground">
+        <span className="mr-1.5 text-muted-foreground">▮</span>
         {s.file}
         {s.world && (
           <span className="ml-auto font-normal normal-case tracking-normal text-muted-foreground">

@@ -19,9 +19,10 @@ function Panel({
 }) {
   return (
     <section
-      className={`overflow-hidden rounded-lg border border-border bg-card ${wide ? "col-span-full" : ""}`}
+      className={`hud-corners rounded-lg border border-border bg-card ${wide ? "col-span-full" : ""}`}
     >
-      <h3 className="flex items-center border-b border-border px-3 py-1.5 text-[10px] font-semibold uppercase tracking-[0.12em] text-secondary-foreground">
+      <h3 className="flex items-center border-b border-border px-3 py-1.5 font-mono text-[10px] font-semibold uppercase tracking-[0.14em] text-secondary-foreground">
+        <span className="mr-1.5 text-muted-foreground">▮</span>
         {title}
         {right && (
           <span className="ml-auto font-normal normal-case tracking-normal text-muted-foreground">
@@ -96,7 +97,7 @@ export function RunDetail({ run }: { run: Run }) {
     <div ref={containerRef} className="flex-1 overflow-y-auto p-4">
       <div className="mb-3.5 flex flex-wrap items-baseline gap-3">
         <h2 className="font-mono text-base font-bold">{run.id}</h2>
-        <span className="rounded-lg border border-border px-2 py-0.5 text-[10px] uppercase tracking-[0.08em] text-secondary-foreground">
+        <span className="border border-border px-2 py-0.5 font-mono text-[10px] uppercase tracking-[0.12em] text-secondary-foreground">
           <i className="mr-1.5 not-italic" style={{ color: KIND_COLOR[kind] }}>
             ●
           </i>
@@ -193,8 +194,8 @@ export function RunDetail({ run }: { run: Run }) {
           </div>
           {scenario && (
             <>
-              <h3 className="border-y border-border px-3 py-1.5 text-[10px] font-semibold uppercase tracking-[0.12em] text-secondary-foreground">
-                Scenario
+              <h3 className="border-y border-border px-3 py-1.5 font-mono text-[10px] font-semibold uppercase tracking-[0.14em] text-secondary-foreground">
+                <span className="mr-1.5 text-muted-foreground">▮</span>Scenario
               </h3>
               <div className="p-3">
                 <KV

@@ -117,6 +117,7 @@
   --sidebar-accent-foreground: #ffffff;
   --sidebar-border: #33332f;
   --sidebar-ring: #3987e5;
+  --radius: 0.2rem; /* squared, instrument-panel corners */
 }
 
 @layer base {
@@ -129,4 +130,30 @@
   html {
     @apply font-sans;
   }
+}
+
+/* HUD chrome: corner brackets on instrument panels (two diagonal corners). */
+.hud-corners {
+  position: relative;
+}
+.hud-corners::before,
+.hud-corners::after {
+  content: "";
+  position: absolute;
+  width: 9px;
+  height: 9px;
+  pointer-events: none;
+  z-index: 1;
+}
+.hud-corners::before {
+  top: -1px;
+  left: -1px;
+  border-top: 1px solid #6a6a60;
+  border-left: 1px solid #6a6a60;
+}
+.hud-corners::after {
+  bottom: -1px;
+  right: -1px;
+  border-bottom: 1px solid #6a6a60;
+  border-right: 1px solid #6a6a60;
 }

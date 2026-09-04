@@ -23,12 +23,6 @@ export function RunRail({
 }) {
   return (
     <aside className="flex w-[292px] shrink-0 flex-col overflow-y-auto border-r border-border bg-card">
-      <div className="m-2.5 rounded-lg border border-dashed border-border px-3 py-2.5 text-[11px] text-muted-foreground">
-        <b className="text-[10px] font-semibold tracking-[0.1em] text-secondary-foreground">
-          LIVE
-        </b>{" "}
-        · no active run — the latest frame from an in-progress run lands here (V2)
-      </div>
       {runs.length === 0 && (
         <div className="p-8 text-center text-muted-foreground">
           No runs. Pull some with scripts/capture_pull.sh
@@ -41,7 +35,7 @@ export function RunRail({
         return (
           <div key={r.id}>
             {head && (
-              <div className="px-3.5 pb-1 pt-2 text-[10px] uppercase tracking-[0.12em] text-muted-foreground">
+              <div className="px-3.5 pb-1 pt-2 font-mono text-[10px] uppercase tracking-[0.14em] text-muted-foreground">
                 {day}
               </div>
             )}
@@ -55,7 +49,7 @@ export function RunRail({
               <div className="flex items-baseline text-xs font-semibold">
                 <span className="truncate">{r.manifest.name || r.id}</span>
                 <span
-                  className="ml-auto shrink-0 pl-2 text-[10px] font-normal"
+                  className="ml-auto shrink-0 pl-2 font-mono text-[9.5px] font-normal uppercase tracking-[0.08em]"
                   style={{ color: KIND_COLOR[kind] }}
                 >
                   ● {kind}
@@ -72,7 +66,7 @@ export function RunRail({
                     <Badge
                       key={f}
                       variant="outline"
-                      className="rounded-lg bg-background px-1.5 py-0 text-[9.5px] font-normal text-secondary-foreground"
+                      className="rounded-none bg-background px-1.5 py-0 font-mono text-[9px] font-normal text-secondary-foreground"
                     >
                       {f.replace(/\.[^.]+$/, "")}
                     </Badge>

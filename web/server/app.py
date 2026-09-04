@@ -8,7 +8,10 @@ track.png, trajectory.parquet, scenario.json); no state of its own. Videos are
 served with HTTP Range support so <video> can stream and scrub.
 """
 import json
+import os
 import re
+import time
+import urllib.request
 from pathlib import Path
 
 import pyarrow.parquet as pq
@@ -83,6 +86,78 @@ def scenarios():
             "command": f"docker compose run --rm sim /isaac-sim/python.sh scripts/fly_mission.py {f.name}",
         })
     return out
+
+
+@app.get("/api/models")
+def models():
+    """Every policy checkpoint under runs/ (train_* writes runs/<id>/*.pt),
+    with the final training metrics from the sibling curve.jsonl when present."""
+    out = []
+    for d in sorted(RUNS.iterdir(), reverse=True) if RUNS.is_dir() else []:
+        if not d.is_dir():
+            continue
+        metrics = {}
+        curve = d / "curve.jsonl"
+        if curve.exists():
+            try:
+                lines = [ln for ln in curve.read_text().splitlines() if ln.strip()]
+                if lines:
+                    last = json.loads(lines[-1])
+                    metrics = {k: v for k, v in last.items() if isinstance(v, (int, float))}
+            except (json.JSONDecodeError, UnicodeDecodeError, OSError):
+                pass
+        for f in sorted(d.glob("*.pt")):
+            st = f.stat()
+            out.append({
+                "run": d.name,
+                "file": f.name,
+                "path": f"runs/{d.name}/{f.name}",
+                "bytes": st.st_size,
+                "mtime": st.st_mtime,
+                "metrics": metrics,
+            })
+    return out
+
+
+_live_cache = {"t": 0.0, "ip": None}
+
+
+@app.get("/api/live")
+def live():
+    """Public IP of the GPU droplet (tag vesper, name from DROPLET_NAME), so the
+    live page can point the WebRTC client somewhere. Cached 30 s; null when the
+    box is down or no DIGITALOCEAN_TOKEN is configured in .env."""
+    now = time.time()
+    if now - _live_cache["t"] < 30:
+        return {"ip": _live_cache["ip"]}
+    token = os.environ.get("DIGITALOCEAN_TOKEN")
+    if not token:
+        env = ROOT / ".env"
+        if env.exists():
+            for line in env.read_text().splitlines():
+                m = re.match(r"^(?:export\s+)?DIGITALOCEAN_TOKEN=[\"']?([^\"'#\s]+)", line)
+                if m:
+                    token = m.group(1)
+                    break
+    ip = None
+    if token:
+        name = os.environ.get("DROPLET_NAME", "vesper-dev")
+        req = urllib.request.Request(
+            "https://api.digitalocean.com/v2/droplets?tag_name=vesper",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=4) as r:
+                for drop in json.load(r).get("droplets", []):
+                    if drop.get("name") != name:
+                        continue
+                    for net in drop.get("networks", {}).get("v4", []):
+                        if net.get("type") == "public":
+                            ip = net.get("ip_address")
+        except OSError:
+            pass
+    _live_cache.update(t=now, ip=ip)
+    return {"ip": ip}
 
 
 @app.get("/media/{run_id}/{name}")
