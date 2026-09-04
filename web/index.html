@@ -1,0 +1,243 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Vesper</title>
+<style>
+  /* Committed dark ops-console look; tokens from the validated reference palette. */
+  :root {
+    color-scheme: dark;
+    --surface-0: #111110;
+    --surface-1: #1a1a19;
+    --surface-2: #242423;
+    --border:    #33332f;
+    --text-primary:   #ffffff;
+    --text-secondary: #c3c2b7;
+    --text-muted:     #8a897f;
+    --accent:  #3987e5;   /* categorical slot 1 (dark step) */
+    --accent-2:#d95926;   /* slot 2 */
+    --good:    #199e70;
+  }
+  * { box-sizing: border-box; margin: 0; }
+  body {
+    background: var(--surface-0); color: var(--text-primary);
+    font: 14px/1.5 -apple-system, "SF Pro Text", "Segoe UI", sans-serif;
+    height: 100vh; display: flex; flex-direction: column;
+  }
+  header {
+    display: flex; align-items: baseline; gap: 16px; padding: 12px 20px;
+    border-bottom: 1px solid var(--border); background: var(--surface-1);
+  }
+  header h1 { font-size: 16px; letter-spacing: 0.14em; font-weight: 700; }
+  header .sub { color: var(--text-muted); font-size: 12px; }
+  nav { margin-left: auto; display: flex; gap: 4px; }
+  nav button {
+    background: none; border: 1px solid transparent; border-radius: 6px;
+    color: var(--text-secondary); padding: 5px 12px; font: inherit; cursor: pointer;
+  }
+  nav button.active { background: var(--surface-2); color: var(--text-primary); border-color: var(--border); }
+  main { flex: 1; display: flex; min-height: 0; }
+  #sidebar {
+    width: 280px; border-right: 1px solid var(--border); overflow-y: auto;
+    background: var(--surface-1); flex-shrink: 0;
+  }
+  .run-item { padding: 12px 16px; border-bottom: 1px solid var(--border); cursor: pointer; }
+  .run-item:hover { background: var(--surface-2); }
+  .run-item.active { background: var(--surface-2); box-shadow: inset 3px 0 0 var(--accent); }
+  .run-item .name { font-weight: 600; }
+  .run-item .meta { color: var(--text-muted); font-size: 12px; }
+  .badges { display: flex; gap: 4px; margin-top: 4px; flex-wrap: wrap; }
+  .badge {
+    font-size: 10px; padding: 1px 7px; border-radius: 8px;
+    background: var(--surface-0); color: var(--text-secondary); border: 1px solid var(--border);
+  }
+  #content { flex: 1; overflow-y: auto; padding: 20px; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(380px, 1fr)); gap: 16px; }
+  .card { background: var(--surface-1); border: 1px solid var(--border); border-radius: 10px; overflow: hidden; }
+  .card h3 {
+    font-size: 12px; font-weight: 600; color: var(--text-secondary);
+    text-transform: uppercase; letter-spacing: 0.08em; padding: 10px 14px;
+    border-bottom: 1px solid var(--border);
+  }
+  .card .body { padding: 14px; }
+  video, .card img { width: 100%; display: block; background: #000; }
+  canvas { width: 100%; display: block; }
+  table.kv { border-collapse: collapse; width: 100%; }
+  table.kv td { padding: 3px 8px 3px 0; vertical-align: top; }
+  table.kv td:first-child { color: var(--text-muted); white-space: nowrap; }
+  .empty { color: var(--text-muted); padding: 40px; text-align: center; }
+  .scenario-card .cmd {
+    font: 12px/1.5 ui-monospace, "SF Mono", monospace; background: var(--surface-0);
+    border: 1px solid var(--border); border-radius: 6px; padding: 8px 10px;
+    color: var(--text-secondary); overflow-x: auto; white-space: nowrap; margin-top: 10px;
+  }
+  .copy { float: right; background: var(--surface-2); color: var(--text-secondary);
+    border: 1px solid var(--border); border-radius: 5px; font-size: 11px; padding: 2px 8px; cursor: pointer; }
+  .copy:hover { color: var(--text-primary); }
+  #tooltip {
+    position: fixed; pointer-events: none; display: none; z-index: 10;
+    background: var(--surface-2); border: 1px solid var(--border); border-radius: 6px;
+    padding: 6px 9px; font-size: 12px; color: var(--text-primary); box-shadow: 0 4px 16px rgba(0,0,0,.5);
+  }
+  #tooltip .t { color: var(--text-muted); }
+</style>
+</head>
+<body>
+<header>
+  <h1>VESPER</h1>
+  <span class="sub" id="status">loading…</span>
+  <nav>
+    <button id="tab-runs" class="active">Runs</button>
+    <button id="tab-envs">Environments</button>
+  </nav>
+</header>
+<main>
+  <div id="sidebar"></div>
+  <div id="content"><div class="empty">Loading…</div></div>
+</main>
+<div id="tooltip"></div>
+<script>
+const $ = s => document.querySelector(s);
+let runs = [], scenarios = [], tab = "runs", activeRun = null;
+
+const fmtTime = ts => ts ? new Date(ts * 1000).toLocaleString() : "";
+const fmtDur = m => (m.finished && m.started) ? Math.round(m.finished - m.started) + " s wall" : "";
+
+async function boot() {
+  [runs, scenarios] = await Promise.all([
+    fetch("/api/runs").then(r => r.json()),
+    fetch("/api/scenarios").then(r => r.json()),
+  ]);
+  $("#status").textContent = `${runs.length} runs · ${scenarios.length} scenarios`;
+  renderSidebar();
+  if (tab === "runs" && runs.length) selectRun(runs[0].id); else render();
+}
+
+function renderSidebar() {
+  const sb = $("#sidebar");
+  if (tab !== "runs") { sb.innerHTML = ""; sb.style.display = "none"; return; }
+  sb.style.display = "";
+  sb.innerHTML = runs.map(r => `
+    <div class="run-item ${r.id === activeRun ? "active" : ""}" data-id="${r.id}">
+      <div class="name">${r.manifest.name || r.id}</div>
+      <div class="meta">${fmtTime(r.manifest.started)}</div>
+      <div class="badges">${r.files.map(f => `<span class="badge">${f.replace(/\..*$/, "")}</span>`).join("")}</div>
+    </div>`).join("") || `<div class="empty">No runs. Pull some with scripts/capture_pull.sh</div>`;
+  sb.querySelectorAll(".run-item").forEach(el => el.onclick = () => selectRun(el.dataset.id));
+}
+
+function selectRun(id) {
+  activeRun = id; renderSidebar(); render();
+}
+
+function render() {
+  const c = $("#content");
+  if (tab === "envs") { renderEnvs(c); return; }
+  const run = runs.find(r => r.id === activeRun);
+  if (!run) { c.innerHTML = `<div class="empty">Select a run</div>`; return; }
+  const m = run.manifest;
+  const vids = run.files.filter(f => f.endsWith(".mp4"));
+  const pngs = run.files.filter(f => f.endsWith(".png"));
+  const hasTraj = run.files.includes("trajectory.parquet");
+  c.innerHTML = `<div class="grid">
+    ${vids.map(v => `<div class="card"><h3>${v.replace(".mp4", "")}</h3>
+      <video controls preload="metadata" src="/media/${run.id}/${v}"></video></div>`).join("")}
+    ${pngs.map(p => `<div class="card"><h3>${p.replace(".png", "")}</h3>
+      <img src="/media/${run.id}/${p}" alt="${p}"></div>`).join("")}
+    ${hasTraj ? `<div class="card"><h3>Trajectory — top-down</h3><canvas id="traj" height="340"></canvas></div>` : ""}
+    <div class="card"><h3>Run</h3><div class="body"><table class="kv">
+      <tr><td>id</td><td>${run.id}</td></tr>
+      <tr><td>scene</td><td>${m.scene || "—"}</td></tr>
+      <tr><td>started</td><td>${fmtTime(m.started)}</td></tr>
+      <tr><td>duration</td><td>${fmtDur(m) || "—"}</td></tr>
+      <tr><td>streams</td><td>${Object.entries(m.streams || {}).map(([k, v]) => `${k} (${v})`).join(", ") || "—"}</td></tr>
+      <tr><td>frames</td><td>${Object.values(m.frames || {})[0] ?? "—"} @ ${m.fps || "?"} fps</td></tr>
+    </table></div></div>
+  </div>`;
+  if (hasTraj) drawTrajectory(run.id);
+}
+
+async function drawTrajectory(id) {
+  const d = await fetch(`/api/runs/${id}/trajectory`).then(r => r.ok ? r.json() : null);
+  const cv = $("#traj");
+  if (!d || !cv || activeRun !== id) return;
+  const dpr = window.devicePixelRatio || 1;
+  const W = cv.clientWidth, H = 340;
+  cv.width = W * dpr; cv.height = H * dpr;
+  const g = cv.getContext("2d"); g.scale(dpr, dpr);
+  g.fillStyle = "#1a1a19"; g.fillRect(0, 0, W, H);
+  const xs = d.px, ys = d.py, ts = d.t, zs = d.pz, n = xs.length;
+  if (n < 2) return;
+  const pad = 28;
+  const [x0, x1] = [Math.min(...xs), Math.max(...xs)], [y0, y1] = [Math.min(...ys), Math.max(...ys)];
+  const span = Math.max(x1 - x0, y1 - y0, 1);
+  const s = (Math.min(W, H) - 2 * pad) / span;
+  const X = v => pad + (v - x0) * s + (W - 2 * pad - (x1 - x0) * s) / 2;
+  const Y = v => H - pad - (v - y0) * s - (H - 2 * pad - (y1 - y0) * s) / 2;
+  // recessive grid
+  g.strokeStyle = "#242423"; g.lineWidth = 1;
+  for (let i = 0; i <= 4; i++) {
+    const gx = pad + (W - 2 * pad) * i / 4, gy = pad + (H - 2 * pad) * i / 4;
+    g.beginPath(); g.moveTo(gx, pad); g.lineTo(gx, H - pad); g.stroke();
+    g.beginPath(); g.moveTo(pad, gy); g.lineTo(W - pad, gy); g.stroke();
+  }
+  // path: single hue, light→dark with time (sequential ramp on the accent hue)
+  for (let i = 1; i < n; i++) {
+    const f = i / n;
+    g.strokeStyle = `oklch(${78 - 30 * f}% 0.13 255)`;
+    g.lineWidth = 2;
+    g.beginPath(); g.moveTo(X(xs[i-1]), Y(ys[i-1])); g.lineTo(X(xs[i]), Y(ys[i])); g.stroke();
+  }
+  // endpoints: start ring, end dot
+  g.strokeStyle = "#c3c2b7"; g.lineWidth = 2;
+  g.beginPath(); g.arc(X(xs[0]), Y(ys[0]), 5, 0, 7); g.stroke();
+  g.fillStyle = "#3987e5";
+  g.beginPath(); g.arc(X(xs[n-1]), Y(ys[n-1]), 5, 0, 7); g.fill();
+  g.fillStyle = "#8a897f"; g.font = "11px -apple-system, sans-serif";
+  g.fillText("start", X(xs[0]) + 8, Y(ys[0]) + 4);
+  g.fillText(`${Math.round(span)} m across`, pad, H - 8);
+  // hover: nearest sample
+  const tip = $("#tooltip");
+  cv.onmousemove = e => {
+    const r = cv.getBoundingClientRect(), mx = e.clientX - r.left, my = e.clientY - r.top;
+    let best = 0, bd = 1e9;
+    for (let i = 0; i < n; i++) {
+      const dd = (X(xs[i]) - mx) ** 2 + (Y(ys[i]) - my) ** 2;
+      if (dd < bd) { bd = dd; best = i; }
+    }
+    if (bd > 30 ** 2) { tip.style.display = "none"; return; }
+    tip.style.display = "block";
+    tip.style.left = e.clientX + 14 + "px"; tip.style.top = e.clientY + 14 + "px";
+    tip.innerHTML = `<span class="t">t=</span>${ts[best].toFixed(1)} s<br>
+      <span class="t">xy</span> ${xs[best].toFixed(0)}, ${ys[best].toFixed(0)} m<br>
+      <span class="t">alt</span> ${zs[best].toFixed(0)} m`;
+  };
+  cv.onmouseleave = () => tip.style.display = "none";
+}
+
+function renderEnvs(c) {
+  $("#sidebar").style.display = "none";
+  c.innerHTML = `<div class="grid">` + (scenarios.map(s => `
+    <div class="card scenario-card"><h3>${s.file}</h3><div class="body">
+      <table class="kv">
+        <tr><td>world</td><td>${s.world || "—"}</td></tr>
+        <tr><td>terrain</td><td>${s.terrain_usd || "flat"}</td></tr>
+        <tr><td>waypoints</td><td>${s.waypoints}</td></tr>
+        <tr><td>wind</td><td>${s.wind_ms ?? 0} m/s</td></tr>
+        <tr><td>visibility</td><td>${s.visibility_m ?? "∞"} m</td></tr>
+        <tr><td>cruise</td><td>${s.cruise_ms ?? "—"} m/s</td></tr>
+      </table>
+      <div class="cmd"><button class="copy" data-cmd="${s.command}">copy</button>${s.command}</div>
+    </div></div>`).join("") || `<div class="empty">No scenario specs found at the repo root</div>`) + `</div>`;
+  c.querySelectorAll(".copy").forEach(b => b.onclick = () => {
+    navigator.clipboard.writeText(b.dataset.cmd); b.textContent = "copied"; setTimeout(() => b.textContent = "copy", 1200);
+  });
+}
+
+$("#tab-runs").onclick = () => { tab = "runs"; $("#tab-runs").classList.add("active"); $("#tab-envs").classList.remove("active"); renderSidebar(); render(); };
+$("#tab-envs").onclick = () => { tab = "envs"; $("#tab-envs").classList.add("active"); $("#tab-runs").classList.remove("active"); renderSidebar(); render(); };
+boot();
+</script>
+</body>
+</html>
