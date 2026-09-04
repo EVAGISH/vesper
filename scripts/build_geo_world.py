@@ -51,7 +51,7 @@ use_us = {"us": True, "global": False, "auto": in_us}[a.source]
 if use_us:
     print(f"source: USGS 3DEP (1 m lidar DEM) + NAIP (1 m aerial imagery)")
 else:
-    print("source: Copernicus GLO-30 (30 m) + painted land-cover ground")
+    print("source: Copernicus GLO-30 (30 m DEM) + Esri World Imagery ortho + OSM")
 
 if use_us and (a.refetch or not (data / "dem.npy").exists()):
     # 3DEP bare-earth elevation, ~1 m where lidar exists. We pick the request size
@@ -144,15 +144,53 @@ if use_us and (a.refetch or not (data / "naip.png").exists()):
 if (not use_us) and (a.refetch or not (data / "dem.npy").exists()):
     import rasterio
     from rasterio.windows import from_bounds
+    # Copernicus GLO-30 tiles are 1x1 deg; a site can straddle a tile edge, so
+    # sign the tile name from floor(lat/lon) of each corner and merge if needed.
     lat_t, lon_t = int(math.floor(a.lat)), int(math.floor(a.lon))
-    tile = f"Copernicus_DSM_COG_10_N{lat_t:02d}_00_E{lon_t:03d}_00_DEM"
+    ns, ew = ("N" if lat_t >= 0 else "S"), ("E" if lon_t >= 0 else "W")
+    tile = f"Copernicus_DSM_COG_10_{ns}{abs(lat_t):02d}_00_{ew}{abs(lon_t):03d}_00_DEM"
     url = f"https://copernicus-dem-30m.s3.amazonaws.com/{tile}/{tile}.tif"
     with rasterio.Env(AWS_NO_SIGN_REQUEST="YES"), rasterio.open(url) as ds:
         win = from_bounds(bbox[1], bbox[0], bbox[3], bbox[2], transform=ds.transform)
         arr = ds.read(1, window=win).astype(np.float32); tr = ds.window_transform(win)
     np.save(data / "dem.npy", arr)
     (data / "dem_meta.json").write_text(json.dumps({"transform": list(tr)[:6], "bbox": bbox, "source": url}))
-    print(f"DEM: {arr.shape} cells, {arr.min():.0f}-{arr.max():.0f} m")
+    print(f"DEM (Copernicus GLO-30): {arr.shape} cells, {arr.min():.0f}-{arr.max():.0f} m")
+
+if (not use_us) and (a.refetch or not (data / "imagery.png").exists()):
+    # Global true-colour ortho. Esri World Imagery is sub-metre over most populated
+    # areas (incl. Ukrainian cities) and covers the whole planet -- enough to drape
+    # the ground and detect canopy. Same site-exact tiled mosaic as the NAIP path.
+    # (Prototype source; a licensed feed -- Maxar/Airbus -- is the high-fidelity swap.)
+    import requests
+    from PIL import Image as _Im
+    import io as _io
+    dlat_s = half_m / 110574.0
+    dlon_s = half_m / (111320.0 * math.cos(math.radians(a.lat)))
+    Wn, Sn, En, Nn = a.lon - dlon_s, a.lat - dlat_s, a.lon + dlon_s, a.lat + dlat_s
+    TILES = max(3, a.tex_px // 1024)
+    TPX = a.tex_px // TILES
+    canvas = _Im.new("RGB", (TILES * TPX, TILES * TPX))
+    ok = True
+    for ty in range(TILES):
+        for tx in range(TILES):
+            w0 = Wn + (En - Wn) * tx / TILES
+            w1 = Wn + (En - Wn) * (tx + 1) / TILES
+            n1 = Nn - (Nn - Sn) * ty / TILES
+            n0 = Nn - (Nn - Sn) * (ty + 1) / TILES
+            rr = requests.get(
+                "https://services.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/export",
+                params={"bbox": f"{w0},{n0},{w1},{n1}", "bboxSR": 4326,
+                        "size": f"{TPX},{TPX}", "format": "jpg", "f": "image"}, timeout=300)
+            if not rr.ok or rr.headers.get("content-type", "").startswith(("application/json", "text/")):
+                print(f"  Esri imagery tile failed ({rr.status_code}); ground will be painted from land cover")
+                ok = False; break
+            canvas.paste(_Im.open(_io.BytesIO(rr.content)).convert("RGB"), (tx * TPX, ty * TPX))
+        if not ok:
+            break
+    if ok:
+        canvas.save(data / "imagery.png")
+        print(f"imagery (Esri World Imagery): {TILES*TPX}px mosaic at ~{2*half_m/(TILES*TPX):.2f} m/px")
 if a.refetch or not (data / "osm.json").exists():
     import requests
     S, W, N, E = bbox

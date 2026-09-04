@@ -861,8 +861,10 @@ def build_site(site: GeoSite, data_dir: Path, veg_dir: Path, out_usd: Path,
     # terrain
     pts, faces, st = terrain.mesh()
     tex = out_dir / "ground.png"
-    naip = data_dir / "naip.png"
-    bake_ground_texture(site, osm, tex, rng, ortho=naip if naip.exists() else None)
+    # US builds cache the ortho as naip.png; global builds as imagery.png. Either
+    # one, when present, is draped as the ground albedo instead of painted cover.
+    ortho_src = next((data_dir / f for f in ("naip.png", "imagery.png") if (data_dir / f).exists()), None)
+    bake_ground_texture(site, osm, tex, rng, ortho=ortho_src)
     tmesh = _mesh(stage, "/World/terrain", pts, np.full(len(faces) // 4, 4), faces, st=st, collide=True)
     mat = _preview_material(stage, "/World/Looks/ground", tex, out_dir, roughness=0.95)
     UsdShade.MaterialBindingAPI.Apply(tmesh.GetPrim()).Bind(mat)
