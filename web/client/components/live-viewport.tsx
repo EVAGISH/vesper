@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 
 // In-page WebRTC viewport for a live session on the GPU box. The sim streams
 // over its native WebRTC lane (signaling on 49100); the NVIDIA streaming
@@ -12,14 +12,17 @@ type Phase = "connecting" | "streaming" | "stopped" | "error";
 export function LiveViewport({ ip }: { ip: string }) {
   const [phase, setPhase] = useState<Phase>("connecting");
   const [note, setNote] = useState<string>("");
-  const started = useRef(false);
 
   useEffect(() => {
     let alive = true;
-    if (started.current) return; // AppStreamer is a singleton; never double-connect
-    started.current = true;
+    let connected = false;
 
-    (async () => {
+    // Debounced connect: StrictMode's throwaway first mount is cleaned up
+    // before the timer fires, so the AppStreamer singleton is only ever
+    // connected once, by the mount that survives. Terminating mid-handshake
+    // corrupts the library's static state ("reading 'sendCustomMessage'").
+    const timer = setTimeout(async () => {
+      connected = true;
       try {
         const lib = await import("@nvidia/omniverse-webrtc-streaming-library");
         await lib.AppStreamer.connect({
@@ -55,14 +58,15 @@ export function LiveViewport({ ip }: { ip: string }) {
             : "no stream — is a live session running and fully loaded?",
         );
       }
-    })();
+    }, 400);
 
     return () => {
       alive = false;
-      import("@nvidia/omniverse-webrtc-streaming-library")
-        .then((lib) => lib.AppStreamer.terminate())
-        .catch(() => {});
-      started.current = false;
+      clearTimeout(timer);
+      if (connected)
+        import("@nvidia/omniverse-webrtc-streaming-library")
+          .then((lib) => lib.AppStreamer.terminate())
+          .catch(() => {});
     };
   }, [ip]);
 
