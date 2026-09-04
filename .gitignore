@@ -7,3 +7,4 @@ __pycache__/
 runs/
 assets/
 .venv/
+.vesper_jobs.json
