@@ -4,10 +4,13 @@
         --seconds 90 --headless --enable_cameras
 
 Writes into runs/<id>/:
-  chase.mp4     a camera behind and above the drone, tilted down the way the
-                sensor looks, with a HUD showing what the policy currently knows
-  overview.mp4  a high camera holding the whole search box, so the sweep pattern
-                and the moment each vehicle is found are visible
+  fpv.mp4       the drone's own sensor view: a nadir camera at the airframe with
+                the task's sensor cone as its lens (2 x fov_half_deg), the cone
+                edge drawn, and a box on any vehicle the policy currently holds.
+                What is inside this circle is what the detector gets to see.
+  chase.mp4     the same moment from behind the drone, framed against whatever it
+                is going for -- the nearest vehicle it has a fix on, or its own
+                heading while it is still sweeping.
   track.png     top-down plot over the site's own ground texture: drone path,
                 vehicle paths, where each vehicle was first seen and reached
   events.json   the timeline (first sighting and reach per vehicle)
@@ -71,19 +74,22 @@ def policy(obs):
     return ac.dist(n).sample() if args.stochastic else ac.actor(n)
 
 
-def make_cam(path, res=(1280, 720)):
-    c = Camera(prim_path=path, position=np.array([0.0, 0.0, 200.0]), resolution=res)
-    return c
+def make_cam(path, hfov, res=(1280, 720)):
+    return Camera(prim_path=path, position=np.array([0.0, 0.0, 200.0]), resolution=res), hfov
 
 
-chase = make_cam("/World/chase_cam")
-over = make_cam("/World/over_cam")
+# the sensor lens is not a cinematography choice: it is the task's own cone
+sensor_fov = 2.0 * env.task.cfg.fov_half_deg
+# square frame so the whole cone is inscribed -- it reads as a sensor scope
+fpv = make_cam("/World/fpv_cam", sensor_fov, res=(900, 900))
+chase = make_cam("/World/chase_cam", args.hfov)
 obs = env.ppo_reset()
-for c in (chase, over):
+for c, hf in (fpv, chase):
     c.initialize()
     ap = c.get_horizontal_aperture()
-    c.set_focal_length(ap / (2.0 * np.tan(np.radians(args.hfov) / 2.0)))
+    c.set_focal_length(ap / (2.0 * np.tan(np.radians(hf) / 2.0)))
     c.set_clipping_range(0.05, 6000.0)
+print(f"sensor lens: {sensor_fov:.0f} deg full FOV", flush=True)
 
 cap = RunCapture(args.tag)
 dt = cfg.sim.dt * cfg.decimation
@@ -98,29 +104,81 @@ smooth = None
 peak_found = peak_reached = 0
 
 
-def look_at(cam, pos, target, up_bias=0.0):
+def look_at(camhf, pos, target):
+    cam, hfov = camhf
     d = target - pos
     yaw = np.degrees(np.arctan2(d[1], d[0]))
-    pitch = np.degrees(np.arctan2(-d[2], np.linalg.norm(d[:2]) + 1e-6)) + up_bias
+    pitch = np.degrees(np.arctan2(-d[2], np.linalg.norm(d[:2]) + 1e-6))
     cam.set_world_pose(pos, rot_utils.euler_angles_to_quats(
         np.array([0.0, pitch, yaw]), degrees=True))
+    return pos, target, hfov
 
 
-def hud(rgb, t, known, reached, agl, visible):
-    """Burn the policy's own belief into the frame -- otherwise a viewer cannot
-    tell a lucky pass over a forklift from an actual detection."""
+def project(pos, target, hfov, p, w, h):
+    """World point -> pixel, for the camera look_at() just placed.  Roll is zero,
+    so the basis is fixed by the look direction alone."""
+    f = target - pos
+    f = f / (np.linalg.norm(f) + 1e-9)
+    r = np.cross(f, np.array([0.0, 0.0, 1.0]))
+    rn = np.linalg.norm(r)
+    if rn < 1e-6:                                  # straight down: pick world +x
+        r = np.array([0.0, -1.0, 0.0])
+    else:
+        r = r / rn
+    u = np.cross(r, f)
+    d = p - pos
+    z = float(d @ f)
+    if z <= 0.5:
+        return None
+    fx = (w / 2.0) / np.tan(np.radians(hfov) / 2.0)
+    return float(w / 2 + (d @ r) / z * fx), float(h / 2 - (d @ u) / z * fx), z, fx
+
+
+AMBER, GREEN, CYAN, WHITE = (255, 200, 70), (110, 255, 150), (120, 220, 255), (255, 255, 255)
+
+
+def annotate(rgb, cam, t, agl, known, reached, vis, tp, drone, cone=False):
+    """Burn in what the policy knows.  Only vehicles it has actually detected get
+    a marker -- drawing the others would show the viewer a hunt the policy is not
+    running."""
     img = Image.fromarray(rgb)
     d = ImageDraw.Draw(img)
-    d.rectangle([0, 0, 330, 96], fill=(0, 0, 0))
-    d.text((10, 8), f"t {t:5.1f}s   AGL {agl:4.0f} m", fill=(255, 255, 255))
-    d.text((10, 26), f"found   {int(known.sum())}/{len(known)}", fill=(120, 220, 255))
-    d.text((10, 44), f"reached {int(reached.sum())}/{len(reached)}", fill=(140, 255, 140))
+    w, h = img.size
+    pos, look, hfov = cam
+
+    if cone:
+        # edge of the detector cone.  At half-angle a, the cone maps to a circle of
+        # radius fx*tan(a) px; with the lens set to 2a that is exactly w/2.
+        rad = (w / 2.0) / np.tan(np.radians(hfov) / 2.0) * np.tan(
+            np.radians(env.task.cfg.fov_half_deg))
+        d.ellipse([w / 2 - rad, h / 2 - rad, w / 2 + rad, h / 2 + rad],
+                  outline=(255, 255, 255), width=2)
+        d.line([w / 2 - 12, h / 2, w / 2 + 12, h / 2], fill=WHITE, width=1)
+        d.line([w / 2, h / 2 - 12, w / 2, h / 2 + 12], fill=WHITE, width=1)
+
+    for k in range(len(known)):
+        if not known[k]:
+            continue
+        pr = project(pos, look, hfov, tp[k], w, h)
+        if not pr:
+            continue
+        x, y, z, fx = pr
+        col = GREEN if reached[k] else AMBER
+        s = float(np.clip(fx * 5.0 / z, 14.0, 200.0))
+        d.rectangle([x - s, y - s * 0.6, x + s, y + s * 0.6], outline=col, width=3)
+        label = f"V{k}  REACHED" if reached[k] else f"V{k}  {z:.0f} m"
+        d.text((x - s, y - s * 0.6 - 14), label, fill=col)
+
+    d.rectangle([0, 0, 250, 92], fill=(0, 0, 0))
+    d.text((10, 8), f"t {t:5.1f} s    AGL {agl:4.0f} m", fill=WHITE)
+    d.text((10, 26), f"found   {int(known.sum())}/{len(known)}", fill=CYAN)
+    d.text((10, 44), f"reached {int(reached.sum())}/{len(reached)}", fill=GREEN)
     for i in range(len(known)):
-        col = (255, 90, 90) if not known[i] else ((140, 255, 140) if reached[i] else (255, 220, 90))
-        d.rectangle([10 + 26 * i, 66, 30 + 26 * i, 86], fill=col)
-    if visible.any():
-        d.rectangle([0, 0, img.width - 1, img.height - 1], outline=(255, 220, 90), width=6)
-        d.text((img.width - 150, 12), "TARGET SEEN", fill=(255, 220, 90))
+        c = (170, 60, 60) if not known[i] else (GREEN if reached[i] else AMBER)
+        d.rectangle([10 + 26 * i, 64, 30 + 26 * i, 84], fill=c)
+    if vis.any():
+        d.rectangle([0, 0, w - 1, h - 1], outline=AMBER, width=6)
+        d.text((w - 150, 12), "SENSOR CONTACT", fill=AMBER)
     return np.asarray(img)
 
 
@@ -152,29 +210,46 @@ for i in range(steps):
         print(f"episode 0 ended at t={t:.2f}s", flush=True)
         break
 
-    if i % args.every == 0:
-        # chase: behind the drone along its own velocity, looking down its sensor axis
+    if i % args.every != 0:
+        continue
+
+    # What is the drone going for right now?  A fix it holds and has not reached,
+    # else its own heading.  The camera frames the drone against that, so the
+    # shot is the hunt rather than the scenery.
+    live = np.flatnonzero(known & ~reached)
+    if live.size:
+        fix = env.task.fix[0].cpu().numpy()
+        k = live[int(np.argmin(np.linalg.norm(fix[live, :2] - d[:2], axis=1)))]
+        goal = fix[k]
+    else:
         v = env._robot.data.root_lin_vel_w[0].cpu().numpy()
-        h = v[:2]
-        n = np.linalg.norm(h)
-        fwd = h / n if n > 1.0 else np.array([1.0, 0.0])
-        smooth = fwd if smooth is None else 0.92 * smooth + 0.08 * fwd
-        f = smooth / (np.linalg.norm(smooth) + 1e-6)
-        cpos = d - np.array([f[0], f[1], 0.0]) * 22.0 + np.array([0.0, 0.0, 11.0])
-        look_at(chase, cpos, d + np.array([f[0], f[1], 0.0]) * 45.0 - np.array([0.0, 0.0, 20.0]))
-        env.sim.render()
-        rgba = chase.get_rgba()
-        if rgba is not None and rgba.size:
-            agl = float(info["agl"][0].item())
-            cap.add_frame(hud(np.asarray(rgba[:, :, :3], dtype=np.uint8), t, known, reached, agl, vis),
-                          stream="chase")
-        # overview: fixed high camera holding the whole search box
-        gz = float(env.world.ground_at(torch.tensor(0.0), torch.tensor(0.0)))
-        look_at(over, np.array([-args.arena * 1.15, -args.arena * 1.15, gz + args.arena * 1.5]),
-                np.array([0.0, 0.0, gz]))
-        rgba = over.get_rgba()
-        if rgba is not None and rgba.size:
-            cap.add_frame(np.asarray(rgba[:, :, :3], dtype=np.uint8), stream="overview")
+        n = np.linalg.norm(v[:2])
+        fwd = v[:2] / n if n > 1.0 else np.array([1.0, 0.0])
+        smooth = fwd if smooth is None else 0.90 * smooth + 0.10 * fwd
+        f2 = smooth / (np.linalg.norm(smooth) + 1e-6)
+        goal = d + np.array([f2[0], f2[1], 0.0]) * 70.0 - np.array([0.0, 0.0, 30.0])
+
+    # the drone's own sensor view: at the airframe, straight down, cone lens
+    cam = look_at(fpv, d + np.array([0.0, 0.0, -0.6]), d + np.array([0.0, 0.0, -50.0]))
+    env.sim.render()
+    rgba = fpv[0].get_rgba()
+    agl = float(info["agl"][0].item())
+    if rgba is not None and rgba.size:
+        cap.add_frame(annotate(np.asarray(rgba[:, :, :3], dtype=np.uint8), cam,
+                               t, agl, known, reached, vis, tp, d, cone=True),
+                      stream="fpv")
+
+    to = goal - d
+    sep = float(np.linalg.norm(to))
+    axis = to[:2] / (np.linalg.norm(to[:2]) + 1e-6)
+    back = np.array([axis[0], axis[1], 0.0])
+    pull = float(np.clip(8.0 + 0.22 * sep, 10.0, 26.0))
+    rise = float(np.clip(3.5 + 0.10 * sep, 4.5, 13.0))
+    cam = look_at(chase, d - pull * back + np.array([0.0, 0.0, rise]), d + 0.45 * to)
+    rgba = chase[0].get_rgba()
+    if rgba is not None and rgba.size:
+        cap.add_frame(annotate(np.asarray(rgba[:, :, :3], dtype=np.uint8), cam,
+                               t, agl, known, reached, vis, tp, d), stream="chase")
 
 # ---------------------------------------------------------------- track plot
 try:
