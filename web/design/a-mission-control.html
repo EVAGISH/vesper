@@ -1,0 +1,309 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Vesper — Direction A: Mission Control</title>
+<style>
+  /* Static mockup — no data fetching. Committed dark ops-console look. */
+  :root {
+    color-scheme: dark;
+    --page:      #0d0d0d;
+    --surface-1: #1a1a19;
+    --surface-2: #242423;
+    --border:    #33332f;
+    --grid:      #2c2c2a;
+    --ink:       #ffffff;
+    --ink-2:     #c3c2b7;
+    --muted:     #8a897f;
+    --s1: #3987e5;  /* flight   (categorical slot 1) */
+    --s2: #d95926;  /* search   (slot 2) */
+    --s3: #199e70;  /* training (slot 3) */
+    --s4: #c98500;  /* sweep    (slot 4) */
+    --s5: #d55181;  /* view     (slot 5) */
+    --good: #0ca30c;
+  }
+  * { box-sizing: border-box; margin: 0; }
+  body {
+    background: var(--page); color: var(--ink);
+    font: 13px/1.45 -apple-system, "SF Pro Text", "Segoe UI", sans-serif;
+    height: 100vh; display: flex; flex-direction: column; overflow: hidden;
+  }
+  .mono { font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  .num  { font-variant-numeric: tabular-nums; }
+
+  /* ── top bar ─────────────────────────────────────────── */
+  header {
+    display: flex; align-items: center; gap: 14px; padding: 0 16px; height: 44px;
+    border-bottom: 1px solid var(--border); background: var(--surface-1); flex-shrink: 0;
+  }
+  header h1 { font-size: 14px; letter-spacing: .18em; font-weight: 700; }
+  header .sys { color: var(--muted); font-size: 11px; display: flex; gap: 14px; }
+  header .sys b { color: var(--ink-2); font-weight: 600; }
+  .dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; margin-right: 5px; }
+  nav { margin-left: auto; display: flex; gap: 2px; }
+  nav button {
+    background: none; border: 1px solid transparent; border-radius: 6px;
+    color: var(--ink-2); padding: 4px 12px; font: inherit; font-size: 12px;
+    letter-spacing: .06em; cursor: pointer;
+  }
+  nav button.active { background: var(--surface-2); color: var(--ink); border-color: var(--border); }
+  nav button.soon { color: var(--muted); }
+  nav button.soon i { font-style: normal; font-size: 9px; border: 1px solid var(--border); border-radius: 4px; padding: 0 4px; margin-left: 5px; vertical-align: 1px; }
+
+  main { flex: 1; display: flex; min-height: 0; }
+
+  /* ── left rail: run list ─────────────────────────────── */
+  #rail {
+    width: 292px; flex-shrink: 0; border-right: 1px solid var(--border);
+    background: var(--surface-1); overflow-y: auto; display: flex; flex-direction: column;
+  }
+  .live-slot {
+    margin: 10px; padding: 10px 12px; border: 1px dashed var(--border); border-radius: 8px;
+    color: var(--muted); font-size: 11px;
+  }
+  .live-slot b { color: var(--ink-2); letter-spacing: .1em; font-size: 10px; }
+  .rail-head {
+    padding: 8px 14px 4px; color: var(--muted); font-size: 10px;
+    letter-spacing: .12em; text-transform: uppercase;
+  }
+  .run {
+    padding: 9px 14px 9px 11px; border-bottom: 1px solid #222220; cursor: pointer;
+    border-left: 3px solid transparent;
+  }
+  .run:hover { background: var(--surface-2); }
+  .run.active { background: var(--surface-2); border-left-color: var(--s1); }
+  .run .id { font-size: 12px; font-weight: 600; }
+  .run .kind { float: right; font-size: 10px; }
+  .run .sub { color: var(--muted); font-size: 11px; margin-top: 1px; }
+  .badges { margin-top: 5px; display: flex; gap: 4px; flex-wrap: wrap; }
+  .badge {
+    font-size: 9.5px; padding: 0 6px; border-radius: 7px; line-height: 16px;
+    background: var(--page); color: var(--ink-2); border: 1px solid var(--border);
+  }
+
+  /* ── content ─────────────────────────────────────────── */
+  #content { flex: 1; overflow-y: auto; padding: 16px 18px; }
+  .detail-head { display: flex; align-items: baseline; gap: 12px; margin-bottom: 14px; flex-wrap: wrap; }
+  .detail-head h2 { font-size: 16px; font-weight: 700; }
+  .chip {
+    font-size: 10px; letter-spacing: .08em; text-transform: uppercase; padding: 2px 8px;
+    border-radius: 8px; border: 1px solid var(--border); color: var(--ink-2);
+  }
+  .chip i { font-style: normal; margin-right: 5px; }
+  .detail-head .meta { color: var(--muted); font-size: 12px; }
+  .grid { display: grid; grid-template-columns: repeat(12, 1fr); gap: 12px; }
+  .panel { background: var(--surface-1); border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
+  .panel h3 {
+    font-size: 10px; font-weight: 600; letter-spacing: .12em; text-transform: uppercase;
+    color: var(--ink-2); padding: 7px 12px; border-bottom: 1px solid var(--border);
+    display: flex; align-items: center;
+  }
+  .panel h3 .r { margin-left: auto; color: var(--muted); font-weight: 400; letter-spacing: 0; text-transform: none; }
+  .panel .body { padding: 12px; }
+  .c6 { grid-column: span 6; } .c4 { grid-column: span 4; } .c8 { grid-column: span 8; } .c12 { grid-column: span 12; }
+
+  /* video placeholder */
+  .vid { position: relative; aspect-ratio: 16/9; background:
+    radial-gradient(120% 90% at 30% 20%, #20262e 0%, #14171b 55%, #0c0d0f 100%); }
+  .vid .play {
+    position: absolute; inset: 0; margin: auto; width: 46px; height: 46px; border-radius: 50%;
+    background: rgba(0,0,0,.55); border: 1px solid rgba(255,255,255,.25);
+    display: flex; align-items: center; justify-content: center;
+  }
+  .vid .play::after { content: ""; border: 9px solid transparent; border-left: 14px solid #fff; margin-left: 7px; }
+  .vid .tc { position: absolute; right: 8px; bottom: 8px; font-size: 10px; color: var(--ink-2);
+    background: rgba(0,0,0,.6); border-radius: 4px; padding: 1px 6px; }
+  .scrub { height: 3px; background: var(--surface-2); }
+  .scrub i { display: block; height: 100%; width: 34%; background: var(--s1); }
+
+  table.kv { border-collapse: collapse; width: 100%; font-size: 12px; }
+  table.kv td { padding: 3px 10px 3px 0; vertical-align: top; }
+  table.kv td:first-child { color: var(--muted); white-space: nowrap; width: 88px; }
+
+  svg text { font: 10px -apple-system, "Segoe UI", sans-serif; fill: var(--muted); }
+
+  /* environments */
+  .env-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(360px, 1fr)); gap: 12px; }
+  .cmd {
+    font: 11px/1.5 ui-monospace, "SF Mono", monospace; background: var(--page);
+    border: 1px solid var(--border); border-radius: 6px; padding: 7px 9px;
+    color: var(--ink-2); overflow-x: auto; white-space: nowrap; margin-top: 10px;
+  }
+  .copy { float: right; background: var(--surface-2); color: var(--ink-2); border: 1px solid var(--border);
+    border-radius: 5px; font-size: 10px; padding: 1px 7px; cursor: pointer; margin-left: 8px; }
+  .hidden { display: none; }
+  .note { position: fixed; right: 12px; bottom: 10px; font-size: 10px; color: var(--muted);
+    background: var(--surface-1); border: 1px solid var(--border); border-radius: 6px; padding: 3px 8px; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>VESPER</h1>
+  <span class="sys">
+    <span><span class="dot" style="background:var(--good)"></span><b>gpu-tor1</b> idle</span>
+    <span><b class="num">6</b> runs</span>
+    <span><b class="num">2</b> scenarios</span>
+    <span>runs/ synced <b>12 s</b> ago</span>
+  </span>
+  <nav>
+    <button class="active" data-view="runs">RUNS</button>
+    <button data-view="envs">ENVIRONMENTS</button>
+    <button class="soon">LIVE<i>V2</i></button>
+  </nav>
+</header>
+
+<main>
+  <!-- run rail -->
+  <div id="rail">
+    <div class="live-slot"><b>LIVE</b> · no active run on gpu-tor1 — latest frame appears here (V2)</div>
+    <div class="rail-head">Sep 4</div>
+
+    <div class="run">
+      <div class="id">fly-search <span class="kind" style="color:var(--s2)">● search</span></div>
+      <div class="sub num">03:58 · 41 s wall</div>
+      <div class="badges"><span class="badge">chase</span><span class="badge">fpv</span><span class="badge">track</span><span class="badge">events</span><span class="badge">traj</span></div>
+    </div>
+    <div class="run active">
+      <div class="id">fly-cornell <span class="kind" style="color:var(--s1)">● flight</span></div>
+      <div class="sub num">03:31 · 62 s wall</div>
+      <div class="badges"><span class="badge">overview</span><span class="badge">fpv</span><span class="badge">traj</span><span class="badge">scenario</span></div>
+    </div>
+    <div class="run">
+      <div class="id">view-cornell <span class="kind" style="color:var(--s5)">● view</span></div>
+      <div class="sub num">03:27</div>
+      <div class="badges"><span class="badge">view_0</span><span class="badge">view_1</span><span class="badge">view_2</span></div>
+    </div>
+    <div class="run">
+      <div class="id">train-search <span class="kind" style="color:var(--s3)">● training</span></div>
+      <div class="sub num">03:12 · 1400 iters</div>
+      <div class="badges"><span class="badge">curve</span></div>
+    </div>
+    <div class="run">
+      <div class="id">swarm <span class="kind" style="color:var(--s1)">● flight</span></div>
+      <div class="sub num">03:11 · 38 s wall</div>
+      <div class="badges"><span class="badge">overview</span></div>
+    </div>
+    <div class="run">
+      <div class="id">sweep-wind <span class="kind" style="color:var(--s4)">● sweep</span></div>
+      <div class="sub num">02:52 · 24 variants</div>
+      <div class="badges"><span class="badge">report</span><span class="badge">results</span></div>
+    </div>
+  </div>
+
+  <!-- run detail -->
+  <div id="content">
+    <div id="view-runs">
+      <div class="detail-head">
+        <h2 class="mono">20260904-033124-fly-cornell</h2>
+        <span class="chip"><i style="color:var(--s1)">●</i>flight</span>
+        <span class="meta num">Sep 4, 03:31 · 62 s wall · cornell_core · 2 streams @ 24 fps</span>
+      </div>
+
+      <div class="grid">
+        <div class="panel c6">
+          <h3>overview <span class="r num">1860 frames · 1280×720</span></h3>
+          <div class="vid"><div class="play"></div><div class="tc num">0:26 / 1:17</div></div>
+          <div class="scrub"><i></i></div>
+        </div>
+        <div class="panel c6">
+          <h3>fpv <span class="r num">1860 frames · 1280×720</span></h3>
+          <div class="vid"><div class="play"></div><div class="tc num">0:26 / 1:17</div></div>
+          <div class="scrub"><i></i></div>
+        </div>
+
+        <div class="panel c6">
+          <h3>Trajectory — top-down <span class="r">meters · equal aspect</span></h3>
+          <svg viewBox="0 0 460 300" style="display:block;width:100%">
+            <defs>
+              <linearGradient id="tg" x1="0" y1="1" x2="1" y2="0">
+                <stop offset="0" stop-color="#86b6ef"/><stop offset="1" stop-color="#104281"/>
+              </linearGradient>
+            </defs>
+            <rect width="460" height="300" fill="#1a1a19"/>
+            <g stroke="#2c2c2a" stroke-width="1">
+              <line x1="90" y1="20" x2="90" y2="270"/><line x1="180" y1="20" x2="180" y2="270"/>
+              <line x1="270" y1="20" x2="270" y2="270"/><line x1="360" y1="20" x2="360" y2="270"/>
+              <line x1="30" y1="70" x2="430" y2="70"/><line x1="30" y1="140" x2="430" y2="140"/>
+              <line x1="30" y1="210" x2="430" y2="210"/>
+            </g>
+            <polyline fill="none" stroke="url(#tg)" stroke-width="2" stroke-linejoin="round"
+              points="80,250 120,238 160,222 200,200 232,172 254,140 262,108 256,84 234,68 202,62 168,70 140,88 122,114 114,146 122,182 142,212 170,230"/>
+            <circle cx="80" cy="250" r="5" fill="none" stroke="#c3c2b7" stroke-width="2"/>
+            <circle cx="170" cy="230" r="5" fill="#3987e5"/>
+            <text x="90" y="266">start</text><text x="180" y="228">end</text>
+            <text x="30" y="290">184 m across · +x east, +y north</text>
+            <text x="380" y="290" style="fill:#c3c2b7">t=26.3 s ▸</text>
+          </svg>
+        </div>
+
+        <div class="panel c6">
+          <h3>Run</h3>
+          <div class="body"><table class="kv num">
+            <tr><td>id</td><td class="mono">20260904-033124-fly-cornell</td></tr>
+            <tr><td>scene</td><td>cornell_core</td></tr>
+            <tr><td>started</td><td>Sep 4 2026, 03:31:24</td></tr>
+            <tr><td>duration</td><td>62 s wall · 77.5 s sim</td></tr>
+            <tr><td>streams</td><td>overview (chase), fpv (onboard)</td></tr>
+            <tr><td>frames</td><td>1860 @ 24 fps · 1280×720</td></tr>
+          </table></div>
+          <h3 style="border-top:1px solid var(--border)">Scenario — cornell_core.json</h3>
+          <div class="body"><table class="kv num">
+            <tr><td>waypoints</td><td>7</td></tr>
+            <tr><td>wind</td><td>4.0 m/s</td></tr>
+            <tr><td>visibility</td><td>800 m</td></tr>
+            <tr><td>cruise</td><td>6.0 m/s</td></tr>
+          </table></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- environments -->
+    <div id="view-envs" class="hidden">
+      <div class="detail-head"><h2>Environments</h2>
+        <span class="meta">scenario specs at the repo root · run on gpu-tor1</span></div>
+      <div class="env-grid">
+        <div class="panel">
+          <h3>cornell_core.json <span class="r">cornell_core</span></h3>
+          <div class="body">
+            <table class="kv num">
+              <tr><td>terrain</td><td class="mono">assets/cornell_core.usd</td></tr>
+              <tr><td>waypoints</td><td>7</td></tr>
+              <tr><td>wind</td><td>4.0 m/s</td></tr>
+              <tr><td>visibility</td><td>800 m</td></tr>
+              <tr><td>cruise / cap</td><td>6.0 m/s · 240 s</td></tr>
+            </table>
+            <div class="cmd"><button class="copy">copy</button>docker compose run --rm sim /isaac-sim/python.sh scripts/fly_mission.py cornell_core.json</div>
+          </div>
+        </div>
+        <div class="panel">
+          <h3>cornell0.json <span class="r">cornell0</span></h3>
+          <div class="body">
+            <table class="kv num">
+              <tr><td>terrain</td><td class="mono">assets/cornell0.usd</td></tr>
+              <tr><td>waypoints</td><td>5</td></tr>
+              <tr><td>wind</td><td>0 m/s</td></tr>
+              <tr><td>visibility</td><td>∞</td></tr>
+              <tr><td>cruise / cap</td><td>5.0 m/s · 180 s</td></tr>
+            </table>
+            <div class="cmd"><button class="copy">copy</button>docker compose run --rm sim /isaac-sim/python.sh scripts/fly_mission.py cornell0.json</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</main>
+
+<div class="note">Direction A — mission control (static mockup)</div>
+
+<script>
+  document.querySelectorAll("nav button[data-view]").forEach(b => b.onclick = () => {
+    document.querySelectorAll("nav button[data-view]").forEach(x => x.classList.toggle("active", x === b));
+    document.getElementById("view-runs").classList.toggle("hidden", b.dataset.view !== "runs");
+    document.getElementById("view-envs").classList.toggle("hidden", b.dataset.view !== "envs");
+    document.getElementById("rail").style.display = b.dataset.view === "runs" ? "" : "none";
+  });
+</script>
+</body>
+</html>

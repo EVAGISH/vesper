@@ -1,0 +1,301 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Vesper — Direction C: Flight Log</title>
+<style>
+  /* Static mockup — no data fetching. Chronological feed / lab-notebook, dark. */
+  :root {
+    color-scheme: dark;
+    --page:      #0d0d0d;
+    --surface-1: #1a1a19;
+    --surface-2: #242423;
+    --border:    #33332f;
+    --ink:       #ffffff;
+    --ink-2:     #c3c2b7;
+    --muted:     #8a897f;
+    --s1: #3987e5;  /* flight */
+    --s2: #d95926;  /* search */
+    --s3: #199e70;  /* training */
+    --s4: #c98500;  /* sweep */
+    --s5: #d55181;  /* view */
+    --good: #0ca30c;
+  }
+  * { box-sizing: border-box; margin: 0; }
+  body { background: var(--page); color: var(--ink);
+    font: 14px/1.5 -apple-system, "SF Pro Text", "Segoe UI", sans-serif; min-height: 100vh; }
+  .mono { font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  .num  { font-variant-numeric: tabular-nums; }
+
+  header {
+    display: flex; align-items: center; gap: 16px; padding: 12px 0;
+    position: sticky; top: 0; background: rgba(13,13,13,.92); backdrop-filter: blur(6px);
+    border-bottom: 1px solid var(--border); z-index: 5;
+  }
+  .col { max-width: 920px; margin: 0 auto; padding: 0 24px; width: 100%; }
+  header .col { display: flex; align-items: center; gap: 16px; }
+  header h1 { font-size: 14px; letter-spacing: .2em; font-weight: 700; }
+  header .sub { color: var(--muted); font-size: 12px; }
+  nav { margin-left: auto; display: flex; gap: 4px; }
+  nav button { background: none; border: none; border-radius: 7px; color: var(--ink-2);
+    padding: 5px 12px; font: inherit; font-size: 13px; cursor: pointer; }
+  nav button.active { background: var(--surface-2); color: var(--ink); }
+  nav button.soon { color: var(--muted); }
+  nav button.soon i { font-style: normal; font-size: 9px; border: 1px solid var(--border);
+    border-radius: 4px; padding: 0 4px; margin-left: 5px; vertical-align: 1px; }
+
+  .feedwrap { padding: 22px 24px 80px; }
+  .hidden { display: none; }
+
+  .live {
+    display: flex; gap: 12px; align-items: center; border: 1px dashed var(--border);
+    border-radius: 10px; padding: 12px 16px; color: var(--muted); font-size: 13px; margin-bottom: 26px;
+  }
+  .live b { color: var(--ink-2); font-size: 11px; letter-spacing: .1em; }
+
+  .day { color: var(--muted); font-size: 11px; letter-spacing: .12em; text-transform: uppercase;
+    margin: 10px 0 6px 46px; }
+
+  /* feed spine */
+  .entry { display: flex; gap: 16px; position: relative; }
+  .spine { width: 30px; flex-shrink: 0; display: flex; flex-direction: column; align-items: center; }
+  .spine .t { font-size: 10.5px; color: var(--muted); }
+  .spine .dot { width: 9px; height: 9px; border-radius: 50%; margin: 5px 0 0; }
+  .spine .rail { flex: 1; width: 1px; background: var(--border); margin-top: 4px; }
+  .entry:last-child .rail { display: none; }
+
+  .ecard { flex: 1; background: var(--surface-1); border: 1px solid var(--border);
+    border-radius: 12px; margin-bottom: 16px; overflow: hidden; }
+  .erow { display: flex; align-items: center; gap: 12px; padding: 11px 16px; cursor: pointer; }
+  .erow:hover { background: var(--surface-2); }
+  .erow .name { font-weight: 650; }
+  .erow .kind { font-size: 11px; }
+  .erow .meta { color: var(--muted); font-size: 12px; }
+  .erow .chips { margin-left: auto; display: flex; gap: 4px; }
+  .chip { font-size: 10px; padding: 0 7px; border-radius: 8px; line-height: 17px;
+    background: var(--page); color: var(--ink-2); border: 1px solid var(--border); }
+  .erow .caret { color: var(--muted); font-size: 11px; }
+
+  /* expanded detail inside the feed */
+  .expand { border-top: 1px solid var(--border); padding: 16px; }
+  .vids { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+  .vcard { border: 1px solid var(--border); border-radius: 9px; overflow: hidden; background: var(--page); }
+  .vcard .cap { font-size: 11px; color: var(--ink-2); padding: 6px 10px; display: flex; }
+  .vcard .cap .r { margin-left: auto; color: var(--muted); }
+  .thumb { position: relative; aspect-ratio: 16/9; background:
+    radial-gradient(125% 95% at 28% 18%, #212831 0%, #14171b 55%, #0b0c0e 100%); }
+  .thumb .play { position: absolute; inset: 0; margin: auto; width: 42px; height: 42px;
+    border-radius: 50%; background: rgba(0,0,0,.55); border: 1px solid rgba(255,255,255,.25);
+    display: flex; align-items: center; justify-content: center; }
+  .thumb .play::after { content: ""; border: 8px solid transparent; border-left: 13px solid #fff; margin-left: 6px; }
+  .thumb .dur { position: absolute; right: 8px; bottom: 8px; font-size: 10px; color: var(--ink-2);
+    background: rgba(0,0,0,.6); border-radius: 4px; padding: 1px 6px; }
+
+  .row2 { display: grid; grid-template-columns: 1.25fr 1fr; gap: 12px; margin-top: 12px; }
+  .panel { border: 1px solid var(--border); border-radius: 9px; overflow: hidden; background: var(--page); }
+  .panel h4 { font-size: 10px; font-weight: 600; letter-spacing: .1em; text-transform: uppercase;
+    color: var(--ink-2); padding: 7px 12px; border-bottom: 1px solid var(--border); }
+  .panel .body { padding: 12px; }
+  table.kv { border-collapse: collapse; width: 100%; font-size: 12px; }
+  table.kv td { padding: 3px 10px 3px 0; vertical-align: top; }
+  table.kv td:first-child { color: var(--muted); white-space: nowrap; width: 84px; }
+  svg text { font: 10px -apple-system, "Segoe UI", sans-serif; fill: var(--muted); }
+
+  /* events strip (search runs) */
+  .events { margin-top: 12px; border: 1px solid var(--border); border-radius: 9px;
+    background: var(--page); padding: 10px 14px 12px; }
+  .events .lbl { font-size: 10px; letter-spacing: .1em; text-transform: uppercase;
+    color: var(--ink-2); margin-bottom: 10px; }
+  .tl { position: relative; height: 34px; }
+  .tl .axis { position: absolute; left: 0; right: 0; top: 15px; height: 2px; background: var(--surface-2); }
+  .tl .mk { position: absolute; top: 8px; transform: translateX(-50%); text-align: center; cursor: pointer; }
+  .tl .mk i { display: block; width: 0; height: 0; margin: 0 auto;
+    border: 6px solid transparent; border-bottom: 10px solid var(--s2); }
+  .tl .mk.reach i { border: none; width: 11px; height: 11px; border-radius: 50%; background: var(--s1); margin-top: 2px; }
+  .tl .mk span { font-size: 10px; color: var(--muted); display: block; margin-top: 4px; }
+
+  /* environments feed */
+  .envrow { background: var(--surface-1); border: 1px solid var(--border); border-radius: 12px;
+    padding: 14px 18px 16px; margin-bottom: 14px; }
+  .envrow .top { display: flex; align-items: baseline; gap: 12px; }
+  .envrow .name { font-weight: 650; }
+  .envrow .specs { margin-left: auto; color: var(--ink-2); font-size: 12px; display: flex; gap: 16px; }
+  .envrow .specs b { color: var(--muted); font-weight: 400; margin-right: 4px; }
+  .cmd { font: 11.5px/1.5 ui-monospace, "SF Mono", monospace; background: var(--page);
+    border: 1px solid var(--border); border-radius: 7px; padding: 7px 10px; color: var(--ink-2);
+    overflow-x: auto; white-space: nowrap; margin-top: 11px; }
+  .copy { float: right; background: var(--surface-2); color: var(--ink-2); border: 1px solid var(--border);
+    border-radius: 5px; font-size: 10px; padding: 1px 7px; cursor: pointer; margin-left: 8px; }
+  .note { position: fixed; right: 12px; bottom: 10px; font-size: 10px; color: var(--muted);
+    background: var(--surface-1); border: 1px solid var(--border); border-radius: 6px; padding: 3px 8px; }
+</style>
+</head>
+<body>
+
+<header><div class="col">
+  <h1>VESPER</h1>
+  <span class="sub num">flight log · 6 runs · gpu-tor1 idle</span>
+  <nav>
+    <button class="active" data-view="feed">Log</button>
+    <button data-view="envs">Environments</button>
+    <button class="soon">Live<i>V2</i></button>
+  </nav>
+</div></header>
+
+<!-- ── the log ─────────────────────────────────────────── -->
+<div class="col feedwrap" id="view-feed">
+  <div class="live"><b>LIVE</b> no active run — an in-progress run pins itself to the top of the log with its latest frame (V2)</div>
+
+  <div class="day">Thursday, Sep 4</div>
+
+  <div class="entry">
+    <div class="spine"><span class="t num">03:58</span><span class="dot" style="background:var(--s2)"></span><span class="rail"></span></div>
+    <div class="ecard"><div class="erow">
+      <span class="name">fly-search</span><span class="kind" style="color:var(--s2)">search</span>
+      <span class="meta num">target found at t=18.2 s · 41 s wall</span>
+      <span class="chips"><span class="chip">chase</span><span class="chip">fpv</span><span class="chip">track</span><span class="chip">events</span></span>
+      <span class="caret">▸</span>
+    </div></div>
+  </div>
+
+  <!-- expanded entry -->
+  <div class="entry">
+    <div class="spine"><span class="t num">03:31</span><span class="dot" style="background:var(--s1)"></span><span class="rail"></span></div>
+    <div class="ecard">
+      <div class="erow">
+        <span class="name">fly-cornell</span><span class="kind" style="color:var(--s1)">flight</span>
+        <span class="meta num">7 waypoints · cornell_core · 62 s wall</span>
+        <span class="chips"><span class="chip">overview</span><span class="chip">fpv</span><span class="chip">trajectory</span></span>
+        <span class="caret">▾</span>
+      </div>
+      <div class="expand">
+        <div class="vids">
+          <div class="vcard">
+            <div class="thumb"><div class="play"></div><div class="dur num">1:17</div></div>
+            <div class="cap">overview · chase <span class="r num">1860 fr @ 24 fps</span></div>
+          </div>
+          <div class="vcard">
+            <div class="thumb"><div class="play"></div><div class="dur num">1:17</div></div>
+            <div class="cap">fpv · onboard <span class="r num">1280×720</span></div>
+          </div>
+        </div>
+        <div class="row2">
+          <div class="panel">
+            <h4>Trajectory — top-down</h4>
+            <svg viewBox="0 0 400 250" style="display:block;width:100%">
+              <defs><linearGradient id="tg" x1="0" y1="1" x2="1" y2="0">
+                <stop offset="0" stop-color="#86b6ef"/><stop offset="1" stop-color="#104281"/>
+              </linearGradient></defs>
+              <rect width="400" height="250" fill="#0d0d0d"/>
+              <g stroke="#242423" stroke-width="1">
+                <line x1="100" y1="14" x2="100" y2="222"/><line x1="200" y1="14" x2="200" y2="222"/>
+                <line x1="300" y1="14" x2="300" y2="222"/>
+                <line x1="24" y1="66" x2="376" y2="66"/><line x1="24" y1="118" x2="376" y2="118"/>
+                <line x1="24" y1="170" x2="376" y2="170"/>
+              </g>
+              <polyline fill="none" stroke="url(#tg)" stroke-width="2" stroke-linejoin="round"
+                points="70,205 108,195 146,180 178,160 202,136 216,110 220,86 212,66 190,54 160,52 132,62 110,82 100,108 98,138 108,168 128,190 152,202"/>
+              <circle cx="70" cy="205" r="5" fill="none" stroke="#c3c2b7" stroke-width="2"/>
+              <circle cx="152" cy="202" r="5" fill="#3987e5"/>
+              <text x="80" y="221">start</text><text x="162" y="198">end</text>
+              <text x="24" y="242">184 m across · +x east, +y north · hover for t / xy / alt</text>
+            </svg>
+          </div>
+          <div class="panel">
+            <h4>Run</h4>
+            <div class="body"><table class="kv num">
+              <tr><td>id</td><td class="mono">20260904-033124</td></tr>
+              <tr><td>scene</td><td>cornell_core</td></tr>
+              <tr><td>started</td><td>03:31:24</td></tr>
+              <tr><td>duration</td><td>62 s wall · 77.5 s sim</td></tr>
+              <tr><td>streams</td><td>overview (chase), fpv (onboard)</td></tr>
+              <tr><td>frames</td><td>1860 @ 24 fps</td></tr>
+              <tr><td>wind</td><td>4.0 m/s</td></tr>
+              <tr><td>cruise</td><td>6.0 m/s</td></tr>
+            </table></div>
+          </div>
+        </div>
+        <div class="events">
+          <div class="lbl">Events — click to jump video</div>
+          <div class="tl">
+            <div class="axis"></div>
+            <div class="mk" style="left:23%"><i></i><span class="num">sighted 18.2 s</span></div>
+            <div class="mk reach" style="left:61%"><i></i><span class="num">reached 47.9 s</span></div>
+            <span style="position:absolute;left:0;top:20px;font-size:10px;color:var(--muted)" class="num">0 s</span>
+            <span style="position:absolute;right:0;top:20px;font-size:10px;color:var(--muted)" class="num">77.5 s</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="entry">
+    <div class="spine"><span class="t num">03:27</span><span class="dot" style="background:var(--s5)"></span><span class="rail"></span></div>
+    <div class="ecard"><div class="erow">
+      <span class="name">view-cornell</span><span class="kind" style="color:var(--s5)">view</span>
+      <span class="meta num">3 stills</span>
+      <span class="chips"><span class="chip">view_0</span><span class="chip">view_1</span><span class="chip">view_2</span></span>
+      <span class="caret">▸</span>
+    </div></div>
+  </div>
+
+  <div class="entry">
+    <div class="spine"><span class="t num">03:12</span><span class="dot" style="background:var(--s3)"></span><span class="rail"></span></div>
+    <div class="ecard"><div class="erow">
+      <span class="name">train-search</span><span class="kind" style="color:var(--s3)">training</span>
+      <span class="meta num">1400 iters · success 0.83 ↑</span>
+      <span class="chips"><span class="chip">curve</span></span>
+      <span class="caret">▸</span>
+    </div></div>
+  </div>
+
+  <div class="entry">
+    <div class="spine"><span class="t num">03:11</span><span class="dot" style="background:var(--s1)"></span><span class="rail"></span></div>
+    <div class="ecard"><div class="erow">
+      <span class="name">swarm</span><span class="kind" style="color:var(--s1)">flight</span>
+      <span class="meta num">38 s wall</span>
+      <span class="chips"><span class="chip">overview</span></span>
+      <span class="caret">▸</span>
+    </div></div>
+  </div>
+
+  <div class="entry">
+    <div class="spine"><span class="t num">02:52</span><span class="dot" style="background:var(--s4)"></span><span class="rail"></span></div>
+    <div class="ecard"><div class="erow">
+      <span class="name">sweep-wind</span><span class="kind" style="color:var(--s4)">sweep</span>
+      <span class="meta num">24 variants · 19 pass · 5 fail</span>
+      <span class="chips"><span class="chip">report</span><span class="chip">results</span></span>
+      <span class="caret">▸</span>
+    </div></div>
+  </div>
+</div>
+
+<!-- ── environments ────────────────────────────────────── -->
+<div class="col feedwrap hidden" id="view-envs">
+  <div class="envrow">
+    <div class="top"><span class="name mono">cornell_core.json</span>
+      <span class="specs num"><span><b>wp</b>7</span><span><b>wind</b>4.0 m/s</span>
+        <span><b>vis</b>800 m</span><span><b>cruise</b>6.0 m/s</span><span><b>cap</b>240 s</span></span></div>
+    <div class="cmd"><button class="copy">copy</button>docker compose run --rm sim /isaac-sim/python.sh scripts/fly_mission.py cornell_core.json</div>
+  </div>
+  <div class="envrow">
+    <div class="top"><span class="name mono">cornell0.json</span>
+      <span class="specs num"><span><b>wp</b>5</span><span><b>wind</b>0 m/s</span>
+        <span><b>vis</b>∞</span><span><b>cruise</b>5.0 m/s</span><span><b>cap</b>180 s</span></span></div>
+    <div class="cmd"><button class="copy">copy</button>docker compose run --rm sim /isaac-sim/python.sh scripts/fly_mission.py cornell0.json</div>
+  </div>
+</div>
+
+<div class="note">Direction C — flight log (static mockup)</div>
+
+<script>
+  document.querySelectorAll("nav button[data-view]").forEach(b => b.onclick = () => {
+    ["feed", "envs"].forEach(x =>
+      document.getElementById("view-" + x).classList.toggle("hidden", x !== b.dataset.view));
+    document.querySelectorAll("nav button[data-view]").forEach(x =>
+      x.classList.toggle("active", x === b));
+  });
+</script>
+</body>
+</html>

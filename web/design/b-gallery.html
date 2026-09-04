@@ -1,0 +1,324 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Vesper — Direction B: Footage Gallery</title>
+<style>
+  /* Static mockup — no data fetching. Media-first gallery, dark. */
+  :root {
+    color-scheme: dark;
+    --page:      #0d0d0d;
+    --surface-1: #1a1a19;
+    --surface-2: #242423;
+    --border:    #33332f;
+    --ink:       #ffffff;
+    --ink-2:     #c3c2b7;
+    --muted:     #8a897f;
+    --s1: #3987e5;  /* flight */
+    --s2: #d95926;  /* search */
+    --s3: #199e70;  /* training */
+    --s4: #c98500;  /* sweep */
+    --s5: #d55181;  /* view */
+    --good: #0ca30c;
+  }
+  * { box-sizing: border-box; margin: 0; }
+  body {
+    background: var(--page); color: var(--ink);
+    font: 14px/1.5 -apple-system, "SF Pro Text", "Segoe UI", sans-serif;
+    min-height: 100vh;
+  }
+  .mono { font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  .num  { font-variant-numeric: tabular-nums; }
+
+  header {
+    display: flex; align-items: center; gap: 18px; padding: 14px 28px;
+    position: sticky; top: 0; background: rgba(13,13,13,.92); backdrop-filter: blur(6px);
+    border-bottom: 1px solid var(--border); z-index: 5;
+  }
+  header h1 { font-size: 15px; letter-spacing: .2em; font-weight: 700; }
+  header .sub { color: var(--muted); font-size: 12px; }
+  nav { margin-left: auto; display: flex; gap: 4px; }
+  nav button {
+    background: none; border: none; border-radius: 8px; color: var(--ink-2);
+    padding: 6px 14px; font: inherit; font-size: 13px; cursor: pointer;
+  }
+  nav button.active { background: var(--surface-2); color: var(--ink); }
+  nav button.soon { color: var(--muted); }
+  nav button.soon i { font-style: normal; font-size: 9px; border: 1px solid var(--border); border-radius: 4px; padding: 0 4px; margin-left: 5px; vertical-align: 1px; }
+
+  .wrap { max-width: 1240px; margin: 0 auto; padding: 24px 28px 60px; }
+  .hidden { display: none; }
+
+  /* thumbnails share one look: filmed gradient + play glyph */
+  .thumb { position: relative; background:
+    radial-gradient(130% 100% at 25% 15%, #232a33 0%, #14171b 55%, #0b0c0e 100%); }
+  .thumb .play {
+    position: absolute; inset: 0; margin: auto; width: 54px; height: 54px; border-radius: 50%;
+    background: rgba(0,0,0,.5); border: 1px solid rgba(255,255,255,.28);
+    display: flex; align-items: center; justify-content: center;
+  }
+  .thumb .play::after { content: ""; border: 10px solid transparent; border-left: 16px solid #fff; margin-left: 8px; }
+  .thumb .dur { position: absolute; right: 10px; bottom: 10px; font-size: 11px; color: var(--ink-2);
+    background: rgba(0,0,0,.6); border-radius: 5px; padding: 1px 7px; }
+
+  /* ── gallery ─────────────────────────────────────────── */
+  .live-banner {
+    display: flex; align-items: center; gap: 12px; margin-bottom: 22px;
+    border: 1px dashed var(--border); border-radius: 12px; padding: 14px 18px; color: var(--muted);
+  }
+  .live-banner b { color: var(--ink-2); letter-spacing: .1em; font-size: 11px; }
+  .gal { display: grid; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); gap: 20px; }
+  .gcard { background: var(--surface-1); border: 1px solid var(--border); border-radius: 14px;
+    overflow: hidden; cursor: pointer; transition: border-color .15s; }
+  .gcard:hover { border-color: #4a4a44; }
+  .gcard .thumb { aspect-ratio: 16/9; }
+  .gcard .cap { padding: 12px 16px 14px; }
+  .gcard .cap .name { font-weight: 650; display: flex; align-items: baseline; gap: 8px; }
+  .gcard .cap .name .kind { font-size: 11px; margin-left: auto; }
+  .gcard .cap .meta { color: var(--muted); font-size: 12px; margin-top: 2px; }
+  .chips { display: flex; gap: 5px; margin-top: 9px; flex-wrap: wrap; }
+  .chip { font-size: 10.5px; padding: 1px 8px; border-radius: 9px; line-height: 17px;
+    background: var(--page); color: var(--ink-2); border: 1px solid var(--border); }
+  .thumb.still { background: radial-gradient(120% 100% at 70% 30%, #2a2622 0%, #16130f 60%, #0c0a08 100%); }
+  .thumb.still .play { display: none; }
+  .thumb .label { position: absolute; left: 10px; top: 10px; font-size: 10px; letter-spacing: .1em;
+    text-transform: uppercase; color: var(--ink-2); background: rgba(0,0,0,.55); border-radius: 5px; padding: 2px 7px; }
+
+  /* ── detail ──────────────────────────────────────────── */
+  .back { color: var(--muted); font-size: 13px; cursor: pointer; margin-bottom: 14px; display: inline-block; }
+  .back:hover { color: var(--ink-2); }
+  .dhead { display: flex; align-items: baseline; gap: 12px; margin-bottom: 16px; flex-wrap: wrap; }
+  .dhead h2 { font-size: 21px; font-weight: 700; }
+  .dhead .meta { color: var(--muted); font-size: 13px; }
+  .detail { display: grid; grid-template-columns: minmax(0, 1fr) 340px; gap: 20px; align-items: start; }
+  .hero { background: var(--surface-1); border: 1px solid var(--border); border-radius: 14px; overflow: hidden; }
+  .hero .thumb { aspect-ratio: 16/9; }
+  .hero .bar { display: flex; align-items: center; gap: 10px; padding: 10px 14px; font-size: 12px; color: var(--ink-2); }
+  .hero .bar .scrub { flex: 1; height: 4px; border-radius: 2px; background: var(--surface-2); }
+  .hero .bar .scrub i { display: block; height: 100%; width: 34%; border-radius: 2px; background: var(--s1); }
+  .strip { display: flex; gap: 12px; margin-top: 14px; }
+  .strip .cell { flex: 1; background: var(--surface-1); border: 1px solid var(--border);
+    border-radius: 10px; overflow: hidden; cursor: pointer; }
+  .strip .cell.sel { border-color: var(--s1); }
+  .strip .thumb { aspect-ratio: 16/9; }
+  .strip .thumb .play { width: 34px; height: 34px; }
+  .strip .thumb .play::after { border-width: 6px; border-left-width: 10px; margin-left: 5px; }
+  .strip .cap { font-size: 11px; color: var(--ink-2); padding: 6px 10px; }
+
+  .side { display: flex; flex-direction: column; gap: 16px; }
+  .panel { background: var(--surface-1); border: 1px solid var(--border); border-radius: 14px; overflow: hidden; }
+  .panel h3 { font-size: 11px; font-weight: 600; letter-spacing: .1em; text-transform: uppercase;
+    color: var(--ink-2); padding: 10px 16px; border-bottom: 1px solid var(--border); }
+  .panel .body { padding: 14px 16px; }
+  table.kv { border-collapse: collapse; width: 100%; font-size: 12.5px; }
+  table.kv td { padding: 3.5px 10px 3.5px 0; vertical-align: top; }
+  table.kv td:first-child { color: var(--muted); white-space: nowrap; width: 86px; }
+  svg text { font: 10px -apple-system, "Segoe UI", sans-serif; fill: var(--muted); }
+
+  /* ── environments ────────────────────────────────────── */
+  .env-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(400px, 1fr)); gap: 20px; }
+  .ecard { background: var(--surface-1); border: 1px solid var(--border); border-radius: 14px; overflow: hidden; }
+  .ecard .thumb { aspect-ratio: 21/9; }
+  .ecard .body { padding: 14px 18px 16px; }
+  .ecard .name { font-weight: 650; margin-bottom: 8px; }
+  .specs { display: flex; gap: 18px; flex-wrap: wrap; font-size: 12px; color: var(--ink-2); }
+  .specs span b { display: block; color: var(--muted); font-weight: 400; font-size: 10.5px;
+    text-transform: uppercase; letter-spacing: .08em; }
+  .cmd { font: 11.5px/1.5 ui-monospace, "SF Mono", monospace; background: var(--page);
+    border: 1px solid var(--border); border-radius: 8px; padding: 8px 11px; color: var(--ink-2);
+    overflow-x: auto; white-space: nowrap; margin-top: 12px; }
+  .copy { float: right; background: var(--surface-2); color: var(--ink-2); border: 1px solid var(--border);
+    border-radius: 6px; font-size: 10px; padding: 1px 8px; cursor: pointer; margin-left: 8px; }
+  .note { position: fixed; right: 12px; bottom: 10px; font-size: 10px; color: var(--muted);
+    background: var(--surface-1); border: 1px solid var(--border); border-radius: 6px; padding: 3px 8px; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>VESPER</h1>
+  <span class="sub num">6 runs · 2 scenarios · gpu-tor1 idle</span>
+  <nav>
+    <button class="active" data-view="gal">Runs</button>
+    <button data-view="detail">▸ fly-cornell</button>
+    <button data-view="envs">Environments</button>
+    <button class="soon">Live<i>V2</i></button>
+  </nav>
+</header>
+
+<!-- ── gallery (runs list) ─────────────────────────────── -->
+<div class="wrap" id="view-gal">
+  <div class="live-banner"><b>LIVE</b> no active run on gpu-tor1 — when one starts, its latest frame plays here (V2)</div>
+  <div class="gal">
+    <div class="gcard" onclick="show('detail')">
+      <div class="thumb"><div class="label">chase</div><div class="play"></div><div class="dur num">0:41</div></div>
+      <div class="cap">
+        <div class="name">fly-search <span class="kind" style="color:var(--s2)">● search</span></div>
+        <div class="meta num">Sep 4, 03:58 · found target at t=18.2 s</div>
+        <div class="chips"><span class="chip">chase</span><span class="chip">fpv</span><span class="chip">track</span><span class="chip">events</span><span class="chip">trajectory</span></div>
+      </div>
+    </div>
+    <div class="gcard" onclick="show('detail')">
+      <div class="thumb"><div class="label">overview</div><div class="play"></div><div class="dur num">1:17</div></div>
+      <div class="cap">
+        <div class="name">fly-cornell <span class="kind" style="color:var(--s1)">● flight</span></div>
+        <div class="meta num">Sep 4, 03:31 · 7 waypoints · cornell_core</div>
+        <div class="chips"><span class="chip">overview</span><span class="chip">fpv</span><span class="chip">trajectory</span><span class="chip">scenario</span></div>
+      </div>
+    </div>
+    <div class="gcard">
+      <div class="thumb still"><div class="label">view_0</div></div>
+      <div class="cap">
+        <div class="name">view-cornell <span class="kind" style="color:var(--s5)">● view</span></div>
+        <div class="meta num">Sep 4, 03:27 · 3 stills</div>
+        <div class="chips"><span class="chip">view_0</span><span class="chip">view_1</span><span class="chip">view_2</span></div>
+      </div>
+    </div>
+    <div class="gcard">
+      <div class="thumb" style="background:radial-gradient(120% 100% at 40% 30%, #14201b 0%, #0e1512 60%, #090c0a 100%)">
+        <div class="label">curve</div>
+        <svg viewBox="0 0 340 120" style="position:absolute;inset:0;width:100%;height:100%">
+          <polyline fill="none" stroke="#199e70" stroke-width="2"
+            points="14,104 48,98 82,92 116,80 150,72 184,56 218,46 252,40 286,32 326,28"/>
+        </svg>
+      </div>
+      <div class="cap">
+        <div class="name">train-search <span class="kind" style="color:var(--s3)">● training</span></div>
+        <div class="meta num">Sep 4, 03:12 · 1400 iters · success 0.83</div>
+        <div class="chips"><span class="chip">curve</span></div>
+      </div>
+    </div>
+    <div class="gcard">
+      <div class="thumb"><div class="label">overview</div><div class="play"></div><div class="dur num">0:38</div></div>
+      <div class="cap">
+        <div class="name">swarm <span class="kind" style="color:var(--s1)">● flight</span></div>
+        <div class="meta num">Sep 4, 03:11</div>
+        <div class="chips"><span class="chip">overview</span></div>
+      </div>
+    </div>
+    <div class="gcard">
+      <div class="thumb still" style="background:radial-gradient(120% 100% at 40% 30%, #221d14 0%, #15110c 60%, #0c0a06 100%)">
+        <div class="label">report</div>
+        <div style="position:absolute;inset:auto 14px 12px;font-size:12px;color:var(--ink-2)">
+          24 variants · <span style="color:var(--good)">19 pass</span> · 5 fail</div>
+      </div>
+      <div class="cap">
+        <div class="name">sweep-wind <span class="kind" style="color:var(--s4)">● sweep</span></div>
+        <div class="meta num">Sep 4, 02:52 · wind 0–12 m/s × visibility</div>
+        <div class="chips"><span class="chip">report</span><span class="chip">results</span></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ── run detail ──────────────────────────────────────── -->
+<div class="wrap hidden" id="view-detail">
+  <span class="back" onclick="show('gal')">← All runs</span>
+  <div class="dhead">
+    <h2>fly-cornell</h2>
+    <span class="kind" style="color:var(--s1);font-size:12px">● flight</span>
+    <span class="meta num mono">20260904-033124 · Sep 4, 03:31 · 62 s wall · cornell_core</span>
+  </div>
+  <div class="detail">
+    <div>
+      <div class="hero">
+        <div class="thumb"><div class="label">overview — chase</div><div class="play"></div><div class="dur num">0:26 / 1:17</div></div>
+        <div class="bar"><span class="num">0:26</span><span class="scrub"><i></i></span><span class="num">1:17</span></div>
+      </div>
+      <div class="strip">
+        <div class="cell sel">
+          <div class="thumb"><div class="play"></div></div>
+          <div class="cap">overview · chase</div>
+        </div>
+        <div class="cell">
+          <div class="thumb"><div class="play"></div></div>
+          <div class="cap">fpv · onboard</div>
+        </div>
+        <div class="cell">
+          <div class="thumb still"></div>
+          <div class="cap">trajectory · map</div>
+        </div>
+      </div>
+    </div>
+    <div class="side">
+      <div class="panel">
+        <h3>Trajectory — top-down</h3>
+        <svg viewBox="0 0 340 260" style="display:block;width:100%">
+          <defs><linearGradient id="tg" x1="0" y1="1" x2="1" y2="0">
+            <stop offset="0" stop-color="#86b6ef"/><stop offset="1" stop-color="#104281"/>
+          </linearGradient></defs>
+          <rect width="340" height="260" fill="#1a1a19"/>
+          <g stroke="#2c2c2a" stroke-width="1">
+            <line x1="85" y1="16" x2="85" y2="230"/><line x1="170" y1="16" x2="170" y2="230"/>
+            <line x1="255" y1="16" x2="255" y2="230"/>
+            <line x1="20" y1="70" x2="320" y2="70"/><line x1="20" y1="130" x2="320" y2="130"/>
+            <line x1="20" y1="190" x2="320" y2="190"/>
+          </g>
+          <polyline fill="none" stroke="url(#tg)" stroke-width="2" stroke-linejoin="round"
+            points="60,215 95,204 130,190 160,170 184,146 198,118 202,92 194,72 172,60 144,58 118,68 98,88 88,114 86,144 96,176 114,198 136,210"/>
+          <circle cx="60" cy="215" r="5" fill="none" stroke="#c3c2b7" stroke-width="2"/>
+          <circle cx="136" cy="210" r="5" fill="#3987e5"/>
+          <text x="70" y="231">start</text><text x="146" y="206">end</text>
+          <text x="20" y="250">184 m across · +x east, +y north</text>
+        </svg>
+      </div>
+      <div class="panel">
+        <h3>Run</h3>
+        <div class="body"><table class="kv num">
+          <tr><td>scene</td><td>cornell_core</td></tr>
+          <tr><td>started</td><td>Sep 4 2026, 03:31:24</td></tr>
+          <tr><td>duration</td><td>62 s wall · 77.5 s sim</td></tr>
+          <tr><td>streams</td><td>overview (chase), fpv (onboard)</td></tr>
+          <tr><td>frames</td><td>1860 @ 24 fps · 1280×720</td></tr>
+          <tr><td>wind</td><td>4.0 m/s</td></tr>
+          <tr><td>cruise</td><td>6.0 m/s · 7 waypoints</td></tr>
+        </table></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ── environments ────────────────────────────────────── -->
+<div class="wrap hidden" id="view-envs">
+  <div class="dhead"><h2>Environments</h2><span class="meta">scenario specs at the repo root</span></div>
+  <div class="env-grid">
+    <div class="ecard">
+      <div class="thumb still"><div class="label">cornell_core</div></div>
+      <div class="body">
+        <div class="name mono">cornell_core.json</div>
+        <div class="specs num">
+          <span><b>waypoints</b>7</span><span><b>wind</b>4.0 m/s</span>
+          <span><b>visibility</b>800 m</span><span><b>cruise</b>6.0 m/s</span><span><b>cap</b>240 s</span>
+        </div>
+        <div class="cmd"><button class="copy">copy</button>docker compose run --rm sim /isaac-sim/python.sh scripts/fly_mission.py cornell_core.json</div>
+      </div>
+    </div>
+    <div class="ecard">
+      <div class="thumb still" style="background:radial-gradient(120% 100% at 30% 40%, #1c2226 0%, #101416 60%, #0a0c0d 100%)"><div class="label">cornell0</div></div>
+      <div class="body">
+        <div class="name mono">cornell0.json</div>
+        <div class="specs num">
+          <span><b>waypoints</b>5</span><span><b>wind</b>0 m/s</span>
+          <span><b>visibility</b>∞</span><span><b>cruise</b>5.0 m/s</span><span><b>cap</b>180 s</span>
+        </div>
+        <div class="cmd"><button class="copy">copy</button>docker compose run --rm sim /isaac-sim/python.sh scripts/fly_mission.py cornell0.json</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="note">Direction B — footage gallery (static mockup)</div>
+
+<script>
+  function show(v) {
+    ["gal", "detail", "envs"].forEach(x =>
+      document.getElementById("view-" + x).classList.toggle("hidden", x !== v));
+    document.querySelectorAll("nav button[data-view]").forEach(b =>
+      b.classList.toggle("active", b.dataset.view === v));
+    window.scrollTo(0, 0);
+  }
+  document.querySelectorAll("nav button[data-view]").forEach(b => b.onclick = () => show(b.dataset.view));
+</script>
+</body>
+</html>
