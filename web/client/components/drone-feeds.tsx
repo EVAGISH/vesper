@@ -57,10 +57,21 @@ export function DroneFeeds({ ip }: { ip: string }) {
           The feed is live only while a drone is flying. Launch a mission — cameras
           appear here as soon as it takes off (~2 min to load the world).
         </div>
-        <JobButton
-          label="▶ FLY MISSION"
-          body={{ kind: "mission", scenario: "cornell_core.json" }}
-        />
+        <div className="flex items-center gap-2">
+          <JobButton
+            label="▶ FLY MISSION"
+            body={{ kind: "mission", scenario: "cornell_core.json" }}
+          />
+          <JobButton
+            label="◉ START WARM SESSION"
+            variant="secondary"
+            body={{ kind: "warm" }}
+          />
+        </div>
+        <div className="max-w-sm px-6 text-[11px] text-muted-foreground">
+          A warm session keeps the world loaded — feeds and the live map stay up,
+          and deploys take seconds instead of minutes.
+        </div>
       </div>
     );
   }

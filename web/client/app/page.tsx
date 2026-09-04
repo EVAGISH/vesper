@@ -160,7 +160,7 @@ export default function Live() {
             right="site frame · N up"
             className="lg:flex lg:min-h-0 lg:flex-1 lg:flex-col"
           >
-            <SiteMap />
+            <SiteMap liveIp={ip ?? null} />
           </Panel>
           <JobsPanel className="lg:max-h-[45%] lg:min-h-0 lg:shrink-0" />
         </div>

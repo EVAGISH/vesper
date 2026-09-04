@@ -83,7 +83,8 @@ export function SyncButton({ onSynced }: { onSynced?: () => void }) {
 }
 
 const KIND_LABEL: Record<Job["kind"], string> = {
-  train: "training", fly: "sortie", eval: "evaluation", mission: "mission", live: "live session",
+  train: "training", fly: "sortie", eval: "evaluation", mission: "mission",
+  live: "live session", warm: "warm session",
 };
 
 export function JobsPanel({ pollMs = 6000, className }: { pollMs?: number; className?: string }) {

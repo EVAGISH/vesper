@@ -41,7 +41,7 @@ export const fmtBytes = (b: number) =>
 
 export type Job = {
   id: string;
-  kind: "train" | "fly" | "eval" | "mission" | "live";
+  kind: "train" | "fly" | "eval" | "mission" | "live" | "warm";
   policy?: string | null;
   started: number;
   finished?: number | null;
@@ -50,6 +50,17 @@ export type Job = {
 };
 
 export type Site = { world: string; half_m: number; ground: string };
+
+/** Live world snapshot published by the warm session's /state endpoint. */
+export type LiveState = {
+  t: number;
+  policy?: string;
+  found: number;
+  reached: number;
+  targets: number;
+  drones: { x: number; y: number; z: number }[];
+  vehicles: { x: number; y: number; found: boolean; reached: boolean }[];
+};
 
 export async function postJSON<T>(url: string, body?: unknown): Promise<T> {
   const r = await fetch(url, {

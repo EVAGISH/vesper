@@ -3,21 +3,25 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useVesper } from "@/components/vesper-provider";
 import {
-  fetchJSON, media, parseEvents, type RunEvent, type Site, type Trajectory,
+  fetchJSON, media, parseEvents,
+  type LiveState, type RunEvent, type Site, type Trajectory,
 } from "@/lib/vesper";
 
 // Interactive AO map: the site's own ground ortho (world frame, ±half_m,
 // +x east / +y north) rendered to canvas with pan (drag), zoom (wheel or
-// buttons), a live coordinate readout, and clickable markers. Layers: last
-// sortie's flight track, mission waypoints, and target events. When live
-// telemetry exists this becomes the live position layer.
+// buttons), a live coordinate readout, and clickable markers. While a warm
+// session is publishing /state on the box, the map is LIVE: drone positions,
+// a growing trail, and target status update every second. Otherwise it shows
+// the last sortie's track, waypoints, and events.
 
 type ScenarioSpec = { waypoints?: [number, number, number][] };
 type Pick = { sx: number; sy: number; lines: string[] };
 
 const MAX_ZOOM = 14;
+const LIVE_POLL_MS = 1000;
+const TRAIL_MAX = 1200;
 
-export function SiteMap() {
+export function SiteMap({ liveIp }: { liveIp?: string | null }) {
   const { runs } = useVesper();
   const [site, setSite] = useState<Site | null | undefined>(undefined);
   const [traj, setTraj] = useState<Trajectory | null>(null);
@@ -26,11 +30,51 @@ export function SiteMap() {
   const [imgReady, setImgReady] = useState(false);
   const [picked, setPicked] = useState<Pick | null>(null);
 
+  const [liveRaw, setLiveRaw] = useState<LiveState | null>(null);
+
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const imgRef = useRef<HTMLImageElement | null>(null);
   const view = useRef({ cx: 0, cy: 0, zoom: 1 }); // zoom 1 = whole site fits
   const drag = useRef({ on: false, x: 0, y: 0, moved: 0 });
   const hover = useRef<{ sx: number; sy: number } | null>(null);
+  const trail = useRef<[number, number][]>([]); // drone 0's path this session
+
+  // live telemetry from the warm session's /state (CORS-open on the box);
+  // shown only while an ip is known, so stale state can't linger
+  const live = liveIp ? liveRaw : null;
+  useEffect(() => {
+    if (!liveIp) return;
+    trail.current = [];
+    let alive = true;
+    const poll = () =>
+      fetch(`http://${liveIp}:8180/state`, { cache: "no-store" })
+        .then((r) => (r.ok ? r.json() : null))
+        .then((d: LiveState | null) => {
+          if (!alive) return;
+          if (d && Array.isArray(d.drones) && d.drones.length) {
+            const p = d.drones[0];
+            const last = trail.current[trail.current.length - 1];
+            if (!last || Math.hypot(last[0] - p.x, last[1] - p.y) > 0.5)
+              trail.current.push([p.x, p.y]);
+            if (trail.current.length > TRAIL_MAX) trail.current.shift();
+            setLiveRaw(d);
+          } else {
+            setLiveRaw(null);
+            trail.current = [];
+          }
+        })
+        .catch(() => {
+          if (!alive) return;
+          setLiveRaw(null);
+          trail.current = [];
+        });
+    poll();
+    const id = setInterval(poll, LIVE_POLL_MS);
+    return () => {
+      alive = false;
+      clearInterval(id);
+    };
+  }, [liveIp]);
 
   // one source run for every overlay, so the layers agree with each other
   const sortie = useMemo(
@@ -117,8 +161,8 @@ export function SiteMap() {
     const size = 2 * m.half * m.ppm;
     g.drawImage(img, m.toX(-m.half), m.toY(m.half), size, size);
 
-    // mission waypoints: dashed route + diamonds
-    if (waypoints.length) {
+    // mission waypoints: dashed route + diamonds (last sortie — hidden while live)
+    if (!live && waypoints.length) {
       g.strokeStyle = "rgba(255,255,255,0.6)";
       g.lineWidth = 1;
       g.setLineDash([4, 4]);
@@ -140,8 +184,8 @@ export function SiteMap() {
       }
     }
 
-    // flight track: dark halo + accent, end dot
-    if (traj && traj.t.length > 1) {
+    // flight track: dark halo + accent, end dot (last sortie — hidden while live)
+    if (!live && traj && traj.t.length > 1) {
       const { px, py } = traj;
       for (const pass of [
         { style: "rgba(0,0,0,0.55)", width: 4.5 },
@@ -166,11 +210,23 @@ export function SiteMap() {
     }
 
     // targets: sighted = amber triangle, reached = green dot
-    for (const e of events) {
-      if (!e.xy) continue;
-      const sx = m.toX(e.xy[0]), sy = m.toY(e.xy[1]);
+    // (last sortie events, or the live target states while a session runs)
+    const targetMarks: { x: number; y: number; state: "reached" | "sighted" | "unfound" }[] =
+      live
+        ? live.vehicles.map((v) => ({
+            x: v.x, y: v.y,
+            state: v.reached ? "reached" : v.found ? "sighted" : "unfound",
+          }))
+        : events
+            .filter((e) => e.xy)
+            .map((e) => ({
+              x: e.xy![0], y: e.xy![1],
+              state: /reach/i.test(e.label) ? "reached" : "sighted",
+            }));
+    for (const tm of targetMarks) {
+      const sx = m.toX(tm.x), sy = m.toY(tm.y);
       g.lineWidth = 2;
-      if (/reach/i.test(e.label)) {
+      if (tm.state === "reached") {
         g.fillStyle = "#0ca30c";
         g.strokeStyle = "rgba(0,0,0,0.7)";
         g.beginPath();
@@ -178,7 +234,9 @@ export function SiteMap() {
         g.fill();
         g.stroke();
       } else {
-        g.strokeStyle = "#c98500";
+        // unfound targets show faint: truth for the spectator, visibly
+        // distinct from what the drone has actually sighted
+        g.strokeStyle = tm.state === "sighted" ? "#c98500" : "rgba(255,255,255,0.35)";
         g.fillStyle = "rgba(0,0,0,0.5)";
         g.beginPath();
         g.moveTo(sx, sy - 7);
@@ -188,6 +246,35 @@ export function SiteMap() {
         g.fill();
         g.stroke();
       }
+    }
+
+    // live layer: drone 0's trail plus every drone's position
+    if (live) {
+      if (trail.current.length > 1) {
+        for (const pass of [
+          { style: "rgba(0,0,0,0.55)", width: 4.5 },
+          { style: "#3987e5", width: 2 },
+        ]) {
+          g.strokeStyle = pass.style;
+          g.lineWidth = pass.width;
+          g.lineJoin = "round";
+          g.beginPath();
+          g.moveTo(m.toX(trail.current[0][0]), m.toY(trail.current[0][1]));
+          for (let i = 1; i < trail.current.length; i++)
+            g.lineTo(m.toX(trail.current[i][0]), m.toY(trail.current[i][1]));
+          g.stroke();
+        }
+      }
+      live.drones.forEach((d, i) => {
+        const sx = m.toX(d.x), sy = m.toY(d.y);
+        g.fillStyle = i === 0 ? "#3987e5" : "rgba(57,135,229,0.55)";
+        g.strokeStyle = "#ffffff";
+        g.lineWidth = i === 0 ? 1.8 : 1;
+        g.beginPath();
+        g.arc(sx, sy, i === 0 ? 6 : 3.5, 0, 7);
+        g.fill();
+        g.stroke();
+      });
     }
 
     // hover reticle: hairline crosshair with the E/N readout on its own axes
@@ -235,7 +322,7 @@ export function SiteMap() {
     g.textAlign = "right";
     g.fillText(`${nice >= 1000 ? `${nice / 1000} km` : `${nice} m`}`, m.W - 14, m.H - 22);
     g.textAlign = "left";
-  }, [site, traj, events, waypoints, mapping]);
+  }, [site, traj, events, waypoints, live, mapping]);
 
   useEffect(() => {
     draw();
@@ -281,6 +368,31 @@ export function SiteMap() {
     });
     const near = (x: number, y: number, r = 11) =>
       (m.toX(x) - sx) ** 2 + (m.toY(y) - sy) ** 2 < r * r;
+    if (live) {
+      for (let i = 0; i < live.drones.length; i++) {
+        const d = live.drones[i];
+        if (near(d.x, d.y))
+          return clamp({
+            sx: m.toX(d.x), sy: m.toY(d.y),
+            lines: [
+              i === 0 ? "drone 1 — lead" : `drone ${i + 1}`,
+              `${d.x.toFixed(0)} E, ${d.y.toFixed(0)} N · alt ${d.z.toFixed(0)} m`,
+            ],
+          });
+      }
+      for (let i = 0; i < live.vehicles.length; i++) {
+        const v = live.vehicles[i];
+        if (near(v.x, v.y))
+          return clamp({
+            sx: m.toX(v.x), sy: m.toY(v.y),
+            lines: [
+              `target ${i + 1} — ${v.reached ? "reached" : v.found ? "sighted" : "not yet found"}`,
+              `${v.x.toFixed(0)} E, ${v.y.toFixed(0)} N`,
+            ],
+          });
+      }
+      return null; // sortie markers are hidden while live
+    }
     for (const e of events) {
       if (e.xy && near(e.xy[0], e.xy[1]))
         return clamp({
@@ -415,17 +527,27 @@ export function SiteMap() {
             ⌂
           </button>
         </div>
-        {sortie && (
+        {live ? (
+          <span className="absolute bottom-2 left-2 bg-black/60 px-1.5 py-0.5 font-mono text-[9px] tabular-nums">
+            <span className="text-[#0ca30c]">● live</span>
+            <span className="text-secondary-foreground">
+              {" "}t={live.t.toFixed(0)} s · found {live.found}/{live.targets} · reached{" "}
+              {live.reached}/{live.targets}
+              {live.policy ? ` · ${live.policy}` : ""}
+            </span>
+          </span>
+        ) : sortie ? (
           <span className="absolute bottom-2 left-2 bg-black/60 px-1.5 py-0.5 font-mono text-[9px] text-muted-foreground">
             last sortie: {sortie.id}
           </span>
-        )}
+        ) : null}
       </div>
       <div className="flex shrink-0 flex-wrap gap-x-4 gap-y-1 border-t border-border px-3 py-1.5 font-mono text-[9px] uppercase tracking-[0.1em] text-muted-foreground">
         <span><span className="text-[#3987e5]">—</span> track</span>
         <span><span className="text-white">◇</span> waypoints</span>
         <span><span className="text-[#c98500]">△</span> sighted</span>
         <span><span className="text-[#0ca30c]">●</span> reached</span>
+        {live && <span><span className="text-white/40">△</span> unfound</span>}
         <span className="ml-auto normal-case">drag to pan · scroll to zoom · click a marker</span>
       </div>
     </div>

@@ -184,6 +184,9 @@ JOB_KINDS = {
     "eval": "scripts/eval_search.py --policy {policy} --num_envs 256 --episodes 400 --headless",
     "mission": "scripts/fly_mission.py {scenario}",
     "live": "scripts/live_world.py assets/cornell/cornell.usd",
+    # persistent sim: world stays loaded, feeds + /state stay up, deploy/reset
+    # are instant commands instead of a fresh Isaac boot
+    "warm": "scripts/warm_session.py --num_envs 16",
 }
 SCENARIO_FILE = re.compile(r"^[\w.-]+\.json$")
 
