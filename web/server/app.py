@@ -51,17 +51,32 @@ def _run_dir(run_id: str) -> Path:
     return d
 
 
+_RUN_CONTENT = {"curve.jsonl", "results.jsonl", "report.json", "events.json",
+                "trajectory.parquet"}
+
+
 @app.get("/api/runs")
 def list_runs():
     out = []
     for d in sorted(RUNS.iterdir(), reverse=True) if RUNS.is_dir() else []:
-        mf = d / "manifest.json"
-        if not d.is_dir() or not mf.exists():
+        if not d.is_dir():
             continue
-        try:
-            manifest = json.loads(mf.read_text())
-        except json.JSONDecodeError:
-            manifest = {}
+        names = {p.name for p in d.iterdir()}
+        # a run is anything with a manifest OR real content (training curves,
+        # checkpoints, sweeps, media) -- headless training writes no manifest.
+        has_content = ("manifest.json" in names or names & _RUN_CONTENT
+                       or any(n.endswith((".pt", ".mp4", ".png")) for n in names))
+        if not has_content:
+            continue
+        manifest = {}
+        if "manifest.json" in names:
+            try:
+                manifest = json.loads((d / "manifest.json").read_text())
+            except json.JSONDecodeError:
+                pass
+        if "name" not in manifest:                          # synthesize for capture-less runs
+            manifest["name"] = d.name.split("-", 2)[-1] if "-" in d.name else d.name
+            manifest.setdefault("started", d.stat().st_mtime)
         files = sorted(p.name for p in d.iterdir() if p.suffix in MEDIA_TYPES)
         out.append({"id": d.name, "manifest": manifest, "files": files})
     return out
