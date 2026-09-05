@@ -54,26 +54,11 @@ REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 CORNELL_USD = os.path.join(REPO, "assets", "cornell", "cornell.usd")
 CORNELL_MAP = os.path.join(REPO, "assets", "cornell", "cornell_map.npz")
 
-# (name, ground speed m/s, optical contrast, spawn layer, follows roads)
-#   open        a tank driving on the roads, in plain sight
-#   camouflaged same behaviour, painted to blend into the ground (geometric mode only:
-#               the rendered tank wears whatever paint the asset ships with)
-#   concealed   crawling under tree canopy, plain paint but hard to see through leaves
-#   parked      shut down a few metres off a building wall, nose along it
-ROLES = [
-    ("open", 4.5, 1.00, "road", True),
-    ("camouflaged", 3.5, 0.32, "road", True),
-    ("concealed", 1.2, 0.90, "concealed", False),
-    ("parked", 0.0, 0.75, "parking", False),
-]
-VEHICLE_SEMANTIC = "vehicle"
-VEHICLE_PATH_RX = r"env_(\d+)/Vehicle_(\d+)"
-
-# vehicle driving: what the hull can do
-VEH_ACCEL = 1.5            # m/s^2 speed ramp from rest
-VEH_LAT_ACCEL = 2.5        # m/s^2 lateral budget -> turn-rate limit at speed
-VEH_TURN_MAX = 1.0         # rad/s at walking pace
-VEH_STUCK_S = 2.0          # seconds below 30% of commanded speed before it turns away
+# Role table and hull limits are shared with the native env (vesper.native),
+# which cannot import this module (isaaclab above); they live in ground.py and
+# are re-exported here so existing imports keep working.
+from vesper.lab.ground import (ROLES, VEH_ACCEL, VEH_LAT_ACCEL, VEH_STUCK_S,  # noqa: F401,E402
+                               VEH_TURN_MAX, VEHICLE_PATH_RX, VEHICLE_SEMANTIC)
 
 
 @configclass

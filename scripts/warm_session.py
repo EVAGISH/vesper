@@ -149,6 +149,9 @@ def look_at(cam, pos, target):
 
 manual = False
 teleop = {"axes": [0.0, 0.0, 0.0], "t": 0.0}
+# chase cam trails drone 0 along its (smoothed) direction of travel; the EMA
+# keeps the view from whipping around when the policy jinks
+chase_dir = np.array([1.0, 0.0])
 stick = math.atanh(min(max(args.teleop_gain, 0.05), 0.99))
 
 
@@ -222,7 +225,14 @@ while app.is_running():
         cp, cq = sensor_pose(env._robot.data.root_pos_w[:1], env._robot.data.root_quat_w[:1],
                              env.task.cfg.cam_pitch_deg, tuple(cfg.cam_offset))
         fpv.set_world_pose(cp[0].cpu().numpy(), cq[0].cpu().numpy())
-        look_at(chase, d0 + np.array([-45.0, -45.0, 30.0]), d0)
+        # trail 10 m behind and 3 m above, along the direction of travel, so the
+        # airframe fills a real fraction of the frame instead of being 6 px away
+        v_xy = v0[:2].cpu().numpy()
+        speed = np.linalg.norm(v_xy)
+        if speed > 0.5:
+            chase_dir = 0.9 * chase_dir + 0.1 * (v_xy / speed)
+            chase_dir /= np.linalg.norm(chase_dir) + 1e-6
+        look_at(chase, d0 + np.array([-10.0 * chase_dir[0], -10.0 * chase_dir[1], 3.0]), d0)
         env.sim.render()
         srv.publish(np.asarray(fpv.get_rgba()[..., :3], dtype=np.uint8), "fpv")
         srv.publish(np.asarray(chase.get_rgba()[..., :3], dtype=np.uint8), "overview")

@@ -3,9 +3,9 @@
 import Link from "next/link";
 import { useEffect, useState } from "react";
 import { DroneFeeds } from "@/components/drone-feeds";
-import { JobsPanel } from "@/components/job-controls";
 import { LiveViewport } from "@/components/live-viewport";
-import { SiteMap } from "@/components/site-map";
+import { MissionPanel } from "@/components/mission-panel";
+import { TacticalView } from "@/components/tactical-view";
 import { Teleop } from "@/components/teleop";
 import { useVesper } from "@/components/vesper-provider";
 import { fetchJSON, fmtTime, KIND_COLOR, runKind } from "@/lib/vesper";
@@ -72,7 +72,9 @@ export default function Live() {
             title="Live downlink"
             right={
               ip === undefined ? "checking…" : !ip ? (
-                <span className="font-mono text-[#d03b3b]">gpu box offline</span>
+                <span className="font-mono text-[#d03b3b]">no session</span>
+              ) : ip === "localhost" ? (
+                <span className="font-mono text-[#0ca30c]">native sim @ localhost</span>
               ) : (
                 <span className="flex items-center gap-3">
                   {!viewport && (
@@ -91,7 +93,9 @@ export default function Live() {
           >
             {ip ? (
               <>
-                <DroneFeeds ip={ip} />
+                {/* Native session → the tactical operator console (live, on-device).
+                    Isaac box session → its rendered MJPEG feeds. */}
+                {ip === "localhost" ? <TacticalView ip={ip} /> : <DroneFeeds ip={ip} />}
                 <div className="border-t border-border">
                   <Teleop ip={ip} />
                 </div>
@@ -102,7 +106,7 @@ export default function Live() {
                   STANDBY
                 </div>
                 <div className="max-w-sm px-6 text-xs text-muted-foreground">
-                  No GPU box is up. Launch one to fly.
+                  No session is up. Launch a warm session to fly.
                 </div>
               </div>
             )}
@@ -158,17 +162,16 @@ export default function Live() {
           </Panel>
         </div>
 
-        {/* ── right rail: situate, then control. The map takes whatever
-              height the jobs rail leaves; the jobs list scrolls inside. ── */}
+        {/* ── right rail: the live mission picture the map can't say in glyphs —
+              target roster, detection log, telemetry from the session's /state. ── */}
         <div className="flex min-w-0 flex-col gap-3 lg:h-full lg:min-h-0">
           <Panel
-            title="AO map"
-            right="site frame · N up"
+            title="Mission"
+            right={ip === "localhost" ? "live · kramatorsk AO" : "no active mission"}
             className="lg:flex lg:min-h-0 lg:flex-1 lg:flex-col"
           >
-            <SiteMap liveIp={ip ?? null} />
+            <MissionPanel ip={ip === undefined ? null : ip} />
           </Panel>
-          <JobsPanel className="lg:max-h-[45%] lg:min-h-0 lg:shrink-0" />
         </div>
       </div>
     </main>

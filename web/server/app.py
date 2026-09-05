@@ -55,30 +55,54 @@ _RUN_CONTENT = {"curve.jsonl", "results.jsonl", "report.json", "events.json",
                 "trajectory.parquet"}
 
 
+def _has_media(d: Path, names: set[str]) -> bool:
+    """True when a run carries renderable media -- at the top level OR one dir
+    down (e.g. frames/*.png), so a run whose media lives in a subdir still
+    surfaces. One level only; stops at the first hit to stay cheap."""
+    if any(n.endswith((".mp4", ".png")) for n in names):
+        return True
+    for sub in d.iterdir():
+        if sub.is_dir():
+            try:
+                if any(p.suffix in (".png", ".mp4") for p in sub.iterdir()):
+                    return True
+            except OSError:
+                continue
+    return False
+
+
 @app.get("/api/runs")
 def list_runs():
     out = []
-    for d in sorted(RUNS.iterdir(), reverse=True) if RUNS.is_dir() else []:
+    for d in sorted(RUNS.iterdir()) if RUNS.is_dir() else []:
         if not d.is_dir():
             continue
-        names = {p.name for p in d.iterdir()}
-        # a run is anything with a manifest OR real content (training curves,
-        # checkpoints, sweeps, media) -- headless training writes no manifest.
-        has_content = ("manifest.json" in names or names & _RUN_CONTENT
-                       or any(n.endswith((".pt", ".mp4", ".png")) for n in names))
-        if not has_content:
+        try:
+            names = {p.name for p in d.iterdir()}
+            # a run is anything with a manifest OR real content (training curves,
+            # sweeps, media). A dir holding only checkpoints (*.pt/*.onnx) is a
+            # model pool (e.g. friend-checkpoints), surfaced by /api/models -- not
+            # a sortie, so it must not become the default "latest".
+            has_content = ("manifest.json" in names or names & _RUN_CONTENT
+                           or _has_media(d, names))
+            if not has_content:
+                continue
+            manifest = {}
+            if "manifest.json" in names:
+                try:
+                    manifest = json.loads((d / "manifest.json").read_text())
+                except (json.JSONDecodeError, OSError):     # half-written manifest
+                    pass
+            if "name" not in manifest:                      # synthesize for capture-less runs
+                manifest["name"] = d.name.split("-", 2)[-1] if "-" in d.name else d.name
+            manifest.setdefault("started", d.stat().st_mtime)   # always dated, even with a name
+            files = sorted(p.name for p in d.iterdir() if p.suffix in MEDIA_TYPES)
+            out.append({"id": d.name, "manifest": manifest, "files": files})
+        except OSError:                                     # dir vanished / unreadable mid-scan
             continue
-        manifest = {}
-        if "manifest.json" in names:
-            try:
-                manifest = json.loads((d / "manifest.json").read_text())
-            except json.JSONDecodeError:
-                pass
-        if "name" not in manifest:                          # synthesize for capture-less runs
-            manifest["name"] = d.name.split("-", 2)[-1] if "-" in d.name else d.name
-            manifest.setdefault("started", d.stat().st_mtime)
-        files = sorted(p.name for p in d.iterdir() if p.suffix in MEDIA_TYPES)
-        out.append({"id": d.name, "manifest": manifest, "files": files})
+    # newest first by real timestamp (manifest.started, else dir mtime), so dated
+    # sorties lead and a lexicographic name (friend-*) can't hijack "latest".
+    out.sort(key=lambda r: r["manifest"].get("started") or 0, reverse=True)
     return out
 
 
@@ -437,8 +461,31 @@ def _droplet_ip():
     return ip
 
 
+_local_live_cache = {"t": 0.0, "up": False}
+
+
+def _local_live():
+    """True when a warm session (native or otherwise) is serving on this
+    machine's 8180. Cached 5 s; the probe is a fast localhost connect."""
+    now = time.time()
+    if now - _local_live_cache["t"] < 5:
+        return _local_live_cache["up"]
+    up = False
+    try:
+        with urllib.request.urlopen("http://127.0.0.1:8180/state", timeout=0.5) as r:
+            up = r.status == 200
+    except OSError:
+        pass
+    _local_live_cache.update(t=now, up=up)
+    return up
+
+
 @app.get("/api/live")
 def live():
+    # a session on this machine wins: the native warm session serves the same
+    # /state contract with no droplet, no firewall, and no streaming hop
+    if _local_live():
+        return {"ip": "localhost"}
     return {"ip": _droplet_ip()}
 
 
@@ -760,6 +807,92 @@ def demo_media(world: str, name: str):
     if not f.is_file() or f.suffix not in MEDIA_TYPES:
         raise HTTPException(404, "no such demo file")
     return FileResponse(f, media_type=MEDIA_TYPES[f.suffix])
+
+
+@app.get("/api/world3d/{world}")
+def world3d(world: str):
+    """Geometry for the in-browser 3D view (components/world-view.tsx).
+
+    Everything is derived from data the sim itself flies against, so the view
+    and the task agree: terrain + tree placement from <world>_map.npz, crisp
+    building footprints from osm.json with heights read back off the obstacle
+    raster (the truth the sensor raymarches). Built once, cached beside the
+    assets, rebuilt when the map is re-exported.
+    """
+    if not RUN_ID.match(world):
+        raise HTTPException(400, "bad world")
+    d = ASSETS / world
+    npz = d / f"{world}_map.npz"
+    if not npz.is_file():
+        raise HTTPException(404, "world has no baked map")
+    cache = d / "web_world.json"
+    if cache.exists() and cache.stat().st_mtime >= npz.stat().st_mtime:
+        return FileResponse(cache, media_type="application/json")
+
+    import numpy as np
+    m = np.load(npz)
+    half = float(m["half_m"]); cell = float(m["cell"])
+    ground = np.asarray(m["ground_z"], np.float32)
+    obstacle = np.asarray(m["obstacle_z"], np.float32)
+    canopy = np.asarray(m["canopy_z"], np.float32)
+    trunks = np.asarray(m["trunks"], np.float32) if "trunks" in m.files else np.zeros_like(ground)
+    n = ground.shape[0]
+
+    stride = max(1, (n - 1) // 200)
+    zg = ground[::stride, ::stride]
+
+    def at(field, x, y):
+        c = np.clip(((np.asarray(x) + half) / cell).round().astype(int), 0, n - 1)
+        r = np.clip(((np.asarray(y) + half) / cell).round().astype(int), 0, n - 1)
+        return field[r, c]
+
+    # --- buildings: OSM footprints, heights from the sim's own obstacle raster
+    buildings = []
+    meta = json.loads((d / "dem_meta.json").read_text())
+    la0, lo0, la1, lo1 = meta["bbox"]
+    try:
+        from vesper.worlds.geo import GeoSite, parse_osm
+        site = GeoSite(lat0=(la0 + la1) / 2, lon0=(lo0 + lo1) / 2, half_m=half)
+        osm = json.loads((d / "osm.json").read_text())
+        rng = np.random.default_rng(0)
+        for poly, tags in parse_osm(site, osm)["buildings"]:
+            xy = np.asarray(poly.exterior.coords, np.float32)[:-1]
+            if len(xy) < 3 or np.abs(xy).max() > half:
+                continue
+            cx, cy = float(xy[:, 0].mean()), float(xy[:, 1].mean())
+            h = float((at(obstacle, xy[:, 0], xy[:, 1]) - at(ground, xy[:, 0], xy[:, 1])).max())
+            if h < 2.0:                     # not in the raster (edge case): typical height
+                h = float(rng.uniform(4.5, 8.0))
+            buildings.append({"p": [[round(float(x), 1), round(float(y), 1)] for x, y in xy],
+                              "h": round(h, 1), "z": round(float(at(ground, cx, cy)), 1)})
+    except Exception as e:                                   # noqa: BLE001
+        print(f"[world3d] building parse failed for {world}: {e}", flush=True)
+
+    # --- trees: one entry per trunk, jittered deterministically inside its cell
+    trees = []
+    rng = np.random.default_rng(7)
+    rows, cols = np.nonzero(trunks > 0)
+    for r, c in zip(rows.tolist(), cols.tolist()):
+        k = int(min(trunks[r, c], 3))
+        x0 = c * cell - half
+        y0 = r * cell - half
+        hgt = float(np.clip(canopy[r, c] - ground[r, c], 4.0, 26.0))
+        for _ in range(k):
+            x = x0 + float(rng.uniform(-0.5, 0.5)) * cell
+            y = y0 + float(rng.uniform(-0.5, 0.5)) * cell
+            trees.append([round(x, 1), round(y, 1), round(float(at(ground, x, y)), 1),
+                          round(hgt * float(rng.uniform(0.8, 1.15)), 1)])
+    if len(trees) > 30000:
+        idx = np.random.default_rng(1).choice(len(trees), 30000, replace=False)
+        trees = [trees[i] for i in sorted(idx.tolist())]
+
+    out = {"world": world, "half_m": half,
+           "ground": f"/site/{world}/ground" if (d / "ground.png").exists() else None,
+           "terrain": {"n": int(zg.shape[0]), "step": cell * stride,
+                       "z": [round(float(v), 1) for v in zg.reshape(-1)]},
+           "buildings": buildings, "trees": trees}
+    cache.write_text(json.dumps(out, separators=(",", ":")))
+    return FileResponse(cache, media_type="application/json")
 
 
 @app.get("/site/{world}/ground")

@@ -45,7 +45,7 @@ class LiveFrameServer:
 
     def publish(self, rgb: np.ndarray, stream: str) -> None:
         buf = io.BytesIO()
-        Image.fromarray(rgb).save(buf, "JPEG", quality=75)
+        Image.fromarray(rgb).save(buf, "JPEG", quality=88)
         with self._lock:
             self._jpeg[stream] = buf.getvalue()
             self._seq[stream] = self._seq.get(stream, 0) + 1

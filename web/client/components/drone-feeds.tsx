@@ -22,6 +22,9 @@ export function DroneFeeds({ ip }: { ip: string }) {
   const [info, setInfo] = useState<{ run: string; streams: string[] } | null>(null);
   const [chosen, setChosen] = useState<string | null>(null);
   const [checked, setChecked] = useState(false);
+  // a session that answers /streams but publishes no cameras (the native warm
+  // session: telemetry only) — the map is live, there is just no video downlink
+  const [session, setSession] = useState<string | null>(null);
 
   useEffect(() => {
     let alive = true;
@@ -31,11 +34,13 @@ export function DroneFeeds({ ip }: { ip: string }) {
         .then((d) => {
           if (!alive) return;
           setInfo(d && d.streams?.length ? d : null);
+          setSession(d?.run ?? null);
           setChecked(true);
         })
         .catch(() => {
           if (!alive) return;
           setInfo(null);
+          setSession(null);
           setChecked(true);
         });
     poll();
@@ -45,6 +50,22 @@ export function DroneFeeds({ ip }: { ip: string }) {
       clearInterval(id);
     };
   }, [ip]);
+
+  // telemetry-only session (native sim): the map is live, video needs Isaac
+  if (!info && session) {
+    return (
+      <div className="flex aspect-video flex-col items-center justify-center gap-3 bg-black text-center">
+        <div className="font-mono text-sm tracking-[0.3em] text-[#0ca30c]">
+          TELEMETRY LIVE — NO VIDEO DOWNLINK
+        </div>
+        <div className="max-w-sm px-6 text-xs text-muted-foreground">
+          A native session ({session}) is flying and the map is live. Camera
+          feeds render on the GPU box only — start the Isaac warm session there
+          for video.
+        </div>
+      </div>
+    );
+  }
 
   // nothing flying: standby with a one-click mission so the operator is self-serve
   if (!info) {
@@ -106,10 +127,12 @@ export function DroneFeeds({ ip }: { ip: string }) {
               title={`show ${s} large`}
             >
               {/* eslint-disable-next-line @next/next/no-img-element */}
+              {/* object-contain, not cover: the fpv stream is square (640×640),
+                  and cover would crop away its top/bottom third in a 16:9 tile */}
               <img
                 src={`http://${ip}:8180/${s}.mjpeg`}
                 alt={`${s} feed`}
-                className="block aspect-video w-full object-cover opacity-80 hover:opacity-100"
+                className="block aspect-video w-full bg-black object-contain opacity-80 hover:opacity-100"
               />
               <span className="absolute left-1.5 top-1 font-mono text-[9px] uppercase tracking-widest text-white/80">
                 {s}
