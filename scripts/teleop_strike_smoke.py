@@ -62,6 +62,11 @@ try:
 except Exception:
     pass
 env = ChaseEnv(cfg, render_mode="rgb_array", seed=args.seed)
+if not env.world.has_tree_solids:
+    raise RuntimeError(
+        "teleop tree smoke requires a physical-tree world; rebuild the species "
+        "wrappers and export a map containing tree_z"
+    )
 
 dt = cfg.sim.dt * cfg.decimation
 steps = int(args.seconds / dt)
@@ -78,6 +83,7 @@ def make_camera(path, hfov, resolution):
 
 fpv = make_camera("/World/teleop_fpv", 110.0, (640, 640))
 overview = make_camera("/World/teleop_overview", 72.0, (960, 540))
+target_close = make_camera("/World/teleop_target_close", 62.0, (640, 540))
 
 
 def look_at(cam, pos, target):
@@ -220,17 +226,41 @@ def render_pair(scenario, t, action, status="TELEOP"):
     cp, cq = sensor_pose(env._robot.data.root_pos_w[:1], quat,
                          env.task.cfg.cam_pitch_deg, tuple(cfg.cam_offset))
     fpv.set_world_pose(cp[0].cpu().numpy(), cq[0].cpu().numpy())
-    horizontal = tank[:2] - drone[:2]
+    # A side view makes both small vehicles readable and keeps their separation
+    # visible.  The tree case frames the trunk instead of the unrelated tank.
+    if scenario == "tree":
+        subject = np.array([tree_xy[0], tree_xy[1], drone[2]], dtype=np.float32)
+    else:
+        subject = tank
+    horizontal = subject[:2] - drone[:2]
     if np.linalg.norm(horizontal) < 1.0:
         horizontal = np.array([1.0, 0.0])
     horizontal = horizontal / (np.linalg.norm(horizontal) + 1e-6)
-    midpoint = 0.45 * drone + 0.55 * tank
-    cam_pos = midpoint - np.array([horizontal[0], horizontal[1], 0.0]) * 16.0 + np.array([0, 0, 9.0])
-    look_at(overview, cam_pos, midpoint)
+    separation = float(np.linalg.norm(subject[:2] - drone[:2]))
+    midpoint = 0.5 * (drone + subject)
+    side = np.array([-horizontal[1], horizontal[0], 0.0])
+    side_distance = max(8.0, separation * 0.8)
+    cam_pos = midpoint + side * side_distance + np.array([0.0, 0.0, max(3.5, separation * 0.2)])
+    # The composited blast is centred in the image, so put the airframe at the
+    # optical centre on a fuse frame.  A tank within five metres remains visible.
+    camera_target = drone if float(action[0, 3]) > 0.5 else midpoint
+    look_at(overview, cam_pos, camera_target)
+    close_pos = subject - np.array([horizontal[0], horizontal[1], 0.0]) * 7.0
+    close_pos += side * 4.0 + np.array([0.0, 0.0, 4.0])
+    look_at(target_close, close_pos, subject)
     env.sim.render()
     a = action[0].detach().cpu().numpy()
+    main = Image.fromarray(np.asarray(overview.get_rgba()[..., :3], dtype=np.uint8))
+    close = Image.fromarray(np.asarray(target_close.get_rgba()[..., :3], dtype=np.uint8))
+    main = main.resize((480, 540), Image.Resampling.LANCZOS)
+    close = close.resize((480, 540), Image.Resampling.LANCZOS)
+    combined = Image.new("RGB", (960, 540))
+    combined.paste(main, (0, 0)); combined.paste(close, (480, 0))
+    labels = ImageDraw.Draw(combined, "RGBA")
+    labels.rectangle((480, 0, 640, 24), fill=(0, 0, 0, 170))
+    labels.text((490, 6), "TARGET CLOSE-UP", fill=(255, 255, 255))
     return (annotate(np.asarray(fpv.get_rgba()[..., :3], dtype=np.uint8), scenario, t, a, distance, status),
-            annotate(np.asarray(overview.get_rgba()[..., :3], dtype=np.uint8), scenario, t, a, distance, status),
+            annotate(np.asarray(combined), scenario, t, a, distance, status),
             drone, tank, distance)
 
 
@@ -289,11 +319,13 @@ def run_scenario(name, start, tank_xy, heading, mode):
             hit_overview = annotate(last_overview, name, t, a, distance, status)
             for j in range(18):
                 capture.add_frame(explosion_frame(hit_fpv, None, j / 17, 290), "fpv")
-                capture.add_frame(explosion_frame(hit_overview, (480, 270), j / 17, 125), "overview")
+                capture.add_frame(explosion_frame(hit_overview, (240, 270), j / 17, 125), "overview")
             break
         if bool(info["crash"][0]):
-            outcome = "tree_contact" if mode == "tree" else "crash"
-            event_info = {"reward": round(float(reward[0]), 3), "range_m": round(distance, 3)}
+            tree_distance = float(np.linalg.norm(drone_now[:2] - tree_xy))
+            outcome = "tree_contact" if mode == "tree" and tree_distance <= 1.25 else "crash"
+            event_info = {"reward": round(float(reward[0]), 3), "range_m": round(distance, 3),
+                          "tree_range_m": round(tree_distance, 3)}
             a = action[0].cpu().numpy()
             contact_fpv = annotate(last_fpv, name, t, a, distance, "TREE CONTACT")
             contact_overview = annotate(last_overview, name, t, a, distance, "TREE CONTACT")

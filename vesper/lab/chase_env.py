@@ -63,6 +63,7 @@ class ChaseEnvCfg(VesperQuadEnvCfg):
     chase: dict | None = None                       # ChaseCfg overrides
     world_usd: str = CORNELL_USD
     world_map: str = CORNELL_MAP
+    require_tree_colliders: bool = True              # reject stale visual-only site exports
     zones: str | None = None                        # zones.json; default: beside the map or <site>_zones.json
     vehicle_model: str | None = None
     n_targets: int = 12
@@ -110,6 +111,11 @@ class ChaseEnv(VesperQuadEnv):
         N, dev = self.num_envs, self.device
         self.gen = torch.Generator(device=dev); self.gen.manual_seed(self._seed)
         self.world = WorldMap(cfg.world_map, device=dev)
+        if cfg.require_tree_colliders and not self.world.has_tree_solids:
+            raise RuntimeError(
+                f"{cfg.world_map} has visual-only trees; rebuild its species wrappers "
+                "with colliders and rerun scripts/export_world_map.py"
+            )
         zpath = cfg.zones or find_zones(cfg.world_map, REPO)
         if zpath:
             self.world.attach_zones(Zones.load(zpath))

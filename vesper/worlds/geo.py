@@ -638,6 +638,11 @@ def _author_tree_colliders(stage, root, src_usd: Path, name: str):
     for prim in Usd.PrimRange(root.GetPrim()):
         if not prim.IsA(UsdGeom.Mesh):
             continue
+        # Some NVIDIA assets use empty Mesh prims as transform/group nodes.
+        # Marking those as collision meshes makes PhysX emit an error for every
+        # instance and produces no shape, so only cook meshes with geometry.
+        if not UsdGeom.Mesh(prim).GetPointsAttr().Get():
+            continue
         UsdPhysics.CollisionAPI.Apply(prim)
         mca = UsdPhysics.MeshCollisionAPI.Apply(prim)
         mca.CreateApproximationAttr().Set(UsdPhysics.Tokens.convexDecomposition)
