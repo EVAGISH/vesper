@@ -121,6 +121,16 @@ def _env_log(name: str) -> Path:
     return ROOT / f".envbuild_{name}.log"
 
 
+def _export_map(name: str, logf: Path) -> None:
+    """Bake the world-map (ground/obstacle/canopy/drivable/concealed rasters) so
+    the search task can train here. Without it a new world is not trainable."""
+    with open(logf, "a") as f:
+        f.write("exporting world-map (needed for training)...\n")
+        subprocess.run([sys.executable, "scripts/export_world_map.py",
+                        f"assets/{name}/{name}.usd"], cwd=ROOT,
+                       stdout=f, stderr=subprocess.STDOUT, timeout=900)
+
+
 def _run_env_build(name: str, lat: float, lon: float, half_km: float) -> None:
     logf = _env_log(name)
     try:
@@ -128,9 +138,11 @@ def _run_env_build(name: str, lat: float, lon: float, half_km: float) -> None:
             p = subprocess.run(
                 [sys.executable, "scripts/build_geo_world.py", name,
                  "--lat", str(lat), "--lon", str(lon), "--half-km", str(half_km),
-                 "--source", "global"],
+                 "--source", "global", "--ms-buildings"],
                 cwd=ROOT, stdout=f, stderr=subprocess.STDOUT, timeout=1800)
         ok = p.returncode == 0 and (ROOT / "assets" / name / f"{name}.usd").exists()
+        if ok:
+            _export_map(name, logf)                         # make it trainable
         if ok:                                              # push the new world to the box
             ip = _droplet_ip()
             if ip:
@@ -246,6 +258,7 @@ def _run_reconstruct(name: str, half_km: float) -> None:
             f.write(p.stdout[-2000:] + "\n" + p.stderr[-1000:] + "\n")
         ok = (ROOT / "assets" / name / f"{name}.usd").exists()
         if ok:
+            _export_map(name, logf)                         # make it trainable
             subprocess.run(["rsync", "-az", "-e", ssh, str(ROOT / "assets" / name),
                             f"root@{ip}:{REMOTE_DIR}/assets/"], timeout=900)
             subprocess.run(["rsync", "-az", "-e", ssh, str(ROOT / f"{name}0.json"),
@@ -581,15 +594,34 @@ class ActiveReq(BaseModel):
     name: str
 
 
-def _site_entry(world: str) -> dict:
+def _world_half_m(world: str):
+    """Exact site half-extent (m). The world builder stamps it into the USD's
+    customLayerData; the map needs it to scale the ground and place live drones."""
     d = ASSETS / world
-    half = None
     mj = d / f"{world}_map.json"
     if mj.exists():
         try:
-            half = json.loads(mj.read_text()).get("half_m")
+            h = json.loads(mj.read_text()).get("half_m")
+            if h:
+                return h
         except (OSError, json.JSONDecodeError):
             pass
+    usd = d / f"{world}.usd"
+    if usd.exists():
+        try:
+            from pxr import Usd
+            data = Usd.Stage.Open(str(usd)).GetRootLayer().customLayerData
+            site = json.loads(data.get("vesper_site", "{}"))
+            if site.get("half_m"):
+                return site["half_m"]
+        except Exception:                                  # noqa: BLE001
+            pass
+    return None
+
+
+def _site_entry(world: str) -> dict:
+    d = ASSETS / world
+    half = _world_half_m(world)
     return {
         "name": world, "world": world, "half_m": half,
         "ground": f"/site/{world}/ground" if (d / "ground.png").exists() else None,
