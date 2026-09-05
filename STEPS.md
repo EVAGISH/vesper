@@ -187,9 +187,17 @@ the episode is left, so the only thing worth optimising is time. A contact with
 anything else is a crash.
 
 **Zones** (`vesper.worlds.zones`, `<site>_zones.json`). A launch polygon: every
-drone spawns inside it. Any number of no-track safe polygons: a forklift inside
-one pays no sighting bonus, no touch reward, and touching it does not end the
-episode. Both are drawn on the AO map.
+drone spawns inside it. Any number of no-track safe polygons, which bind twice
+over. A forklift inside one is protected: no sighting bonus, no touch reward,
+and touching it ends nothing. And the drone itself should not be there — a
+per-step penalty ramps up over the 25 m outside the boundary, is maximal
+inside, and going 15 m in ends the episode the way leaving the arena does. Both
+polygons are drawn on the AO map.
+
+The actor has no map, so on a general site it could not perceive that boundary.
+On one fixed site it can learn it from landmarks, which is what this is; if that
+proves too slow, `ChaseEnvCfg.geofence` appends the signed distance to the zone
+to the proprio vector — the geofence receiver a real airframe carries.
 
 **The policy** (`vesper.lab.vision`, `recurrent_ppo.py`). RGB + depth at 96 px
 and the 11 proprio values, four stride-2 convolutions, a 256-unit GRU, actor

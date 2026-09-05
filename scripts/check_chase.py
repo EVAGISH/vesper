@@ -28,6 +28,8 @@ parser.add_argument("--res", type=int, default=96)
 parser.add_argument("--world", default=None)
 parser.add_argument("--map", default=None)
 parser.add_argument("--zones", default=None)
+parser.add_argument("--geofence", action="store_true",
+                    help="append the signed distance to the nearest safe zone to the actor's vector")
 AppLauncher.add_app_launcher_args(parser)
 args = parser.parse_args()
 args.headless = True
@@ -65,6 +67,7 @@ if args.map:
     cfg.world_map = args.map
 if args.zones:
     cfg.zones = args.zones
+cfg.geofence = args.geofence
 env = ChaseEnv(cfg, seed=0)
 obs = env.vision_reset()
 
@@ -80,8 +83,9 @@ def check(name, ok, detail=""):
 w = env.world
 check("world map loaded", w.n > 100 and w.half_m > 100, f"{w.n}x{w.n} @ {w.cell} m, +-{w.half_m} m")
 check("every env shares one origin", float(env.scene.env_origins.abs().max()) == 0.0)
-check("actor observation is the proprio vector", obs["policy"].shape[1] == PROPRIO_DIM,
-      str(tuple(obs["policy"].shape)))
+check("actor observation is the proprio vector",
+      obs["policy"].shape[1] == PROPRIO_DIM + (1 if args.geofence else 0),
+      str(tuple(obs["policy"].shape)) + (" (+geofence)" if args.geofence else ""))
 check("privileged observation is present", obs["privileged"].shape[1] == env.cfg.state_space)
 check("observations are finite", bool(torch.isfinite(obs["policy"]).all()
                                      and torch.isfinite(obs["privileged"]).all()))
@@ -95,6 +99,14 @@ if env.zones_path:
     r, c = w.nearest_cell(d0[:, 0], d0[:, 1])
     check("drones launch inside the launch zone", float((w.launch[r, c] > 0.5).float().mean()) > 0.99,
           f"{100*float((w.launch[r, c] > 0.5).float().mean()):.0f}%")
+    if float(w.safe.sum()) > 0:
+        check("no drone launches inside a safe zone",
+              not bool(w.in_safe(d0[:, 0], d0[:, 1]).any()))
+        check("the safe zone's distance field is finite where it should be",
+              float(w.safe_in.max()) > 5.0 and float(w.safe_out[w.safe > 0.5].max()) == 0.0,
+              f"deepest point {float(w.safe_in.max()):.0f} m inside")
+    else:
+        print("[SKIP] no safe zone in this world's zones file", flush=True)
 
 # --- camera
 if args.camera:
@@ -125,7 +137,7 @@ check("forklifts start inside the arena", float(vp[:, :2].abs().max()) <= args.a
 print(f"       roles: {[ROLES[int(i)][0] for i in env.driver.role.tolist()]}", flush=True)
 
 # --- step it under a random policy, biased forward so the drones actually fly
-zs, spd, agl, touches, crashes, nose_err, seen_frac = [], [], [], 0, 0, [], []
+zs, spd, agl, touches, crashes, nose_err, seen_frac, breaches, in_safe = [], [], [], 0, 0, [], [], 0, 0
 torch.manual_seed(0)
 t0 = time.time()
 act = torch.zeros(env.num_envs, env.num_actions, device=env.device)
@@ -150,6 +162,8 @@ for i in range(args.steps):
             head = torch.atan2(dv[fast, 1], dv[fast, 0])
             nose_err.append(torch.atan2(torch.sin(head - yaw), torch.cos(head - yaw)).abs())
         seen_frac.append(info["visible"].float().mean().clone())
+        breaches += int(info["safe_breach"].sum())
+        in_safe += int(info["in_safe"].sum())
 else:
     check("observations stay finite", True)
 wall = time.time() - t0
@@ -178,10 +192,13 @@ check("the camera denies most forklifts most of the time", 0.0 <= v < 0.5,
       f"{100*v:.1f}% of forklift-steps in frame (this is a search, not a chase)")
 print(f"       drone AGL over the run: mean {float(torch.cat(agl).mean()):.0f} m", flush=True)
 
+if float(w.safe.sum()) > 0:
+    print(f"       safe zone: {in_safe} drone-steps inside, {breaches} breaches", flush=True)
+
 # --- the actor's vector must carry no world position
 pr = obs["policy"]
 check("the actor vector is bounded and carries no world position",
-      float(pr.abs().max()) < 50.0 and pr.shape[1] == PROPRIO_DIM,
+      float(pr.abs().max()) < 50.0 and pr.shape[1] == env.cfg.observation_space,
       f"max |value| {float(pr.abs().max()):.2f}")
 
 print("\n=== " + ("ALL CHECKS PASSED" if not fails else f"FAILED: {fails}"), flush=True)

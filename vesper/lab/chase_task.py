@@ -22,6 +22,11 @@ What is real and what is privileged:
                               The critic and the state-based teacher see the
                               privileged vector; the actor never does.
 
+Safe zones are places the drone should not be. A forklift inside one is
+protected -- no sighting bonus, no touch reward, touching it ends nothing -- and
+the drone itself pays a per-step penalty that ramps up as it approaches the
+boundary and ends the episode if it goes well inside.
+
 Fallbacks keep the task CPU-testable and usable without a renderer: with no
 contact sensor a touch is a small radius and a crash is the map's solid
 layer; with no segmentation a sighting is a geometric cone with line of sight.
@@ -73,6 +78,18 @@ class ChaseCfg:
     r_touch_speed: float = 100.0       # extra, scaled by the fraction of the episode left
     r_sight: float = 10.0              # first frame each unprotected forklift is in view
     r_touch_protected: float = 0.0     # touching a forklift inside a safe zone (penalty if < 0)
+    # The safe zone is a place the drone should not be, not merely a place where
+    # targets do not count. The penalty ramps up over `safe_margin_m` *outside*
+    # the boundary so there is a gradient pushing away from it rather than a
+    # cliff the policy can only find by crossing; it is flat and maximal inside;
+    # and going more than `safe_breach_m` in ends the episode the way leaving
+    # the arena does. Note the actor has no map: on one fixed site it learns the
+    # boundary from landmarks, and `geofence` in the observation is the fallback
+    # if that proves too slow.
+    w_safe: float = 1.0                # per step, scaled by the ramp below
+    safe_margin_m: float = 25.0        # ramp width outside the boundary
+    safe_breach_m: float = 15.0        # this far inside ends the episode
+    r_safe: float = 80.0               # one-off penalty on a breach
     w_progress: float = 1.0            # per metre closed on the nearest unprotected forklift
     w_time: float = 0.05               # per step
     w_clear: float = 0.5               # per step, scaled by (1 - clearance / clear_min)+
@@ -101,7 +118,7 @@ class ChaseTask:
         self.probe = torch.cat([ring * 3.0, ring * 6.0, ring * 10.0], dim=0)      # [24,2]
         self.probe_r = self.probe.norm(dim=1)                                      # [24]
         self.obs_dim = PROPRIO_DIM
-        self.priv_dim = 12 + 6 * self.k + 1
+        self.priv_dim = 12 + 6 * self.k + 2
 
     # ------------------------------------------------------------------ reset
     def reset(self, env_ids):
@@ -165,6 +182,14 @@ class ChaseTask:
         ground = self.world.ground_at(drone_pos[:, 0], drone_pos[:, 1])
         agl = (drone_pos[:, 2] - ground).clamp(min=0.0)
         clear = self.clearance(drone_pos)
+
+        # --- the safe zone, as it applies to the drone itself. The zone is the
+        # whole column: flying over it at altitude is still being over it.
+        s_out, s_in = self.world.safe_field(drone_pos[:, 0], drone_pos[:, 1])
+        in_safe = s_in > 0.0
+        near = (1.0 - s_out / cfg.safe_margin_m).clamp(0.0, 1.0)
+        safe_ramp = torch.where(in_safe, torch.ones_like(near), near)
+        breach = s_in > cfg.safe_breach_m
         if crashed is None:
             solid = self.world.solid_at(drone_pos[:, 0], drone_pos[:, 1])
             crashed = drone_pos[:, 2] < solid + cfg.min_clearance
@@ -172,7 +197,7 @@ class ChaseTask:
         rxy = drone_pos[:, :2].abs().amax(dim=1)
         oob = (rxy > cfg.arena_half + cfg.oob_margin) | (drone_pos[:, 2] > ground + cfg.ceiling)
         flip = tilt_from_quat(quat) > cfg.tilt_limit
-        terminated = touch_live | crashed | oob | flip
+        terminated = touch_live | crashed | oob | flip | breach
 
         # --- progress on the nearest unprotected forklift ---------------------
         d_live = torch.where(live, slant, torch.full_like(slant, 1e6))
@@ -190,6 +215,8 @@ class ChaseTask:
         r = r + cfg.r_sight * new_sight.float().sum(dim=1)
         r = r + (cfg.r_touch + cfg.r_touch_speed * left) * touch_live.float()
         r = r + cfg.r_touch_protected * touch_prot.float()
+        r = r - cfg.w_safe * safe_ramp
+        r = r - cfg.r_safe * breach.float()
         r = r - cfg.r_crash * crashed.float() - cfg.r_oob * oob.float() - cfg.r_flip * flip.float()
 
         # --- what the belief head is trained on: the relative vector to the
@@ -210,13 +237,23 @@ class ChaseTask:
             "seen": (self.seen & live).any(dim=1),
             "visible": visible, "crash": crashed, "oob": oob, "flip": flip,
             "agl": agl, "clearance": clear, "nearest": nearest,
+            "in_safe": in_safe, "safe_breach": breach, "geofence": self.geofence(drone_pos),
         }
         return obs, r, terminated, info
+
+    def geofence(self, drone_pos):
+        """[N] the zone signal, in [-1, 1]: 0 at the boundary, +1 well outside,
+        -1 well inside. Privileged as it stands (it needs the map). Appending it
+        to the proprio vector turns the safe zone into a geofence receiver the
+        actor can actually sense -- the fallback if landmark learning is slow."""
+        cfg = self.cfg
+        s_out, s_in = self.world.safe_field(drone_pos[:, 0], drone_pos[:, 1])
+        return ((s_out - s_in) / cfg.safe_margin_m).clamp(-1.0, 1.0)
 
     # ------------------------------------------------------------------ obs
     def privileged(self, drone_pos, drone_vel, quat, ang_vel_b, target_pos, visible, protected,
                    time_frac):
-        """[N, 12 + 6K + 1] -- the truth, for the critic and a teacher only."""
+        """[N, 12 + 6K + 2] -- the truth, for the critic and a teacher only."""
         A = self.cfg.arena_half
         ground = self.world.ground_at(drone_pos[:, 0], drone_pos[:, 1])
         agl = (drone_pos[:, 2] - ground).clamp(min=0.0)
@@ -233,4 +270,5 @@ class ChaseTask:
             rel.norm(dim=2, keepdim=True) / A,
             visible.float().unsqueeze(2), protected.float().unsqueeze(2),
         ], dim=2).reshape(self.n, -1)
-        return torch.cat([self_block, tgt, time_frac.unsqueeze(1)], dim=1)
+        return torch.cat([self_block, tgt, self.geofence(drone_pos).unsqueeze(1),
+                          time_frac.unsqueeze(1)], dim=1)

@@ -43,6 +43,8 @@ parser.add_argument("--hidden", default="256,256,128", help="teacher MLP widths"
 parser.add_argument("--world", default=None)
 parser.add_argument("--map", default=None)
 parser.add_argument("--zones", default=None)
+parser.add_argument("--geofence", action="store_true",
+                    help="append the signed distance to the nearest safe zone to the actor's vector")
 parser.add_argument("--vehicle", default=None)
 parser.add_argument("--resume", default=None)
 parser.add_argument("--tag", default="chase-train")
@@ -85,6 +87,7 @@ if args.map:
     cfg.world_map = args.map
 if args.zones:
     cfg.zones = args.zones
+cfg.geofence = args.geofence
 
 env = ChaseEnv(cfg, seed=args.seed)
 track = ("crash", "oob", "flip", "seen")

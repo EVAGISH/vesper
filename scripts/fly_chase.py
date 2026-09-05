@@ -35,6 +35,8 @@ parser.add_argument("--every", type=int, default=2, help="capture one frame ever
 parser.add_argument("--world", default=None)
 parser.add_argument("--map", default=None)
 parser.add_argument("--zones", default=None)
+parser.add_argument("--geofence", action="store_true",
+                    help="append the signed distance to the nearest safe zone to the actor's vector")
 parser.add_argument("--vehicle", default=None)
 parser.add_argument("--tag", default="chase")
 AppLauncher.add_app_launcher_args(parser)
@@ -91,6 +93,7 @@ if args.map:
     cfg.world_map = args.map
 if args.zones:
     cfg.zones = args.zones
+cfg.geofence = args.geofence
 env = ChaseEnv(cfg, render_mode="rgb_array", seed=args.seed)
 
 if is_vision:

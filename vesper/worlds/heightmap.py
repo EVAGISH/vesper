@@ -49,6 +49,8 @@ class WorldMap:
         # zones default to "launch anywhere, nothing protected"; attach_zones overrides
         self.launch = torch.ones_like(self.ground_z)
         self.safe = torch.zeros_like(self.ground_z)
+        self.safe_out = torch.full_like(self.ground_z, 1e6)
+        self.safe_in = torch.zeros_like(self.ground_z)
         meta_path = Path(str(npz_path)).with_suffix(".json")
         if "half_m" in d:
             self.half_m, self.cell = float(d["half_m"]), float(d["cell"])
@@ -124,14 +126,35 @@ class WorldMap:
         return torch.stack([x, y], dim=1), torch.ones(n, dtype=torch.bool, device=dev)
 
     def attach_zones(self, zones):
-        """Rasterise operator zones (vesper.worlds.zones.Zones) onto this grid."""
+        """Rasterise operator zones (vesper.worlds.zones.Zones) onto this grid.
+
+        Also bakes two distance fields for the safe zones, because a mask alone
+        gives the reward a cliff and no gradient: `safe_out` is metres from a
+        point to the nearest protected cell (0 inside), `safe_in` is how deep
+        inside the boundary it is (0 outside).
+        """
+        from vesper.worlds.rasters import chamfer_distance
         launch, safe = zones.masks(self.n, self.half_m, self.cell)
         self.launch = torch.as_tensor(launch.astype(np.float32), device=self.device)
         self.safe = torch.as_tensor(safe.astype(np.float32), device=self.device)
+        if safe.any():
+            out = chamfer_distance(safe, self.cell)
+            inside = chamfer_distance(1 - safe, self.cell)
+        else:
+            out = np.full(safe.shape, 1e6, np.float32)
+            inside = np.zeros(safe.shape, np.float32)
+        self.safe_out = torch.as_tensor(out, device=self.device)
+        self.safe_in = torch.as_tensor(inside, device=self.device)
 
     def in_safe(self, x, y):
         r, c = self.nearest_cell(x, y)
         return self.safe[r, c] > 0.5
+
+    def safe_field(self, x, y):
+        """(metres to the zone, metres inside it) -- one is zero wherever the
+        other is not, so `depth - dist` is a signed distance to the boundary."""
+        r, c = self.nearest_cell(x, y)
+        return self.safe_out[r, c], self.safe_in[r, c]
 
     def yaw_at(self, field: torch.Tensor, x, y):
         """Nearest-cell read of a heading raster (radians), no interpolation:

@@ -9,7 +9,9 @@ that renders RGB, depth and instance segmentation in one pass, and a contact
 sensor on the airframe that reports what it hit.
 
 Observation dict:
-  policy       [N,11]        proprio -- the actor's vector input
+  policy       [N,11] (+1)   proprio -- the actor's vector input; with
+                             `geofence` a 12th value, the signed distance to the
+                             nearest safe zone, is appended (see ChaseEnvCfg)
   pixels       [N,H,W,3]     uint8 RGB from the tilted camera
   depth        [N,H,W,1]     stereo-class depth in [0,1] (vesper.sensors.depth)
   privileged   [N,priv_dim]  truth, for the critic and the state teacher
@@ -76,6 +78,12 @@ class ChaseEnvCfg(VesperQuadEnvCfg):
     cam_res: int = 96
     cam_offset: tuple = (0.12, 0.0, -0.04)
     depth_max_m: float = 20.0
+    # The safe zone is a place the drone is penalised for being in, but the actor
+    # has no map: on one fixed site it has to learn the boundary from landmarks.
+    # Setting this appends the signed distance to the zone to the proprio vector,
+    # which is the geofence receiver a real airframe would carry -- the fallback
+    # if landmark learning turns out to be too slow.
+    geofence: bool = False
     ppo_key: str = "privileged"
     terrain: TerrainImporterCfg = TerrainImporterCfg(
         prim_path="/World/ground", terrain_type="usd", usd_path=CORNELL_USD, collision_group=-1,
@@ -93,8 +101,8 @@ class ChaseEnv(VesperQuadEnv):
         cfg.terrain.usd_path = cfg.world_usd
         self._veh_spec = resolve_vehicle(cfg.vehicle_model)
         self._veh_yaw_offset = float(self._veh_spec["yaw_offset"])
-        cfg.observation_space = PROPRIO_DIM
-        cfg.state_space = 12 + 6 * self.k + 1
+        cfg.observation_space = PROPRIO_DIM + (1 if cfg.geofence else 0)
+        cfg.state_space = 12 + 6 * self.k + 2
         if cfg.robot is None:
             cfg.robot = iris_cfg()
         cfg.robot.spawn.activate_contact_sensors = True      # the airframe reports what it hits
@@ -310,7 +318,10 @@ class ChaseEnv(VesperQuadEnv):
         from vesper.lab.frames import proprio
         vis = (self._last_visible if getattr(self, "_last_visible", None) is not None
                else torch.zeros(self.num_envs, self.k, dtype=torch.bool, device=self.device))
-        obs = {"policy": proprio(d.root_lin_vel_w, d.root_quat_w, d.root_ang_vel_b, agl, tf),
+        pr = proprio(d.root_lin_vel_w, d.root_quat_w, d.root_ang_vel_b, agl, tf)
+        if self.cfg.geofence:
+            pr = torch.cat([pr, self.task.geofence(d.root_pos_w).unsqueeze(1)], dim=1)
+        obs = {"policy": pr,
                "privileged": self.task.privileged(d.root_pos_w, d.root_lin_vel_w, d.root_quat_w,
                                                   d.root_ang_vel_b, self.target_pos, vis,
                                                   self.protected(), tf)}
