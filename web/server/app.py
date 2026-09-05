@@ -11,7 +11,9 @@ import json
 import os
 import re
 import subprocess
+import sys
 import tempfile
+import threading
 import time
 import urllib.request
 from pathlib import Path
@@ -95,6 +97,94 @@ def scenarios():
             "max_sim_s": spec.get("max_sim_s"),
             "command": f"docker compose run --rm sim /isaac-sim/python.sh scripts/fly_mission.py {f.name}",
         })
+    return out
+
+
+# ---------------------------------------------------------------- environments
+# Add any place as a world: build_geo_world runs locally (Copernicus + Esri +
+# OSM, no keys), then the world rsyncs to the GPU box so Isaac can use it. The
+# build is a local subprocess tracked in memory; its log tails into /api/environments.
+
+SITE_NAME = re.compile(r"^[a-z][a-z0-9_]{1,31}$")
+ENV_BUILDS: dict[str, dict] = {}
+
+
+class EnvBuildReq(BaseModel):
+    name: str
+    lat: float
+    lon: float
+    half_km: float = 1.0
+
+
+def _env_log(name: str) -> Path:
+    return ROOT / f".envbuild_{name}.log"
+
+
+def _run_env_build(name: str, lat: float, lon: float, half_km: float) -> None:
+    logf = _env_log(name)
+    try:
+        with open(logf, "w") as f:
+            p = subprocess.run(
+                [sys.executable, "scripts/build_geo_world.py", name,
+                 "--lat", str(lat), "--lon", str(lon), "--half-km", str(half_km),
+                 "--source", "global"],
+                cwd=ROOT, stdout=f, stderr=subprocess.STDOUT, timeout=1800)
+        ok = p.returncode == 0 and (ROOT / "assets" / name / f"{name}.usd").exists()
+        if ok:                                              # push the new world to the box
+            ip = _droplet_ip()
+            if ip:
+                ssh = f"ssh -i {KEY_FILE} -o StrictHostKeyChecking=accept-new"
+                subprocess.run(["rsync", "-az", "-e", ssh, str(ROOT / "assets" / name),
+                                f"root@{ip}:{REMOTE_DIR}/assets/"], timeout=900)
+                subprocess.run(["rsync", "-az", "-e", ssh, str(ROOT / f"{name}0.json"),
+                                f"root@{ip}:{REMOTE_DIR}/"], timeout=120)
+        ENV_BUILDS[name].update(status="done" if ok else "failed", finished=time.time())
+    except Exception as e:                                  # noqa: BLE001
+        ENV_BUILDS[name].update(status="failed", finished=time.time(), error=str(e))
+
+
+@app.post("/api/environments/build")
+def build_environment(req: EnvBuildReq):
+    if not SITE_NAME.match(req.name):
+        raise HTTPException(400, "name: lowercase letter then letters/digits/underscore")
+    if not (-90 < req.lat < 90 and -180 < req.lon < 180):
+        raise HTTPException(400, "bad lat/lon")
+    if not (0.1 <= req.half_km <= 3.0):
+        raise HTTPException(400, "half_km must be 0.1-3.0")
+    cur = ENV_BUILDS.get(req.name)
+    if cur and cur["status"] == "running":
+        raise HTTPException(409, "already building")
+    ENV_BUILDS[req.name] = {"status": "running", "started": time.time(), "finished": None}
+    threading.Thread(target=_run_env_build,
+                     args=(req.name, req.lat, req.lon, req.half_km), daemon=True).start()
+    return {"name": req.name, "status": "running"}
+
+
+@app.get("/api/environments")
+def environments():
+    """Built worlds (assets/<name>/<name>.usd) plus any in-flight builds."""
+    out = []
+    adir = ROOT / "assets"
+    for d in sorted(adir.iterdir()) if adir.is_dir() else []:
+        usd = d / f"{d.name}.usd"
+        if not d.is_dir() or not usd.exists():
+            continue
+        b = ENV_BUILDS.get(d.name, {})
+        out.append({
+            "name": d.name,
+            "usd": f"assets/{d.name}/{d.name}.usd",
+            "scenario": f"{d.name}0.json" if (ROOT / f"{d.name}0.json").exists() else None,
+            "map": f"assets/{d.name}/{d.name}_map.npz" if (d / f"{d.name}_map.npz").exists() else None,
+            "mb": round(usd.stat().st_size / 1e6, 1),
+            "build_status": b.get("status", "done"),
+        })
+    seen = {o["name"] for o in out}
+    for name, b in ENV_BUILDS.items():                      # builds not yet on disk
+        if name not in seen:
+            log = _env_log(name)
+            tail = log.read_text()[-400:] if log.exists() else ""
+            out.append({"name": name, "usd": None, "scenario": None, "map": None,
+                        "build_status": b["status"], "log": tail})
     return out
 
 
@@ -216,10 +306,16 @@ def _save_jobs(jobs):
     JOBS_FILE.write_text(json.dumps(jobs[-40:], indent=1))
 
 
+WORLD_USD = re.compile(r"^assets/[\w.-]+/[\w.-]+\.usd$")
+WORLD_MAP = re.compile(r"^assets/[\w.-]+/[\w.-]+_map\.npz$")
+
+
 class JobReq(BaseModel):
     kind: str
     policy: str | None = None
     scenario: str | None = None
+    world: str | None = None
+    map: str | None = None
 
 
 @app.post("/api/jobs")
@@ -236,6 +332,13 @@ def start_job(req: JobReq):
                 or not (ROOT / req.scenario).is_file():
             raise HTTPException(400, "unknown scenario file")
         tmpl = tmpl.format(scenario=req.scenario)
+    # train/eval in a chosen world: append --world/--map (search task needs the map)
+    if req.kind in ("train", "eval") and req.world:
+        if not WORLD_USD.match(req.world):
+            raise HTTPException(400, "world must be assets/<name>/<name>.usd")
+        tmpl += f" --world {req.world}"
+        if req.map and WORLD_MAP.match(req.map):
+            tmpl += f" --map {req.map}"
     if req.kind == "live":
         # one live session at a time -- reuse it instead of stacking GPU copies
         for j in _load_jobs():

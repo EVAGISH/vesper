@@ -12,7 +12,7 @@ export function JobButton({
   label, body, variant = "default", onLaunched, className,
 }: {
   label: string;
-  body: { kind: Job["kind"]; policy?: string; scenario?: string };
+  body: { kind: Job["kind"]; policy?: string; scenario?: string; world?: string; map?: string };
   variant?: "default" | "secondary";
   onLaunched?: (id: string) => void;
   className?: string;

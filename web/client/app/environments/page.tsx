@@ -1,73 +1,175 @@
 "use client";
 
+import { useCallback, useEffect, useState } from "react";
 import { JobButton } from "@/components/job-controls";
-import { useVesper } from "@/components/vesper-provider";
-import type { Scenario } from "@/lib/vesper";
+import { Button } from "@/components/ui/button";
+import { fetchJSON, postJSON } from "@/lib/vesper";
 
-function ScenarioCard({ s }: { s: Scenario }) {
+// Add any place on earth as a world: enter a name + coordinates, the server
+// builds it (Copernicus terrain + Esri imagery + OSM, no keys) and syncs it to
+// the GPU box. Built worlds are listed here and launch straight into Isaac.
+
+type Environment = {
+  name: string;
+  usd: string | null;
+  scenario: string | null;
+  map: string | null;
+  mb?: number;
+  build_status?: string;
+  log?: string;
+};
+
+const POLL_MS = 4000;
+
+function AddEnvironment({ onSubmitted }: { onSubmitted: () => void }) {
+  const [name, setName] = useState("");
+  const [lat, setLat] = useState("");
+  const [lon, setLon] = useState("");
+  const [halfKm, setHalfKm] = useState("1.0");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+
+  const submit = async () => {
+    setBusy(true); setErr(null);
+    try {
+      await postJSON("/api/environments/build", {
+        name: name.trim(), lat: parseFloat(lat), lon: parseFloat(lon),
+        half_km: parseFloat(halfKm),
+      });
+      setName(""); setLat(""); setLon("");
+      onSubmitted();
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : "build failed to start");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const ready = /^[a-z][a-z0-9_]{1,31}$/.test(name.trim()) && lat && lon;
+
   return (
     <section className="hud-corners rounded-lg border border-border bg-card">
       <h3 className="flex items-center border-b border-border px-3 py-1.5 font-mono text-[10px] font-semibold uppercase tracking-[0.14em] text-secondary-foreground">
-        <span className="mr-1.5 text-muted-foreground">▮</span>
-        {s.file.replace(/\.json$/, "").replace(/[_-]/g, " ")}
-        {s.world && (
+        <span className="mr-1.5 text-muted-foreground">▮</span>Add an environment
+        <span className="ml-auto font-normal normal-case tracking-normal text-muted-foreground">
+          Copernicus + Esri + OSM · any coordinates
+        </span>
+      </h3>
+      <div className="flex flex-wrap items-end gap-3 p-3">
+        {[
+          ["name", name, setName, "kramatorsk", "flex-1 min-w-[140px]"],
+          ["lat", lat, setLat, "48.7233", "w-28"],
+          ["lon", lon, setLon, "37.5562", "w-28"],
+          ["radius km", halfKm, setHalfKm, "1.0", "w-24"],
+        ].map(([label, val, set, ph, cls]) => (
+          <label key={label as string} className={`flex flex-col gap-1 ${cls}`}>
+            <span className="font-mono text-[10px] uppercase tracking-widest text-muted-foreground">{label as string}</span>
+            <input
+              value={val as string}
+              placeholder={ph as string}
+              onChange={(e) => (set as (s: string) => void)(e.target.value)}
+              className="rounded border border-border bg-background px-2 py-1.5 font-mono text-xs text-foreground outline-none focus:border-[#3987e5]"
+            />
+          </label>
+        ))}
+        <Button
+          size="sm" disabled={!ready || busy} onClick={submit}
+          className="h-8 cursor-pointer px-3 font-mono text-[11px] tracking-[0.08em]"
+        >
+          {busy ? "STARTING…" : "▶ BUILD WORLD"}
+        </Button>
+      </div>
+      {err && <div className="px-3 pb-2 text-[11px] text-[#d03b3b]">{err}</div>}
+      <div className="px-3 pb-3 text-[11px] text-muted-foreground">
+        Builds in ~2–3 min, then syncs to the box. Tip: a smaller radius = sharper detail.
+      </div>
+    </section>
+  );
+}
+
+function EnvCard({ e }: { e: Environment }) {
+  const building = e.build_status === "running";
+  const failed = e.build_status === "failed";
+  return (
+    <section className="hud-corners rounded-lg border border-border bg-card">
+      <h3 className="flex items-center border-b border-border px-3 py-1.5 font-mono text-[10px] font-semibold uppercase tracking-[0.14em] text-secondary-foreground">
+        <span
+          className="mr-1.5 inline-block size-[7px] rounded-full"
+          style={{ background: building ? "#eda100" : failed ? "#d03b3b" : "#199e70" }}
+        />
+        {e.name.replace(/_/g, " ")}
+        {e.mb != null && (
           <span className="ml-auto font-normal normal-case tracking-normal text-muted-foreground">
-            {s.world} site
+            {e.mb} MB{e.map ? " · trainable" : ""}
           </span>
         )}
       </h3>
       <div className="p-3">
-        <table className="w-full border-collapse text-xs tabular-nums">
-          <tbody>
-            {(
-              [
-                ["terrain", s.terrain_usd ? "site terrain" : "flat"],
-                ["waypoints", s.waypoints],
-                ["wind", `${s.wind_ms ?? 0} m/s`],
-                ["visibility", s.visibility_m != null ? `${s.visibility_m} m` : "∞"],
-                ["cruise", s.cruise_ms != null ? `${s.cruise_ms} m/s` : "—"],
-                ["sim cap", s.max_sim_s != null ? `${s.max_sim_s} s` : "—"],
-              ] as [string, React.ReactNode][]
-            ).map(([k, v]) => (
-              <tr key={k}>
-                <td className="w-24 whitespace-nowrap py-[3px] pr-2.5 text-muted-foreground">{k}</td>
-                <td className="py-[3px] text-secondary-foreground">{v}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-        <div className="mt-3">
-          <JobButton label="▶ LAUNCH MISSION" body={{ kind: "mission", scenario: s.file }} />
-          <div className="mt-1 text-[11px] text-muted-foreground">
-            Flies the waypoint mission on the box; the filmed run lands in Runs.
+        {building ? (
+          <div className="text-xs text-muted-foreground">
+            building… (~2–3 min)
+            {e.log && (
+              <pre className="mt-2 max-h-24 overflow-y-auto whitespace-pre-wrap break-all rounded bg-background p-2 font-mono text-[10px] text-muted-foreground">
+                {e.log.trimEnd().split("\n").slice(-4).join("\n")}
+              </pre>
+            )}
           </div>
-        </div>
+        ) : failed ? (
+          <div className="text-xs text-[#d03b3b]">build failed — check server log</div>
+        ) : (
+          <div className="flex flex-wrap gap-2">
+            {e.scenario && (
+              <JobButton label="▶ FLY MISSION" body={{ kind: "mission", scenario: e.scenario }} />
+            )}
+            {e.map && e.usd && (
+              <JobButton
+                label="◉ TRAIN HERE" variant="secondary"
+                body={{ kind: "train", world: e.usd, map: e.map }}
+              />
+            )}
+            {!e.map && (
+              <span className="self-center text-[11px] text-muted-foreground">
+                export a world-map to train (search task needs occluders)
+              </span>
+            )}
+          </div>
+        )}
       </div>
     </section>
   );
 }
 
 export default function Environments() {
-  const { scenarios } = useVesper();
+  const [envs, setEnvs] = useState<Environment[] | null>(null);
+  const load = useCallback(() => {
+    fetchJSON<Environment[]>("/api/environments").then((d) => d && setEnvs(d));
+  }, []);
+  useEffect(() => {
+    load();
+    const id = setInterval(load, POLL_MS);
+    return () => clearInterval(id);
+  }, [load]);
+
   return (
     <main className="min-h-0 flex-1 overflow-y-auto p-4">
       <div className="mb-3.5 flex items-baseline gap-3">
         <h2 className="text-base font-bold">Environments</h2>
         <span className="text-xs text-muted-foreground">
-          mission scenarios for this site — launch straight to the GPU box
+          add any place on earth, then fly or train in it on the box
         </span>
       </div>
-      {scenarios === null ? (
-        <div className="p-10 text-center text-muted-foreground">Loading scenarios…</div>
-      ) : scenarios.length === 0 ? (
+      <div className="mb-3">
+        <AddEnvironment onSubmitted={load} />
+      </div>
+      {envs === null ? (
+        <div className="p-10 text-center text-muted-foreground">Loading…</div>
+      ) : envs.length === 0 ? (
         <div className="p-10 text-center text-muted-foreground">
-          No scenario specs found at the repo root
+          No worlds yet — add one above.
         </div>
       ) : (
-        <div className="grid grid-cols-[repeat(auto-fill,minmax(380px,1fr))] gap-3">
-          {scenarios.map((s) => (
-            <ScenarioCard key={s.file} s={s} />
-          ))}
+        <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3">
+          {envs.map((e) => <EnvCard key={e.name} e={e} />)}
         </div>
       )}
     </main>
