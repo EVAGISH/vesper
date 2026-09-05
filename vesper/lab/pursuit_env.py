@@ -6,12 +6,11 @@ clones those environments side by side inside a single PhysX scene because that
 is what makes 4096 of them step on one GPU -- it is a vectorized batch of
 separate sims, not one shared arena with many drones in it.
 
-The vehicle is a real PhysX rigid body, not a scripted path: gravity and contacts
+The tank is a real PhysX rigid body, not a scripted path: gravity and contacts
 hold it on the terrain and a velocity controller drives it, so it rests on slopes,
-is collidable, and cannot pass through anything -- though its drive is a velocity
-command rather than a wheel/suspension model. Two models are available (see
-VEHICLE_SPECS): NVIDIA's stock forklift prop, and a generated utility-cart proxy
-for when the Isaac asset server is unreachable. Pick with VESPER_VEHICLE.
+is collidable, and cannot pass through anything. Its drive is a velocity command
+rather than a wheel/suspension model. The project-owned procedural model is the
+default; a custom USD can still be selected with VESPER_VEHICLE.
 
 Action is guidance: the policy emits a look-ahead setpoint and the conventional
 SE3 inner loop flies to it, so the policy learns pursuit on top of a trusted
@@ -25,31 +24,24 @@ import torch
 import isaaclab.sim as sim_utils
 from isaaclab.assets import Articulation, RigidObject, RigidObjectCfg
 from isaaclab.utils import configclass
-from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR
 from pxr import Usd, UsdGeom, UsdPhysics
 
 from vesper.control.se3 import SE3Controller
 from vesper.lab.vesper_quad import VesperQuadEnv, VesperQuadEnvCfg
 from vesper.lab import pursuit_task as T
 
-_CART_USD = os.path.abspath(
-    os.path.join(os.path.dirname(__file__), "..", "..", "assets", "vehicles", "utility_cart.usd"))
+_TANK_USD = os.path.abspath(
+    os.path.join(os.path.dirname(__file__), "..", "..", "assets", "vehicles", "tank.usd"))
 
 # yaw_offset rotates the model so its nose points +X, which is the heading
 # convention the drive controller and the reset pose both use.
 VEHICLE_SPECS = {
-    # NVIDIA's stock forklift prop: a plain Xform, not an articulation, modelled
-    # Z-up in metres at 1.2 x 3.5 x 2.2 m with long axis Y (hence the -90 deg
-    # yaw). Its colliders are already convexHull, so nothing needs
-    # re-approximating, but it has no RigidBodyAPI -- see make_rigid_wrapper.
-    "forklift": {"usd": f"{ISAAC_NUCLEUS_DIR}/Props/Forklift/forklift.usd",
-                 "yaw_offset": -math.pi / 2, "mass": 2700.0,
-                 "needs_rigid_wrapper": True},
-    # Generated fallback (vesper.worlds.vehicle): box collider, cheap to clone,
-    # and it authors its own RigidBodyAPI and mass.
-    "cart": {"usd": _CART_USD, "yaw_offset": 0.0},
+    # Generated locally by vesper.worlds.vehicle: one cheap collider plus
+    # project-owned tank geometry, with its own RigidBodyAPI and mass.
+    "tank": {"usd": _TANK_USD, "yaw_offset": 0.0, "ground_clearance": 0.08,
+             "target_height": 1.2},
 }
-DEFAULT_VEHICLE = os.environ.get("VESPER_VEHICLE", "forklift")
+DEFAULT_VEHICLE = os.environ.get("VESPER_VEHICLE", "tank")
 
 
 def make_rigid_wrapper(src_usd: str, out_path: str, mass: float | None = None) -> str:
@@ -57,8 +49,8 @@ def make_rigid_wrapper(src_usd: str, out_path: str, mass: float | None = None) -
 
     Isaac Lab's USD spawner only *modifies* rigid-body properties -- it never
     applies the schema (schemas.define_* does, but spawn_from_usd calls
-    schemas.modify_*). Stock props like the forklift ship with colliders but no
-    RigidBodyAPI, so spawning one straight from UsdFileCfg dies with "Failed to
+    schemas.modify_*). Some props ship with colliders but no RigidBodyAPI, so
+    spawning one straight from UsdFileCfg dies with "Failed to
     find a rigid body when resolving ...". Authoring a thin local layer that
     references the asset and applies the schema is the same trick geo.py uses
     for tree species, and it keeps the fix in USD rather than in Isaac internals.
@@ -85,15 +77,16 @@ def make_rigid_wrapper(src_usd: str, out_path: str, mass: float | None = None) -
 def resolve_vehicle(name_or_path: str = None) -> dict:
     """Vehicle spec from a VEHICLE_SPECS key or a bare USD path."""
     key = name_or_path or DEFAULT_VEHICLE
-    spec = dict(VEHICLE_SPECS.get(key, {"usd": os.path.abspath(key), "yaw_offset": 0.0}))
-    if key == "cart":
+    spec = dict(VEHICLE_SPECS.get(
+        key, {"usd": os.path.abspath(key), "yaw_offset": 0.0, "ground_clearance": 1.4}))
+    if key == "tank":
         # Always regenerate: assets/ is gitignored and excluded from the droplet
         # rsync, so a cached copy silently masks edits to the generator.
-        from vesper.worlds.vehicle import write_vehicle_usd
-        write_vehicle_usd(spec["usd"])
+        from vesper.worlds.vehicle import write_tank_usd
+        write_tank_usd(spec["usd"])
     if spec.pop("needs_rigid_wrapper", False):
         spec["usd"] = make_rigid_wrapper(
-            spec["usd"], os.path.join(os.path.dirname(_CART_USD), f"{key}_rb.usd"),
+            spec["usd"], os.path.join(os.path.dirname(_TANK_USD), f"{key}_rb.usd"),
             spec.pop("mass", None))
     return spec
 
@@ -114,7 +107,8 @@ def vehicle_cfg(spec: dict) -> RigidObjectCfg:
     return RigidObjectCfg(
         prim_path="/World/envs/env_.*/Vehicle",
         spawn=sim_utils.UsdFileCfg(**kw),
-        init_state=RigidObjectCfg.InitialStateCfg(pos=(25.0, 0.0, 0.6)),
+        init_state=RigidObjectCfg.InitialStateCfg(
+            pos=(25.0, 0.0, float(spec.get("ground_clearance", 0.08)))),
     )
 
 

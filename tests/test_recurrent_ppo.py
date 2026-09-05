@@ -50,9 +50,9 @@ class FakeCamEnv:
         self.t += 1
         done = (self.bearing.abs() < 0.05) | (self.t >= 20)
         rew = rew + 5.0 * (self.bearing.abs() < 0.05).float()
-        info = {"touch": (self.bearing.abs() < 0.05).float(),
-                "time_to_touch": torch.where(self.bearing.abs() < 0.05, self.t,
-                                             torch.full_like(self.t, float("nan"))),
+        info = {"hit": (self.bearing.abs() < 0.05).float(),
+                "time_to_hit": torch.where(self.bearing.abs() < 0.05, self.t,
+                                           torch.full_like(self.t, float("nan"))),
                 "belief_target": torch.stack([self.bearing, torch.zeros(self.num_envs),
                                               torch.zeros(self.num_envs)], dim=1),
                 "belief_ok": torch.ones(self.num_envs, dtype=torch.bool)}
@@ -75,10 +75,10 @@ def test_recurrent_ppo_trains_and_round_trips(tmp_path):
     rows = []
     hist = ppo.learn(40, log_every=1, on_log=rows.append)
     assert len(hist) == 40 and len(rows) == 40
-    for k in ("ep_return", "touch_rate", "time_to_touch", "episodes", "pi", "vf", "ent", "aux"):
+    for k in ("ep_return", "hit_rate", "time_to_hit", "episodes", "pi", "vf", "ent", "aux"):
         assert k in rows[-1]
     assert _avg(hist[-8:], "ep_return") > _avg(hist[:8], "ep_return") + 1.0, "the policy is not learning"
-    assert _avg(hist[-8:], "touch_rate") > 0.9, "the toy task should be solved"
+    assert _avg(hist[-8:], "hit_rate") > 0.9, "the toy task should be solved"
     assert _avg(hist[-8:], "aux") < _avg(hist[:8], "aux"), "the belief head is not being fitted"
 
     ppo.save(tmp_path / "v.pt")

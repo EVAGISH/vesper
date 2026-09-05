@@ -1,7 +1,7 @@
 """Train the search-and-reach policy on the Cornell world.
 
 The drone starts somewhere random over campus and does not know where any of the
-forklifts are. It has to sweep ground, find them with a downward camera that
+tanks are. It has to sweep ground, find them with a downward camera that
 terrain, buildings and foliage can deny, and then run each one down -- fastest
 total clearance wins.
 
@@ -32,7 +32,7 @@ parser.add_argument("--gamma", type=float, default=0.997,
                     help="search needs a long horizon; 0.997 is ~13 s at 25 Hz")
 parser.add_argument("--world", default=None, help="world USD (default the Cornell site)")
 parser.add_argument("--map", default=None, help="world map npz (default beside the USD)")
-parser.add_argument("--vehicle", default=None, help="forklift | cart | path to a USD")
+parser.add_argument("--vehicle", default=None, help="tank | path to a custom USD")
 parser.add_argument("--resume", default=None, help="checkpoint to warm-start from")
 parser.add_argument("--hidden", default="256,256,128",
                     help="MLP widths, comma-separated; 1024,1024,512 is ~3.4M parameters")
@@ -134,7 +134,7 @@ def log(row):
 
 if args.arena_start:
     # The arena is the curriculum knob that matters: in a 300 m box a policy that
-    # cannot yet search still trips over a forklift often enough to learn that
+    # cannot yet search still trips over a tank often enough to learn that
     # reaching one pays, and the observation scales positions by arena_half, so
     # what it learns carries over as the box grows.
     def grow(row):

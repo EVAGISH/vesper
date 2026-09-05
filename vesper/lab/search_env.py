@@ -1,6 +1,6 @@
 """SearchEnv: search a real site for several ground vehicles, then run them down.
 
-One drone per environment and `n_targets` forklifts per *group* of environments,
+One drone per environment and `n_targets` tanks per *group* of environments,
 all of them dropped at random on the Cornell world (vesper.worlds.geo output).
 The world itself is loaded once as a global prim and shared by every environment
 -- the rule from STACK.md: thousands of drones, one world -- so env_spacing is
@@ -8,7 +8,7 @@ zero and the environments are separated by collision filtering, not by distance.
 
 Three things make this a search rather than a chase:
 
-  * the forklifts are placed by concealment class -- driving on the roads in the
+  * the tanks are placed by concealment class -- driving on the roads in the
     open, painted down, crawling under tree canopy, parked against a building
     -- and which slot gets which role is reshuffled every episode, so the slot
     index tells the policy nothing;
@@ -22,7 +22,7 @@ Three things make this a search rather than a chase:
 
 Groups. With a rendered camera every environment sees the whole shared world,
 so the world cannot hold one set of vehicles per environment: at 256 envs that
-would carpet the site with 768 forklifts, every one of them in somebody's frame.
+would carpet the site with 768 tanks, every one of them in somebody's frame.
 `n_groups` = G puts vehicles in the first G environments only; environment i
 hunts the vehicles of environment i % G, and the G members of a group start and
 end their episodes together so nobody holds a belief about a layout that has
@@ -55,9 +55,9 @@ CORNELL_USD = os.path.join(REPO, "assets", "cornell", "cornell.usd")
 CORNELL_MAP = os.path.join(REPO, "assets", "cornell", "cornell_map.npz")
 
 # (name, ground speed m/s, optical contrast, spawn layer, follows roads)
-#   open        a forklift going about its business on the roads, in plain sight
+#   open        a tank driving on the roads, in plain sight
 #   camouflaged same behaviour, painted to blend into the ground (geometric mode only:
-#               the rendered forklift wears whatever paint the asset ships with)
+#               the rendered tank wears whatever paint the asset ships with)
 #   concealed   crawling under tree canopy, plain paint but hard to see through leaves
 #   parked      shut down a few metres off a building wall, nose along it
 ROLES = [
@@ -168,7 +168,7 @@ class SearchEnv(VesperQuadEnv):
             vcfg.prim_path = f"/World/envs/env_.*/Vehicle_{i}"
             vcfg.init_state.pos = (60.0 + 30.0 * i, 0.0, 40.0)
             # the semantic tag is what the instance segmentation keys on; without
-            # it a forklift is just more scenery to the camera
+            # it a tank is just more scenery to the camera
             vcfg.spawn.semantic_tags = [("class", VEHICLE_SEMANTIC)]
             obj = RigidObject(vcfg)
             self.scene.rigid_objects[f"vehicle_{i}"] = obj
@@ -248,7 +248,7 @@ class SearchEnv(VesperQuadEnv):
         arena, do not drive into water, a building or a slope, and -- for the
         roles that drive on roads -- prefer road ahead over lawn. Speed ramps
         from rest, the turn rate is capped by a lateral-acceleration budget so
-        a fast forklift cannot spin on the spot, and a hull that has been
+        a fast tank cannot spin on the spot, and a hull that has been
         pushing against something it cannot see for a couple of seconds
         (a trunk, another vehicle) turns away and tries again. z is left to
         gravity and contacts so the vehicle rides the real terrain.
@@ -312,7 +312,7 @@ class SearchEnv(VesperQuadEnv):
             vel = v.data.root_vel_w.clone()
             sp = self.veh_speed_cmd[:, i]
             # slow into a turn: at the full steering rate the hull drops to half
-            # speed, which is what keeps a forklift from drifting off a bend
+            # speed, which is what keeps a tank from drifting off a bend
             sp = sp * (1.0 - 0.5 * (self.veh_turn_rate[:, i].abs() / VEH_TURN_MAX).clamp(max=1.0))
             vel[:, 0] = sp * torch.cos(self.veh_heading[:, i])
             vel[:, 1] = sp * torch.sin(self.veh_heading[:, i])
@@ -447,7 +447,7 @@ class SearchEnv(VesperQuadEnv):
         if len(rep):
             m = len(rep)
             # --- roles: a fresh shuffle per episode so slot 0 is not always the easy one.
-            # Role 0 (a forklift driving in the open) is always one of them: it is the
+            # Role 0 (a tank driving in the open) is always one of them: it is the
             # only class a policy that cannot yet search reliably will ever stumble
             # onto, so guaranteeing one per episode is what keeps the reach reward
             # reachable at all early in training.

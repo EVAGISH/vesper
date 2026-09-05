@@ -6,7 +6,7 @@ A zones file sits next to a world (assets/<site>/zones.json, or a repo-root
     {"launch": [[x, y], ...],                 one polygon: drones spawn inside it
      "safe":   [[[x, y], ...], ...]}          any number: a vehicle inside one is
                                               protected -- no sighting bonus, no
-                                              touch reward, no episode end
+                                              hit reward
 
 Polygons rasterise onto the world map's grid so the GPU side asks a mask, not
 a geometry library. Pure numpy + PIL, no shapely.

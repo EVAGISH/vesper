@@ -1,4 +1,4 @@
-"""Train the pursuit policy: a drone learns to run down and touch a moving ground
+"""Train the pursuit policy: a drone learns to run down and reach a moving tank
 vehicle in minimum time, on the stable plane-terrain throughput lane.
 
     /isaac-sim/python.sh scripts/train_pursuit.py --num_envs 4096 --iters 600 --headless
@@ -19,7 +19,7 @@ parser.add_argument("--horizon", type=int, default=32)
 parser.add_argument("--target_speed", type=float, default=4.0)
 parser.add_argument("--seed", type=int, default=0)
 parser.add_argument("--lr", type=float, default=3e-4)
-parser.add_argument("--vehicle", default=None, help="forklift | cart | path to a USD")
+parser.add_argument("--vehicle", default=None, help="tank | path to a custom USD")
 parser.add_argument("--tag", default="pursuit-train")
 AppLauncher.add_app_launcher_args(parser)
 args = parser.parse_args()

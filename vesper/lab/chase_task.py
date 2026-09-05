@@ -1,23 +1,22 @@
-"""Chase: find a forklift on the site with your own camera and hit it, fast.
+"""Chase: find a tank on the site with your own camera and detonate near it.
 
 This is the task the end-to-end vision policy trains on. It is deliberately
 smaller than the search task (vesper.lab.search_task): there is no belief, no
-coverage grid, no assigned target. Some forklifts drive around the site; the
-drone launches from the launch zone, has to *see* one -- the camera is the only
-way -- fly to it through the trees and buildings, and touch it. The touch ends
-the episode, and the sooner it comes the more it pays.
+coverage grid, no assigned target. Some tanks drive around the site; the drone
+launches from the launch zone, has to *see* one -- the camera is the only way --
+fly close and choose when to detonate. A tank inside the small blast radius is
+marked hit, and the sooner that happens the more it pays.
 
 What is real and what is privileged:
 
   real (the actor's inputs)   the camera frame (RGB + depth) and the airframe's
                               own instruments (vesper.lab.frames.proprio)
-  real (events)               a touch is a PhysX contact between the airframe
-                              and a forklift; a crash is a contact with
-                              anything else. The env reads both off a contact
-                              sensor and hands them in.
+  real (events)               detonation is the policy's fourth action. A hit is
+                              a tank inside its blast radius; any physical
+                              contact before detonation is a crash.
   privileged (training only)  the reward's shaping: distance closed on the
-                              nearest forklift, clearance from obstacles read
-                              from the site map, whether a forklift is in frame
+                              nearest tank, clearance from obstacles read from
+                              the site map, whether a tank is in frame
                               (from the segmentation mask), the safe zones.
                               The critic and the state-based teacher see the
                               privileged vector; the actor never does.
@@ -25,15 +24,14 @@ What is real and what is privileged:
 Safe zones are friendly ground. The drone launches from a pad inside one, and
 every step it spends over friendly ground costs, so leaving is the first thing
 worth learning; the penalty is monotone in the distance to the boundary, so it
-points the way out the whole time. A forklift inside one is protected -- no
-sighting bonus, no touch reward, touching it ends nothing -- because a friendly
-vehicle is not a target.
+points the way out the whole time. A tank inside one is protected: detonating
+near it yields no hit reward because a friendly vehicle is not a target.
 
 Fallbacks keep the task CPU-testable and usable without a renderer: with no
-contact sensor a touch is a small radius and a crash is the map's solid
-layer; with no segmentation a sighting is a geometric cone with line of sight.
+contact sensor a crash is the map's solid layer; with no segmentation a
+sighting is a geometric cone with line of sight.
 
-Frame: world metres, x east, y north, z up. Shapes: N drones, K forklifts.
+Frame: world metres, x east, y north, z up. Shapes: N drones, K tanks.
 """
 from __future__ import annotations
 
@@ -47,7 +45,7 @@ from vesper.lab.frames import PROPRIO_DIM, camera_axis, proprio, tilt_from_quat,
 
 @dataclass
 class ChaseCfg:
-    n_targets: int = 12                # forklifts on the site, shared by every drone
+    n_targets: int = 12                # tanks on the site, shared by every drone
     # The whole site, not a box inside it: the Cornell raster is 1200 m square,
     # and with oob_margin the hard limit lands exactly on its edge, so the drone
     # is bounded by the terrain rather than by an invisible wall inside it.
@@ -67,7 +65,7 @@ class ChaseCfg:
     look_ahead: float = 25.0
 
     # --- events ---
-    touch_radius: float = 2.5          # fallback when there is no contact sensor (m)
+    blast_radius: float = 4.0          # 3D radius around the drone at detonation (m)
     min_clearance: float = 1.0         # fallback crash: below solid + this
     clear_min: float = 6.0             # clearance below which the shaping penalty starts (m)
     tilt_limit: float = 1.4
@@ -75,14 +73,15 @@ class ChaseCfg:
     oob_margin: float = 10.0
 
     # --- reward ---
-    # Ordering, best to worst: touch early > touch late > see one > fly around
+    # Ordering, best to worst: hit early > hit late > see one > fly around
     # > time out > crash. The progress term is the only dense signal before the
     # first sighting is rewarded, and it is what makes the early episodes learn
     # anything at all; it is privileged and training-only.
-    r_touch: float = 100.0             # touching an unprotected forklift
-    r_touch_speed: float = 100.0       # extra, scaled by the fraction of the episode left
-    r_sight: float = 10.0              # first frame each unprotected forklift is in view
-    r_touch_protected: float = 0.0     # touching a forklift inside a safe zone (penalty if < 0)
+    r_hit: float = 100.0               # detonating within radius of an unprotected tank
+    r_hit_speed: float = 100.0         # extra, scaled by the fraction of the episode left
+    r_sight: float = 10.0              # first frame each unprotected tank is in view
+    r_hit_protected: float = 0.0       # protected tank in the radius (penalty if < 0)
+    r_miss: float = 100.0              # prevents immediate empty detonation gaming time costs
     # Friendly ground. The drone launches inside it and every step spent there
     # costs, so the first thing worth learning is to leave -- and the penalty is
     # monotone in a signed distance to the boundary, so there is a gradient
@@ -94,7 +93,7 @@ class ChaseCfg:
     w_safe: float = 0.5                # per step, scaled by the ramp below
     safe_margin_m: float = 25.0        # ramp width outside the boundary
     safe_depth_m: float = 50.0         # depth inside at which the penalty is maximal
-    w_progress: float = 1.0            # per metre closed on the nearest unprotected forklift
+    w_progress: float = 1.0            # per metre closed on the nearest unprotected tank
     w_time: float = 0.05               # per step
     w_clear: float = 0.5               # per step, scaled by (1 - clearance / clear_min)+
     r_crash: float = 100.0
@@ -103,7 +102,7 @@ class ChaseCfg:
 
 
 class ChaseTask:
-    """Reward, termination and observation vectors for N drones chasing K forklifts."""
+    """Reward, termination and observation vectors for N drones chasing K tanks."""
 
     def __init__(self, world, cfg: ChaseCfg, num_envs: int, dt: float, max_steps: int,
                  device="cpu", generator=None):
@@ -155,13 +154,13 @@ class ChaseTask:
 
     # ------------------------------------------------------------------ step
     def step(self, drone_pos, drone_vel, quat, ang_vel_b, target_pos, step_count,
-             touched=None, crashed=None, seen_px=None, protected=None):
+             detonated=None, crashed=None, seen_px=None, protected=None):
         """One control step. All world-frame [N,...]; target_pos [N,K,3].
 
-        touched [N,K] bool     contact with each forklift this step (None: radius fallback)
-        crashed [N] bool       contact with anything that is not a forklift (None: map fallback)
-        seen_px [N,K] int      mask pixels per forklift in the frame (None: geometric fallback)
-        protected [N,K] bool   forklift inside a safe zone (None: none are)
+        detonated [N] bool     the drone chose to explode this step
+        crashed [N] bool       physical contact before detonation (None: map fallback)
+        seen_px [N,K] int      mask pixels per tank in the frame (None: geometric fallback)
+        protected [N,K] bool   tank inside a safe zone (None: none are)
         Returns (proprio obs [N,11], reward [N], terminated [N], info).
         """
         cfg, dev = self.cfg, drone_pos.device
@@ -172,10 +171,15 @@ class ChaseTask:
         live = ~protected
 
         # --- events ---------------------------------------------------------
-        if touched is None:
-            touched = slant < cfg.touch_radius
-        touch_live = (touched & live).any(dim=1)
-        touch_prot = (touched & protected).any(dim=1) & ~touch_live
+        if detonated is None:
+            detonated = torch.zeros(self.n, dtype=torch.bool, device=dev)
+        else:
+            detonated = detonated.to(device=dev, dtype=torch.bool)
+        hit_mask = detonated.unsqueeze(1) & (slant <= cfg.blast_radius)
+        hit_live_mask = hit_mask & live
+        hit = hit_live_mask.any(dim=1)
+        hit_protected = (hit_mask & protected).any(dim=1) & ~hit
+        miss = detonated & ~hit
         if seen_px is None:
             visible = self.detect(drone_pos, quat, target_pos)
         else:
@@ -199,13 +203,15 @@ class ChaseTask:
         if crashed is None:
             solid = self.world.solid_at(drone_pos[:, 0], drone_pos[:, 1])
             crashed = drone_pos[:, 2] < solid + cfg.min_clearance
-        crashed = crashed & ~touch_live
+        # If the policy detonates on the same step as a contact, the deliberate
+        # action owns the outcome. Otherwise touching a tank is just a crash.
+        crashed = crashed & ~detonated
         rxy = drone_pos[:, :2].abs().amax(dim=1)
         oob = (rxy > cfg.arena_half + cfg.oob_margin) | (drone_pos[:, 2] > ground + cfg.ceiling)
         flip = tilt_from_quat(quat) > cfg.tilt_limit
-        terminated = touch_live | crashed | oob | flip
+        terminated = detonated | crashed | oob | flip
 
-        # --- progress on the nearest unprotected forklift ---------------------
+        # --- progress on the nearest unprotected tank -------------------------
         d_live = torch.where(live, slant, torch.full_like(slant, 1e6))
         nearest, _ = d_live.min(dim=1)
         has = live.any(dim=1)
@@ -219,13 +225,14 @@ class ChaseTask:
         r = cfg.w_progress * progress - cfg.w_time
         r = r - cfg.w_clear * (1.0 - clear / cfg.clear_min).clamp(min=0.0)
         r = r + cfg.r_sight * new_sight.float().sum(dim=1)
-        r = r + (cfg.r_touch + cfg.r_touch_speed * left) * touch_live.float()
-        r = r + cfg.r_touch_protected * touch_prot.float()
+        r = r + (cfg.r_hit + cfg.r_hit_speed * left) * hit.float()
+        r = r + cfg.r_hit_protected * hit_protected.float()
+        r = r - cfg.r_miss * miss.float()
         r = r - cfg.w_safe * safe_ramp
         r = r - cfg.r_crash * crashed.float() - cfg.r_oob * oob.float() - cfg.r_flip * flip.float()
 
         # --- what the belief head is trained on: the relative vector to the
-        # nearest forklift *that is actually in frame*. Asking the network to
+        # nearest tank *that is actually in frame*. Asking the network to
         # place one it cannot see would teach it to hallucinate.
         d_vis = torch.where(visible & live, slant, torch.full_like(slant, 1e6))
         vis_d, vis_i = d_vis.min(dim=1)
@@ -236,9 +243,13 @@ class ChaseTask:
         obs = proprio(drone_vel, quat, ang_vel_b, agl, time_frac)
         info = {
             "belief_target": b_rel, "belief_ok": b_ok,
-            "touch": touch_live, "touch_protected": touch_prot,
-            "time_to_touch": torch.where(touch_live, step_count.float() * self.dt,
-                                         torch.full_like(nearest, float("nan"))),
+            "detonated": detonated, "hit": hit, "hit_mask": hit_live_mask,
+            "hit_protected": hit_protected, "miss": miss,
+            "time_to_hit": torch.where(hit, step_count.float() * self.dt,
+                                       torch.full_like(nearest, float("nan"))),
+            # The auto-reset moves the airframe before render scripts regain
+            # control, so carry the actual blast transform in the step info.
+            "explosion_pos": drone_pos.clone(), "explosion_quat": quat.clone(),
             "seen": (self.seen & live).any(dim=1),
             "visible": visible, "crash": crashed, "oob": oob, "flip": flip,
             "agl": agl, "clearance": clear, "nearest": nearest,

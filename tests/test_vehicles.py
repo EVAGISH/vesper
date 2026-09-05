@@ -1,11 +1,11 @@
-"""The forklift driver, integrated kinematically on the synthetic map: no physics."""
+"""The tank driver, integrated kinematically on the synthetic map: no physics."""
 import math
 
 import numpy as np
 import pytest
 import torch
 
-from vesper.lab.vehicles import ROLE_INDEX, ForkliftDriver
+from vesper.lab.vehicles import ROLE_INDEX, TankDriver
 from vesper.worlds.heightmap import WorldMap
 
 
@@ -38,7 +38,7 @@ def world(tmp_path):
 def drive(world, roles, seconds=60.0, dt=0.04, seed=0):
     g = torch.Generator().manual_seed(seed)
     k = len(roles)
-    d = ForkliftDriver(world, k, arena_half=140.0, generator=g)
+    d = TankDriver(world, k, arena_half=140.0, generator=g)
     d.assign_roles(torch.arange(k), torch.tensor(roles))
     xy, heading = d.place(torch.arange(k))
     yaw = heading.clone()

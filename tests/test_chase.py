@@ -43,34 +43,57 @@ def _state(n=2):
     return quat, torch.zeros(n, 3), torch.zeros(n, 3)
 
 
-def test_touch_ends_the_episode_and_pays_more_when_early(world):
+def test_detonation_hits_inside_radius_and_pays_more_when_early(world):
     quat, vel, avb = _state()
-    tgt = torch.tensor([[[0.0, 0.0, 1.0], [50.0, 0.0, 1.0]]] * 2)
-    drone = torch.tensor([[0.0, 0.0, 30.0]] * 2)
-    touched = torch.tensor([[True, False], [True, False]])
+    tgt = torch.tensor([[[3.9, 0.0, 3.0], [50.0, 0.0, 3.0]]] * 2)
+    drone = torch.tensor([[0.0, 0.0, 3.0]] * 2)
+    detonated = torch.ones(2, dtype=torch.bool)
 
     def run(step):
         task, _ = _task(world)
-        _, r, term, info = task.step(drone, vel, quat, avb, tgt, torch.full((2,), step), touched=touched)
-        return float(r[0]), bool(term[0]), bool(info["touch"][0])
+        _, r, term, info = task.step(
+            drone, vel, quat, avb, tgt, torch.full((2,), step), detonated=detonated)
+        return float(r[0]), bool(term[0]), bool(info["hit"][0]), info["hit_mask"][0]
 
-    early, t1, touched1 = run(5)
-    late, t2, _ = run(90)
-    assert t1 and t2 and touched1
+    early, t1, hit1, mask = run(5)
+    late, t2, _, _ = run(90)
+    assert t1 and t2 and hit1 and mask.tolist() == [True, False]
     assert early > late > 50.0
 
 
-def test_protected_forklift_pays_nothing_and_does_not_end(world):
+def test_detonation_without_a_tank_in_radius_is_a_terminal_miss(world):
     task, cfg = _task(world)
     quat, vel, avb = _state()
-    tgt = torch.tensor([[[0.0, 0.0, 1.0], [50.0, 0.0, 1.0]]] * 2)
-    drone = torch.tensor([[0.0, 0.0, 30.0]] * 2)
-    touched = torch.tensor([[True, False]] * 2)
+    tgt = torch.tensor([[[cfg.blast_radius + 0.1, 0.0, 3.0], [50.0, 0.0, 3.0]]] * 2)
+    drone = torch.tensor([[0.0, 0.0, 3.0]] * 2)
+    _, r, term, info = task.step(
+        drone, vel, quat, avb, tgt, torch.zeros(2, dtype=torch.long),
+        detonated=torch.ones(2, dtype=torch.bool))
+    assert term.all() and info["miss"].all() and not info["hit"].any()
+    assert (r < -50.0).all()
+
+
+def test_flying_inside_blast_radius_does_not_hit_until_detonation(world):
+    task, _ = _task(world)
+    quat, vel, avb = _state()
+    tgt = torch.tensor([[[1.0, 0.0, 3.0], [50.0, 0.0, 3.0]]] * 2)
+    drone = torch.tensor([[0.0, 0.0, 3.0]] * 2)
+    _, _, term, info = task.step(
+        drone, vel, quat, avb, tgt, torch.zeros(2, dtype=torch.long),
+        detonated=torch.zeros(2, dtype=torch.bool), crashed=torch.zeros(2, dtype=torch.bool))
+    assert not term.any() and not info["hit"].any() and not info["detonated"].any()
+
+
+def test_protected_tank_pays_no_hit_reward_but_detonation_ends(world):
+    task, cfg = _task(world)
+    quat, vel, avb = _state()
+    tgt = torch.tensor([[[0.0, 0.0, 3.0], [50.0, 0.0, 3.0]]] * 2)
+    drone = torch.tensor([[0.0, 0.0, 3.0]] * 2)
     prot = torch.tensor([[True, False]] * 2)
     _, r, term, info = task.step(drone, vel, quat, avb, tgt, torch.zeros(2, dtype=torch.long),
-                                 touched=touched, protected=prot)
-    assert not term.any() and not info["touch"].any() and info["touch_protected"].all()
-    assert r[0] < 15.0                                  # no touch bonus: only the sighting of #1
+                                 detonated=torch.ones(2, dtype=torch.bool), protected=prot)
+    assert term.all() and not info["hit"].any() and info["hit_protected"].all()
+    assert r[0] < -50.0                                 # no hit bonus; detonation is spent
 
 
 def test_sighting_pays_once_and_only_for_unprotected(world):
@@ -79,15 +102,15 @@ def test_sighting_pays_once_and_only_for_unprotected(world):
     tgt = torch.tensor([[[30.0, 0.0, 1.0], [-80.0, 0.0, 1.0]]] * 2)   # one ahead, one behind
     drone = torch.tensor([[0.0, 0.0, 30.0]] * 2)
     step = torch.zeros(2, dtype=torch.long)
-    no = torch.zeros(2, 2, dtype=torch.bool)
-    _, r1, _, info = task.step(drone, vel, quat, avb, tgt, step, touched=no)
+    no = torch.zeros(2, dtype=torch.bool)
+    _, r1, _, info = task.step(drone, vel, quat, avb, tgt, step, detonated=no)
     assert info["visible"][0].tolist() == [True, False]
-    _, r2, _, _ = task.step(drone, vel, quat, avb, tgt, step, touched=no)
+    _, r2, _, _ = task.step(drone, vel, quat, avb, tgt, step, detonated=no)
     assert r1[0] > r2[0] + cfg.r_sight * 0.9, "the first sighting pays, the second frame does not"
     task2, _ = _task(world)
-    _, r3, _, _ = task2.step(drone, vel, quat, avb, tgt, step, touched=no,
+    _, r3, _, _ = task2.step(drone, vel, quat, avb, tgt, step, detonated=no,
                              protected=torch.tensor([[True, False]] * 2))
-    assert abs(float(r3[0] - r2[0])) < 1.0, "a protected forklift in view pays no sighting"
+    assert abs(float(r3[0] - r2[0])) < 1.0, "a protected tank in view pays no sighting"
 
 
 def test_pixel_sightings_override_geometry(world):
@@ -95,9 +118,9 @@ def test_pixel_sightings_override_geometry(world):
     quat, vel, avb = _state()
     tgt = torch.tensor([[[-80.0, 0.0, 1.0], [-80.0, 30.0, 1.0]]] * 2)   # both behind the lens
     drone = torch.tensor([[0.0, 0.0, 30.0]] * 2)
-    no = torch.zeros(2, 2, dtype=torch.bool)
+    no = torch.zeros(2, dtype=torch.bool)
     _, _, _, info = task.step(drone, vel, quat, avb, tgt, torch.zeros(2, dtype=torch.long),
-                              touched=no, seen_px=torch.tensor([[10, 3]] * 2))
+                              detonated=no, seen_px=torch.tensor([[10, 3]] * 2))
     assert info["visible"][0].tolist() == [True, False]
 
 
@@ -106,18 +129,19 @@ def test_crash_and_clearance(world):
     quat, vel, avb = _state()
     tgt = torch.full((2, 2, 3), 500.0)
     step = torch.zeros(2, dtype=torch.long)
-    no = torch.zeros(2, 2, dtype=torch.bool)
+    no = torch.zeros(2, dtype=torch.bool)
     # next to the 40 m block at 4 m: clearance small, penalty paid; in the open: none
     near = torch.tensor([[38.0, 0.0, 20.0], [-50.0, 0.0, 20.0]])
-    _, r, term, info = task.step(near, vel, quat, avb, tgt, step, touched=no)
+    _, r, term, info = task.step(near, vel, quat, avb, tgt, step, detonated=no)
     assert info["clearance"][0] < 6.0 < info["clearance"][1]
     assert r[0] < r[1] and not term.any()
     # a contact with the world from the sensor is a crash regardless of the map
     _, r2, term2, info2 = task.step(torch.tensor([[-50.0, 0.0, 20.0]] * 2), vel, quat, avb, tgt, step,
-                                    touched=no, crashed=torch.tensor([True, False]))
+                                    detonated=no, crashed=torch.tensor([True, False]))
     assert term2[0] and not term2[1] and r2[0] < -50
     # and the map fallback catches a drone below the ground
-    _, _, term3, _ = task.step(torch.tensor([[-50.0, 0.0, 0.5]] * 2), vel, quat, avb, tgt, step, touched=no)
+    _, _, term3, _ = task.step(
+        torch.tensor([[-50.0, 0.0, 0.5]] * 2), vel, quat, avb, tgt, step, detonated=no)
     assert term3.all()
 
 
@@ -126,7 +150,8 @@ def test_observation_widths(world):
     quat, vel, avb = _state()
     tgt = torch.zeros(2, 3, 3)
     obs, _, _, info = task.step(torch.tensor([[0.0, 0.0, 30.0]] * 2), vel, quat, avb, tgt,
-                                torch.zeros(2, dtype=torch.long), touched=torch.zeros(2, 3, dtype=torch.bool))
+                                torch.zeros(2, dtype=torch.long),
+                                detonated=torch.zeros(2, dtype=torch.bool))
     assert obs.shape == (2, PROPRIO_DIM)
     priv = task.privileged(torch.tensor([[0.0, 0.0, 30.0]] * 2), vel, quat, avb, tgt, info["visible"],
                            torch.zeros(2, 3, dtype=torch.bool), torch.zeros(2))
@@ -164,32 +189,33 @@ def test_depth_model_normalises_clips_and_holes():
     assert abs(float(big[big > 0].mean()) - 0.5) < 0.01
 
 
-def test_belief_target_is_the_nearest_visible_forklift(world):
+def test_belief_target_is_the_nearest_visible_tank(world):
     task, cfg = _task(world, k=3)
     quat, vel, avb = _state()
     # #0 far ahead, #1 near ahead, #2 near but behind the lens
     tgt = torch.tensor([[[90.0, 0.0, 1.0], [40.0, 0.0, 1.0], [-10.0, 0.0, 1.0]]] * 2)
     drone = torch.tensor([[0.0, 0.0, 30.0]] * 2)
-    no = torch.zeros(2, 3, dtype=torch.bool)
-    _, _, _, info = task.step(drone, vel, quat, avb, tgt, torch.zeros(2, dtype=torch.long), touched=no)
+    no = torch.zeros(2, dtype=torch.bool)
+    _, _, _, info = task.step(drone, vel, quat, avb, tgt, torch.zeros(2, dtype=torch.long), detonated=no)
     assert info["belief_ok"].all()
     assert info["belief_target"][0].tolist() == pytest.approx([0.40, 0.0, -0.29], abs=0.01)
     # nothing in frame: the target is zeroed and masked out of the loss
     behind = torch.tensor([[[-90.0, 0.0, 1.0]] * 3] * 2)
     task2, _ = _task(world, k=3)
-    _, _, _, info2 = task2.step(drone, vel, quat, avb, behind, torch.zeros(2, dtype=torch.long), touched=no)
+    _, _, _, info2 = task2.step(
+        drone, vel, quat, avb, behind, torch.zeros(2, dtype=torch.long), detonated=no)
     assert not info2["belief_ok"].any()
     assert float(info2["belief_target"].abs().max()) == 0.0
 
 
-def test_protected_forklift_is_not_a_belief_target(world):
+def test_protected_tank_is_not_a_belief_target(world):
     task, cfg = _task(world, k=2)
     quat, vel, avb = _state()
     # both in frame and clear of the building (which starts at x=40)
     tgt = torch.tensor([[[20.0, 0.0, 1.0], [35.0, 0.0, 1.0]]] * 2)
     drone = torch.tensor([[0.0, 0.0, 30.0]] * 2)
-    no = torch.zeros(2, 2, dtype=torch.bool)
-    _, _, _, info = task.step(drone, vel, quat, avb, tgt, torch.zeros(2, dtype=torch.long), touched=no,
+    no = torch.zeros(2, dtype=torch.bool)
+    _, _, _, info = task.step(drone, vel, quat, avb, tgt, torch.zeros(2, dtype=torch.long), detonated=no,
                               protected=torch.tensor([[True, False]] * 2))
     assert info["belief_ok"].all()
     assert info["belief_target"][0, 0].item() == pytest.approx(0.35, abs=0.01)   # the unprotected one
@@ -208,11 +234,12 @@ def test_leaving_friendly_ground_pays_all_the_way_out(world):
     quat, vel, avb = _state()
     tgt = torch.full((2, 2, 3), 500.0)
     step = torch.zeros(2, dtype=torch.long)
-    no = torch.zeros(2, 2, dtype=torch.bool)
+    no = torch.zeros(2, dtype=torch.bool)
 
     def at(x, y):
         t, _ = _task(world)
-        _, r, term, info = t.step(torch.tensor([[x, y, 40.0]] * 2), vel, quat, avb, tgt, step, touched=no)
+        _, r, term, info = t.step(
+            torch.tensor([[x, y, 40.0]] * 2), vel, quat, avb, tgt, step, detonated=no)
         return float(r[0]), bool(term[0]), info
 
     deep, deep_term, i_deep = at(-50.0, 50.0)   # 30 m inside
@@ -258,8 +285,8 @@ def test_no_safe_zone_means_no_penalty_and_no_termination(world):
     task, cfg = _task(world)                                 # zones never attached
     quat, vel, avb = _state()
     tgt = torch.full((2, 2, 3), 500.0)
-    no = torch.zeros(2, 2, dtype=torch.bool)
+    no = torch.zeros(2, dtype=torch.bool)
     _, r, term, info = task.step(torch.tensor([[-50.0, 50.0, 40.0]] * 2), vel, quat, avb, tgt,
-                                 torch.zeros(2, dtype=torch.long), touched=no)
+                                 torch.zeros(2, dtype=torch.long), detonated=no)
     assert not info["in_safe"].any() and float(info["safe_cost"].max()) == 0.0 and not term.any()
     assert float(task.geofence(torch.tensor([[-50.0, 50.0, 40.0]] * 2))[0]) == pytest.approx(1.0)

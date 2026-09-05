@@ -1,4 +1,4 @@
-"""Forklift driver: velocity commands for K vehicles that behave like vehicles.
+"""Tank driver: velocity commands for K vehicles that behave like vehicles.
 
 Pure torch over a WorldMap, no physics of its own: the env reads each hull's
 actual pose and speed out of PhysX, asks for a command, and writes the
@@ -14,7 +14,7 @@ Behaviour, per vehicle:
   * a fan of probes ahead scores headings: drivable and inside the arena
     first, toward the goal second, on a road third; the hull leaves its
     current heading only when that heading is blocked or clearly worse;
-  * the hull cannot do what a forklift cannot: speed ramps from rest, the
+  * the hull has realistic limits: speed ramps from rest, the
     turn rate is capped by a lateral-acceleration budget, speed drops into a
     turn, and a hull that has pushed against something for two seconds turns
     away and tries again.
@@ -38,13 +38,15 @@ LAT_ACCEL = 2.5        # m/s^2 lateral budget -> turn-rate limit at speed
 TURN_MAX = 1.0         # rad/s at walking pace
 STUCK_S = 2.0          # seconds below 30% of commanded speed before turning away
 PROBE_AHEAD = 14.0     # m
+PROBE_DISTANCES = (4.0, 8.0, PROBE_AHEAD)  # sample the corridor, not just its far endpoint
+PROBE_LATERAL = (-3.5, 0.0, 3.5)           # hull width plus room for the bounded turning arc
 GOAL_RADIUS = 8.0      # m: arrived
 GOAL_TIMEOUT_S = 45.0
 YAW_SERVO_MAX = 3.6    # rad/s the hull's yaw servo can ask for
 ROAD_WEIGHT = 0.8      # a road follower's preference for road over lawn, vs 0.25 for the goal bearing
 
 
-class ForkliftDriver:
+class TankDriver:
     def __init__(self, world, k: int, arena_half: float, device="cpu", generator=None):
         self.world, self.k, self.half = world, int(k), float(arena_half)
         self.device, self.gen = device, generator
@@ -149,13 +151,22 @@ class ForkliftDriver:
         desired = bearing + 0.3 * self.turn_rate
 
         # --- probe fan: drivable and inside first, toward the goal second, road third
+        # Sampling only the far endpoint lets a vehicle skip over a narrow trunk
+        # or median. Sampling only its centreline lets the tracks clip one. Every
+        # candidate must have a clear near-to-far corridor across the tank width.
         probe_h = self.heading.unsqueeze(1) + self.probe.view(1, -1)                 # [K,P]
-        px = pos_xy[:, 0:1] + PROBE_AHEAD * torch.cos(probe_h)
-        py = pos_xy[:, 1:2] + PROBE_AHEAD * torch.sin(probe_h)
+        probe_d = torch.tensor(PROBE_DISTANCES, device=dev).view(1, 1, -1, 1)
+        lateral = torch.tensor(PROBE_LATERAL, device=dev).view(1, 1, 1, -1)
+        ph = probe_h.unsqueeze(2).unsqueeze(3)
+        px = (pos_xy[:, 0].view(K, 1, 1, 1) + probe_d * torch.cos(ph)
+              - lateral * torch.sin(ph))
+        py = (pos_xy[:, 1].view(K, 1, 1, 1) + probe_d * torch.sin(ph)
+              + lateral * torch.cos(ph))
         r, c = self.world.nearest_cell(px, py)
-        ok = self.world.drivable[r, c]
-        road = self.world.road[r, c]
-        inside = (px.abs() < self.half) & (py.abs() < self.half)
+        sampled_ok = self.world.drivable[r, c]
+        ok = sampled_ok.amin(dim=3).amin(dim=2)
+        road = self.world.road[r, c][..., 1].mean(dim=2)  # centreline preference only
+        inside = ((px.abs() < self.half) & (py.abs() < self.half)).all(dim=3).all(dim=2)
         score = ok * inside.float() - 0.03 * self.probe.abs().view(1, -1)
         score = score + 0.25 * torch.cos(probe_h - bearing.unsqueeze(1))
         score = score + ROAD_WEIGHT * road * self.on_road.unsqueeze(1).float()

@@ -1,4 +1,4 @@
-"""Fly a trained chase policy on the site and film it.
+"""Fly a trained chase policy on the site and film its tank strike attempts.
 
     /isaac-sim/python.sh scripts/fly_chase.py --policy runs/<id>/chase.pt \
         --seconds 60 --headless --enable_cameras
@@ -6,12 +6,12 @@
 Writes into runs/<id>/:
   fpv.mp4      the drone's own view: the body-fixed camera, pitched forward-down,
                with the policy's real input tensor (RGB and depth, 96 px) inset,
-               and a cross where the policy's belief head thinks the forklift is.
+               and a cross where the policy's belief head thinks the tank is.
                What is in this frame is what the policy had to work with.
   chase.mp4    the same moment from behind, framed on whatever it is going for.
-  track.png    top-down over the site's ground texture: drone path, forklift
-               paths, the launch zone, the safe zones, where each touch happened.
-  events.json  the timeline (first sighting, touch, crash).
+  track.png    top-down over the site's ground texture: drone path, tank paths,
+               the launch zone, safe zones, and detonation locations.
+  events.json  the timeline (first sighting, detonation, hit/miss, crash).
 
 Handles both checkpoint kinds: a vision policy (recurrent, camera in) and a
 privileged teacher (flat MLP on the state vector). Only environment 0 is filmed.
@@ -62,6 +62,7 @@ from isaacsim.sensors.camera import Camera  # noqa: E402
 import isaacsim.core.utils.numpy.rotations as rot_utils  # noqa: E402
 
 from vesper.capture import RunCapture  # noqa: E402
+from vesper.capture.explosion import explosion_frame  # noqa: E402
 from vesper.control.se3 import quat_to_rot  # noqa: E402
 from vesper.lab.chase_env import ChaseEnv, ChaseEnvCfg  # noqa: E402
 from vesper.lab.frames import sensor_pose  # noqa: E402
@@ -177,7 +178,8 @@ def project(pos, R, hfov, p, w, h):
     return float(w / 2 - (d @ left) / z * fx), float(h / 2 - (d @ up) / z * fx), z, fx
 
 
-def annotate(rgb, cam, t, agl, vis, prot, tp, drone, sensor=False, inset=None, depth=None):
+def annotate(rgb, cam, t, agl, vis, prot, tp, drone, sensor=False, inset=None, depth=None,
+             detonated=False, hit=False):
     img = Image.fromarray(rgb)
     d = ImageDraw.Draw(img)
     w, h = img.size
@@ -191,7 +193,7 @@ def annotate(rgb, cam, t, agl, vis, prot, tp, drone, sensor=False, inset=None, d
         if 0 < hy < h:
             d.line([w / 2 - 40, hy, w / 2 + 40, hy], fill=(200, 200, 200), width=1)
 
-    # only forklifts the camera can actually see get a box: drawing the rest
+    # only tanks the camera can actually see get a box: drawing the rest
     # would show the viewer a hunt the policy is not running
     for k in range(len(tp)):
         if not vis[k]:
@@ -203,9 +205,10 @@ def annotate(rgb, cam, t, agl, vis, prot, tp, drone, sensor=False, inset=None, d
         col = CYAN if prot[k] else AMBER
         s = float(np.clip(fx * 3.0 / z, 10.0, 200.0))
         d.rectangle([x - s, y - s * 0.6, x + s, y + s * 0.6], outline=col, width=3)
-        d.text((x - s, y - s * 0.6 - 14), f"{'PROTECTED' if prot[k] else 'V'}{k}  {z:.0f} m", fill=col)
+        d.text((x - s, y - s * 0.6 - 14),
+               f"{'PROTECTED ' if prot[k] else ''}TANK {k}  {z:.0f} m", fill=col)
 
-    # where the policy's own belief head puts the nearest forklift
+    # where the policy's own belief head puts the nearest tank
     if sensor and is_vision and np.linalg.norm(belief_xyz) > 1.0:
         pr = project(pos, R, hfov, drone + belief_xyz, w, h)
         if pr:
@@ -234,16 +237,20 @@ def annotate(rgb, cam, t, agl, vis, prot, tp, drone, sensor=False, inset=None, d
     d.text((10, 8), f"t {t:5.1f} s    AGL {agl:4.0f} m", fill=WHITE)
     d.text((10, 26), f"in frame {int(vis.sum())}/{len(vis)}", fill=CYAN)
     d.text((10, 44), "VISION POLICY" if is_vision else "STATE TEACHER", fill=GREEN)
-    if vis.any():
+    if detonated:
+        col = GREEN if hit else RED
+        d.rectangle([0, 0, w - 1, h - 1], outline=col, width=8)
+        d.text((w - 150, 12), "TANK HIT" if hit else "MISS", fill=col)
+    elif vis.any():
         d.rectangle([0, 0, w - 1, h - 1], outline=AMBER, width=6)
-        d.text((w - 150, 12), "CONTACT", fill=AMBER)
+        d.text((w - 150, 12), "TARGET", fill=AMBER)
     return np.asarray(img)
 
 
 obs = env.vision_reset()
 done = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
 drone_path, veh_paths = [], [[] for _ in range(args.targets)]
-events, touch_xy = [], []
+events, detonation_xy = [], []
 smooth = None
 peak_seen = 0
 
@@ -263,13 +270,19 @@ for i in range(steps):
         if vis[k] and not any(e["k"] == k and e["kind"] == "seen" for e in events):
             events.append({"t": round(t, 2), "k": int(k), "kind": "seen",
                            "xy": [round(float(tp[k][0]), 1), round(float(tp[k][1]), 1)]})
-            print(f"t={t:6.2f}s  forklift {k} in frame", flush=True)
-    if bool(info["touch"][0].item()) or bool(info["touch_protected"][0].item()):
-        kind = "touch" if bool(info["touch"][0].item()) else "touch_protected"
-        events.append({"t": round(t, 2), "kind": kind,
-                       "xy": [round(float(d0[0]), 1), round(float(d0[1]), 1)]})
-        touch_xy.append(d0.copy())
-        print(f"t={t:6.2f}s  {kind.upper()}", flush=True)
+            print(f"t={t:6.2f}s  tank {k} in frame", flush=True)
+    blast = bool(info["detonated"][0].item())
+    hit = bool(info["hit"][0].item())
+    if blast:
+        blast_pos = info["explosion_pos"][0].cpu().numpy()
+        hit_ids = torch.nonzero(info["hit_mask"][0]).flatten().cpu().tolist()
+        kind = "hit" if hit else "miss"
+        events.append({"t": round(t, 2), "kind": "detonation", "result": kind,
+                       "hit_tanks": hit_ids, "radius_m": env.task.cfg.blast_radius,
+                       "xy": [round(float(blast_pos[0]), 1), round(float(blast_pos[1]), 1)]})
+        detonation_xy.append((blast_pos.copy(), hit))
+        drone_path[-1] = blast_pos.copy()
+        print(f"t={t:6.2f}s  DETONATION {kind.upper()} tanks={hit_ids}", flush=True)
     for k in ("crash", "oob", "flip"):
         if bool(info[k][0].item()):
             events.append({"t": round(t, 2), "kind": k})
@@ -277,7 +290,7 @@ for i in range(steps):
     if bool(done[0].item()):
         print(f"episode 0 ended at t={t:.2f}s", flush=True)
 
-    if i % args.every != 0:
+    if i % args.every != 0 and not blast:
         continue
 
     # frame the chase on whatever the drone can see, else on its own heading
@@ -293,7 +306,15 @@ for i in range(steps):
         f2 = smooth / (np.linalg.norm(smooth) + 1e-6)
         goal = d0 + np.array([f2[0], f2[1], 0.0]) * 70.0 - np.array([0.0, 0.0, 30.0])
 
-    cam = body_camera(fpv)
+    display_drone = info["explosion_pos"][0].cpu().numpy() if blast else d0
+    if blast:
+        ep = info["explosion_pos"][:1]
+        eq = info["explosion_quat"][:1]
+        cp, cq = sensor_pose(ep, eq, env.task.cfg.cam_pitch_deg, tuple(cfg.cam_offset))
+        fpv[0].set_world_pose(cp[0].cpu().numpy(), cq[0].cpu().numpy())
+        cam = (cp[0].cpu().numpy(), quat_to_rot(cq)[0].cpu().numpy(), fpv[1])
+    else:
+        cam = body_camera(fpv)
     env.sim.render()
     rgba = fpv[0].get_rgba()
     agl = float(info["agl"][0].item())
@@ -301,20 +322,42 @@ for i in range(steps):
     inset = px[0].cpu().numpy() if px is not None else None
     dins = dp[0].cpu().numpy() if dp is not None else None
     if rgba is not None and rgba.size:
-        cap.add_frame(annotate(np.asarray(rgba[:, :, :3], dtype=np.uint8), cam, t, agl, vis, prot,
-                               tp, d0, sensor=True, inset=inset, depth=dins), stream="fpv")
+        frame = annotate(np.asarray(rgba[:, :, :3], dtype=np.uint8), cam, t, agl, vis, prot,
+                         tp, display_drone, sensor=True, inset=inset, depth=dins,
+                         detonated=blast, hit=hit)
+        if blast:
+            for j in range(18):
+                cap.add_frame(explosion_frame(frame, None, j / 17, radius_px=440), stream="fpv")
+        else:
+            cap.add_frame(frame, stream="fpv")
 
-    to = goal - d0
-    sep = float(np.linalg.norm(to))
-    axis = to[:2] / (np.linalg.norm(to[:2]) + 1e-6)
-    back = np.array([axis[0], axis[1], 0.0])
-    pull = float(np.clip(8.0 + 0.22 * sep, 10.0, 26.0))
-    rise = float(np.clip(3.5 + 0.10 * sep, 4.5, 13.0))
-    cam = look_at(chase, d0 - pull * back + np.array([0.0, 0.0, rise]), d0 + 0.45 * to)
+    if blast:
+        goal = display_drone
+        live_hit = np.flatnonzero(info["hit_mask"][0].cpu().numpy())
+        axis = (tp[live_hit[0], :2] - display_drone[:2]) if live_hit.size else np.array([1.0, 0.0])
+        axis = axis / (np.linalg.norm(axis) + 1e-6)
+        cam_pos = display_drone - np.array([axis[0], axis[1], 0.0]) * 14.0 + np.array([0.0, 0.0, 7.0])
+        cam = look_at(chase, cam_pos, display_drone)
+    else:
+        to = goal - d0
+        sep = float(np.linalg.norm(to))
+        axis = to[:2] / (np.linalg.norm(to[:2]) + 1e-6)
+        back = np.array([axis[0], axis[1], 0.0])
+        pull = float(np.clip(8.0 + 0.22 * sep, 10.0, 26.0))
+        rise = float(np.clip(3.5 + 0.10 * sep, 4.5, 13.0))
+        cam = look_at(chase, d0 - pull * back + np.array([0.0, 0.0, rise]), d0 + 0.45 * to)
+    env.sim.render()
     rgba = chase[0].get_rgba()
     if rgba is not None and rgba.size:
-        cap.add_frame(annotate(np.asarray(rgba[:, :, :3], dtype=np.uint8), cam, t, agl, vis, prot,
-                               tp, d0), stream="chase")
+        frame = annotate(np.asarray(rgba[:, :, :3], dtype=np.uint8), cam, t, agl, vis, prot,
+                         tp, display_drone, detonated=blast, hit=hit)
+        if blast:
+            pr = project(cam[0], cam[1], cam[2], display_drone, frame.shape[1], frame.shape[0])
+            center = (pr[0], pr[1]) if pr else None
+            for j in range(18):
+                cap.add_frame(explosion_frame(frame, center, j / 17, radius_px=150), stream="chase")
+        else:
+            cap.add_frame(frame, stream="chase")
 
 # ---------------------------------------------------------------- track plot
 try:
@@ -349,17 +392,19 @@ try:
     pts = [to_px(q[0], q[1]) for q in drone_path]
     if len(pts) > 1:
         dr.line(pts, fill=WHITE, width=3)
-    for q in touch_xy:
+    for q, hit in detonation_xy:
         x, y = to_px(q[0], q[1])
-        dr.ellipse([x - 12, y - 12, x + 12, y + 12], outline=GREEN, width=4)
+        col = GREEN if hit else RED
+        dr.ellipse([x - 12, y - 12, x + 12, y + 12], outline=col, width=4)
     base.save(cap.dir / "track.png")
 except Exception as e:                                          # noqa: BLE001
     print(f"track plot skipped: {e}", flush=True)
 
 (cap.dir / "events.json").write_text(json.dumps(events, indent=1))
 cap.note(policy=args.policy, kind="vision" if is_vision else "teacher", targets=args.targets,
-         peak_in_frame=peak_seen, touches=len(touch_xy), events=events)
-print(f"DONE {json.dumps({'touches': len(touch_xy), 'peak_in_frame': peak_seen, 'run': str(cap.dir)})}",
+         peak_in_frame=peak_seen, detonations=len(detonation_xy),
+         hits=sum(int(h) for _, h in detonation_xy), events=events)
+print(f"DONE {json.dumps({'detonations': len(detonation_xy), 'hits': sum(int(h) for _, h in detonation_xy), 'peak_in_frame': peak_seen, 'run': str(cap.dir)})}",
       flush=True)
 cap.finish()
 env.close()

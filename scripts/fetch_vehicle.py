@@ -1,8 +1,8 @@
 """Bring a custom ground-vehicle model into the pursuit task.
 
-The pursuit target defaults to NVIDIA's stock forklift prop, with a generated
-utility-cart proxy as the offline fallback (see vesper.lab.pursuit_env). To use
-your own model instead, point this at a glTF/GLB (CC0/CC-BY from Poly Pizza,
+The pursuit target defaults to Vesper's generated tank model (see
+vesper.lab.pursuit_env). To use your own model instead, point this at a glTF/GLB
+(CC0/CC-BY from Poly Pizza,
 Quaternius, a Sketchfab export, ...) or a local file; it stages the source and,
 in the container, converts to USD via Isaac Lab's MeshConverter.
 
@@ -50,4 +50,4 @@ if not args.no_yup:
 print("convert:", " ".join(cmd), flush=True)
 subprocess.run(cmd, check=True)
 print(f"\nOK. Set: export VESPER_VEHICLE={usd}", flush=True)
-print("The drone will then pursue this vehicle instead of the default forklift.", flush=True)
+print("The drone will then pursue this vehicle instead of the default tank.", flush=True)

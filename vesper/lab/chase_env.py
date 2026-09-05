@@ -1,12 +1,11 @@
-"""ChaseEnv: N drones launch from the launch zone, find a forklift with their own
-camera, and hit it.
+"""ChaseEnv: N drones launch, find a tank with their camera, and detonate near it.
 
 The task itself is vesper.lab.chase_task; the vehicles are vesper.lab.vehicles.
 This file is the Isaac Lab shell around them: one shared site (a global prim,
-env_spacing 0, drones kept apart by collision filtering), K forklifts that
-belong to nobody and can be hit by everybody, a body-fixed camera per drone
-that renders RGB, depth and instance segmentation in one pass, and a contact
-sensor on the airframe that reports what it hit.
+env_spacing 0, drones kept apart by collision filtering), K tanks that belong
+to nobody and can be hit by everybody, a body-fixed camera per drone that
+renders RGB, depth and instance segmentation in one pass, and an airframe
+contact sensor for crashes.
 
 Observation dict:
   policy       [N,11] (+1)   proprio -- the actor's vector input; with
@@ -18,10 +17,9 @@ Observation dict:
 `ppo_key` picks which of these the flat PPO trainer sees ("privileged" for the
 teacher); the recurrent vision trainer reads the whole dict.
 
-Events come from PhysX: a touch is a contact between the airframe and a
-forklift's colliders, a crash is a contact with anything else. Both are read
-off one ContactSensor with the forklifts as filter prims, so the per-forklift
-force matrix says which one was hit.
+The fourth policy output is the detonation trigger. At detonation time, the task
+marks every tank inside a small 3D blast radius as hit. PhysX contacts before
+detonation are crashes rather than successes.
 """
 import math
 import os
@@ -38,7 +36,7 @@ from vesper.control.se3 import SE3Controller, quat_to_rot
 from vesper.lab import chase_task as T
 from vesper.lab.frames import PROPRIO_DIM, seg_counts, seg_lookup, setpoint, yaw_from_quat
 from vesper.lab.pursuit_env import resolve_vehicle, vehicle_cfg
-from vesper.lab.vehicles import ForkliftDriver
+from vesper.lab.vehicles import TankDriver
 from vesper.lab.vesper_quad import VesperQuadEnv, VesperQuadEnvCfg, iris_cfg
 from vesper.sensors.depth import DepthModel
 from vesper.worlds.heightmap import WorldMap
@@ -50,9 +48,8 @@ CORNELL_MAP = os.path.join(REPO, "assets", "cornell", "cornell_map.npz")
 
 VEHICLE_ROOT = "/World/vehicles"
 VEHICLE_SEMANTIC = "vehicle"
-VEHICLE_PATH_RX = r"/World/vehicles/v(\d+)/Forklift"
-TOUCH_FORCE_N = 0.5          # contact force that counts as a touch
-CRASH_FORCE_N = 2.0          # contact force with anything else that counts as a crash
+VEHICLE_PATH_RX = r"/World/vehicles/v(\d+)/Tank"
+CRASH_FORCE_N = 2.0          # airframe contact force that counts as a crash
 
 
 @configclass
@@ -60,7 +57,7 @@ class ChaseEnvCfg(VesperQuadEnvCfg):
     episode_length_s = 90.0          # ~1200 m of path: enough to cross the site
     decimation = 4                                  # 25 Hz guidance over a 100 Hz inner loop
     sim: SimulationCfg = SimulationCfg(dt=1 / 100, render_interval=4)
-    action_space = 3                                # body-frame forward / left / up
+    action_space = 4                                # body forward / left / up + detonate
     observation_space = PROPRIO_DIM
     state_space = 0                                 # priv_dim, filled at runtime
     chase: dict | None = None                       # ChaseCfg overrides
@@ -69,10 +66,11 @@ class ChaseEnvCfg(VesperQuadEnvCfg):
     zones: str | None = None                        # zones.json; default: beside the map or <site>_zones.json
     vehicle_model: str | None = None
     n_targets: int = 12
-    vehicle_cycle_s: float = 180.0                  # forklifts are re-placed this often
+    vehicle_cycle_s: float = 180.0                  # tanks are re-placed this often
     accel_limit: float = 11.0
     yaw_follow_tau_s: float = 0.6
     yaw_follow_min_speed: float = 1.5
+    detonate_threshold: float = 0.5
     # --- camera ---
     camera: bool = False
     cam_res: int = 96
@@ -101,6 +99,7 @@ class ChaseEnv(VesperQuadEnv):
         cfg.terrain.usd_path = cfg.world_usd
         self._veh_spec = resolve_vehicle(cfg.vehicle_model)
         self._veh_yaw_offset = float(self._veh_spec["yaw_offset"])
+        self._veh_target_height = float(self._veh_spec.get("target_height", 0.0))
         cfg.observation_space = PROPRIO_DIM + (1 if cfg.geofence else 0)
         cfg.state_space = 12 + 6 * self.k + 2
         if cfg.robot is None:
@@ -120,13 +119,14 @@ class ChaseEnv(VesperQuadEnv):
         self._dt = self.cfg.sim.dt * self.cfg.decimation
         self.task = T.ChaseTask(self.world, self.tcfg, N, self._dt, int(self.max_episode_length),
                                 device=dev, generator=self.gen)
-        self.driver = ForkliftDriver(self.world, self.k, self.tcfg.arena_half, device=dev, generator=self.gen)
+        self.driver = TankDriver(self.world, self.k, self.tcfg.arena_half, device=dev, generator=self.gen)
         self.depth_model = DepthModel(max_range=cfg.depth_max_m, generator=self.gen)
         self.spawn_offsets = torch.zeros(N, 3, device=dev)
         self.yaw_des = torch.zeros(N, device=dev)
         self._setpoint = torch.zeros(N, 3, device=dev)
         self._reward = torch.zeros(N, device=dev)
         self._term = torch.zeros(N, dtype=torch.bool, device=dev)
+        self._detonated = torch.zeros(N, dtype=torch.bool, device=dev)
         self._evaluated = False
         self._seg_table = None
         self._seg_labels_n = -1
@@ -138,22 +138,21 @@ class ChaseEnv(VesperQuadEnv):
     def _setup_scene(self):
         self._robot = Articulation(self.cfg.robot)
         self.scene.articulations["robot"] = self._robot
-        # K forklifts that belong to no environment: global prims every drone can hit
+        # K tanks that belong to no environment: global prims every drone can hit
         import isaacsim.core.utils.prims as prim_utils
         prim_utils.create_prim(VEHICLE_ROOT, "Xform")
         for i in range(self.k):
             prim_utils.create_prim(f"{VEHICLE_ROOT}/v{i}", "Xform")
         vcfg = vehicle_cfg(self._veh_spec)
-        vcfg.prim_path = f"{VEHICLE_ROOT}/v.*/Forklift"
+        vcfg.prim_path = f"{VEHICLE_ROOT}/v.*/Tank"
         vcfg.init_state.pos = (0.0, 0.0, 40.0)
         vcfg.spawn.semantic_tags = [("class", VEHICLE_SEMANTIC)]
         self._vehicles = RigidObject(vcfg)
         self.scene.rigid_objects["vehicles"] = self._vehicles
-        # what the airframe touches, per forklift
+        # Any airframe contact before detonation is a crash.
         from isaaclab.sensors import ContactSensor, ContactSensorCfg
         self._contact = ContactSensor(ContactSensorCfg(
             prim_path="/World/envs/env_.*/Robot/body",
-            filter_prim_paths_expr=[f"{VEHICLE_ROOT}/v{i}/Forklift" for i in range(self.k)],
             update_period=0.0, history_length=0,
         ))
         self.scene.sensors["contact"] = self._contact
@@ -195,8 +194,10 @@ class ChaseEnv(VesperQuadEnv):
 
     @property
     def target_pos(self):
-        """[N,K,3] -- every drone hunts every forklift."""
-        return self.vehicle_pos.unsqueeze(0).expand(self.num_envs, -1, -1)
+        """[N,K,3] -- every drone hunts every tank."""
+        p = self.vehicle_pos.clone()
+        p[:, 2] += self._veh_target_height
+        return p.unsqueeze(0).expand(self.num_envs, -1, -1)
 
     def _place_vehicles(self):
         ids = torch.arange(self.k, device=self.device)
@@ -204,7 +205,8 @@ class ChaseEnv(VesperQuadEnv):
         xy, heading = self.driver.place(ids)
         gz = self.world.ground_at(xy[:, 0], xy[:, 1])
         root = torch.zeros(self.k, 13, device=self.device)
-        root[:, 0] = xy[:, 0]; root[:, 1] = xy[:, 1]; root[:, 2] = gz + 1.4
+        root[:, 0] = xy[:, 0]; root[:, 1] = xy[:, 1]
+        root[:, 2] = gz + float(self._veh_spec.get("ground_clearance", 0.08))
         yaw = heading + self._veh_yaw_offset
         root[:, 3] = torch.cos(yaw / 2); root[:, 6] = torch.sin(yaw / 2)
         self._vehicles.write_root_pose_to_sim(root[:, :7])
@@ -212,8 +214,8 @@ class ChaseEnv(VesperQuadEnv):
         self._veh_step = 0
 
     def _drive_vehicles(self):
-        # the arena can shrink under a curriculum; forklifts placed outside the
-        # box the drone is confined to are forklifts it can never reach
+        # the arena can shrink under a curriculum; tanks placed outside the box
+        # the drone is confined to are tanks it can never reach
         self.driver.half = self.tcfg.arena_half
         d = self._vehicles.data
         q = d.root_quat_w
@@ -230,17 +232,18 @@ class ChaseEnv(VesperQuadEnv):
             self._place_vehicles()
 
     def protected(self):
-        """[N,K] forklift inside a safe zone (shared, so the same row for every drone)."""
+        """[N,K] tank inside a safe zone (shared, so the same row for every drone)."""
         p = self.vehicle_pos
         return self.world.in_safe(p[:, 0], p[:, 1]).unsqueeze(0).expand(self.num_envs, -1)
 
     # ---------------------------------------------------------------- control
     def _pre_physics_step(self, actions):
         self._action = actions
+        self._detonated = actions[:, 3] > self.cfg.detonate_threshold
         self._drive_vehicles()
         d = self._robot.data
         yaw = yaw_from_quat(d.root_quat_w)
-        self._setpoint = setpoint(d.root_pos_w, actions, yaw, self.tcfg.look_ahead)
+        self._setpoint = setpoint(d.root_pos_w, actions[:, :3], yaw, self.tcfg.look_ahead)
         v = d.root_lin_vel_w
         speed = v[:, :2].norm(dim=1)
         target = torch.atan2(v[:, 1], v[:, 0])
@@ -262,15 +265,10 @@ class ChaseEnv(VesperQuadEnv):
         self._robot.set_external_force_and_torque(self._thrust, self._moment, body_ids=self._body_id)
 
     # ---------------------------------------------------------------- sensors
-    def _contacts(self):
-        """(touched [N,K], crashed [N]) from the airframe's contact sensor."""
+    def _crashed(self):
+        """[N] physical airframe contact before a deliberate detonation."""
         cd = self._contact.data
-        fm = cd.force_matrix_w                                   # [N, 1, K, 3]
-        touched = fm[:, 0].norm(dim=2) > TOUCH_FORCE_N           # [N, K]
-        total = cd.net_forces_w[:, 0].norm(dim=1)                # [N]
-        veh = fm[:, 0].norm(dim=2).sum(dim=1)
-        crashed = (total - veh) > CRASH_FORCE_N
-        return touched, crashed
+        return cd.net_forces_w[:, 0].norm(dim=1) > CRASH_FORCE_N
 
     def _seen_px(self):
         if self._cam is None:
@@ -280,8 +278,8 @@ class ChaseEnv(VesperQuadEnv):
             return None
         labels = ((self._cam.data.info or {}).get("instance_segmentation_fast") or {}).get("idToLabels") or {}
         if len(labels) != self._seg_labels_n:
-            # every forklift is "env 0": the table maps id -> 0 * K + slot
-            self._seg_table = seg_lookup(labels, r"v(\d+)/Forklift", self.k).to(self.device)
+            # every tank is "env 0": the table maps id -> 0 * K + slot
+            self._seg_table = seg_lookup(labels, r"v(\d+)/Tank", self.k).to(self.device)
             self._seg_table = torch.where(self._seg_table >= 0, self._seg_table % self.k, self._seg_table)
             self._seg_labels_n = len(labels)
         if self._seg_table is None or self._seg_table.numel() <= 1:
@@ -303,12 +301,17 @@ class ChaseEnv(VesperQuadEnv):
         if self._evaluated:
             return
         d = self._robot.data
-        touched, crashed = self._contacts()
+        crashed = self._crashed()
         self._last_visible = None
         _, self._reward, self._term, info = self.task.step(
             d.root_pos_w, d.root_lin_vel_w, d.root_quat_w, d.root_ang_vel_b,
             self.target_pos, self.episode_length_buf,
-            touched=touched, crashed=crashed, seen_px=self._seen_px(), protected=self.protected())
+            detonated=self._detonated, crashed=crashed,
+            seen_px=self._seen_px(), protected=self.protected())
+        # Flat PPO's generic episode collector calls successes "intercepts".
+        # Keep that adapter contract while exposing the task-native hit fields.
+        info["intercept"] = info["hit"]
+        info["time_to_intercept"] = info["time_to_hit"]
         self._last_visible = info["visible"]
         self.extras.update(info)
         self._evaluated = True

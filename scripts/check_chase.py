@@ -3,7 +3,7 @@
     /isaac-sim/python.sh scripts/check_chase.py --num_envs 16 --camera --headless --enable_cameras
 
 Everything asserted here is something that silently ruins a training run: a
-camera that renders nothing (or renders blank), forklifts that sink through the
+camera that renders nothing (or renders blank), tanks that sink through the
 terrain or never move, a contact sensor that never fires, drones launching
 outside the launch zone, a safe zone that does not protect, and observations
 that leak the truth into the actor's vector. It also reports the two numbers
@@ -125,22 +125,23 @@ if args.camera:
     if dp is not None:
         check("depth is normalised and has near returns", float(dp.max()) <= 1.0 and float(dp.min()) >= 0.0)
     seen = env._seen_px()
-    check("forklift segmentation labels are present",
+    check("tank segmentation labels are present",
           seen is not None and env._seg_table is not None and int((env._seg_table >= 0).sum()) >= args.targets,
-          f"{0 if env._seg_table is None else int((env._seg_table >= 0).sum())} forklift ids")
+          f"{0 if env._seg_table is None else int((env._seg_table >= 0).sum())} tank ids")
     print(f"       VRAM after the first render: {torch.cuda.max_memory_allocated()/1e9:.2f} GB", flush=True)
 
-# --- forklifts start on the ground, on their layers
+# --- tanks start on the ground, on their layers
 vp = env.vehicle_pos
 gz = w.ground_at(vp[:, 0], vp[:, 1])
-check("forklifts start on drivable ground",
+check("tanks start on drivable ground",
       float(w.is_drivable(vp[:, 0], vp[:, 1]).float().mean()) > 0.8,
       f"{100*float(w.is_drivable(vp[:, 0], vp[:, 1]).float().mean()):.0f}%")
-check("forklifts start inside the arena", float(vp[:, :2].abs().max()) <= args.arena + 1.0)
+check("tanks start inside the arena", float(vp[:, :2].abs().max()) <= args.arena + 1.0)
 print(f"       roles: {[ROLES[int(i)][0] for i in env.driver.role.tolist()]}", flush=True)
 
 # --- step it under a random policy, biased forward so the drones actually fly
-zs, spd, agl, touches, crashes, nose_err, seen_frac, in_safe, exits = [], [], [], 0, 0, [], [], 0, []
+zs, spd, agl, detonations, hits, crashes, nose_err, seen_frac, in_safe, exits = (
+    [], [], [], 0, 0, 0, [], [], 0, [])
 was_in = None
 torch.manual_seed(0)
 t0 = time.time()
@@ -157,7 +158,8 @@ for i in range(args.steps):
         zs.append((v[:, 2] - w.ground_at(v[:, 0], v[:, 1])).clone())
         spd.append(env._vehicles.data.root_lin_vel_w[:, :2].norm(dim=1).clone())
         agl.append(info["agl"].clone())
-        touches += int(info["touch"].sum()) + int(info["touch_protected"].sum())
+        detonations += int(info["detonated"].sum())
+        hits += int(info["hit"].sum())
         crashes += int(info["crash"].sum())
         dv = env._robot.data.root_lin_vel_w
         fast = dv[:, :2].norm(dim=1) > 4.0
@@ -179,23 +181,23 @@ if args.camera:
     print(f"       peak VRAM: {torch.cuda.max_memory_allocated()/1e9:.2f} GB", flush=True)
 
 z = torch.cat(zs)
-check("forklifts ride the terrain", -0.5 < float(z.mean()) < 3.5 and float(z.std()) < 2.0,
+check("tanks ride the terrain", -0.5 < float(z.mean()) < 3.5 and float(z.std()) < 2.0,
       f"height above ground mean {float(z.mean()):.2f} std {float(z.std()):.2f}")
-check("no forklift falls through or launches", float(z.min()) > -3.0 and float(z.max()) < 25.0,
+check("no tank falls through or launches", float(z.min()) > -3.0 and float(z.max()) < 25.0,
       f"[{float(z.min()):.1f}, {float(z.max()):.1f}] m")
 s = torch.cat(spd)
-check("driving forklifts move", float(s.max()) > 2.0, f"max ground speed {float(s.max()):.1f} m/s")
+check("driving tanks move", float(s.max()) > 2.0, f"max ground speed {float(s.max()):.1f} m/s")
 if nose_err:
     ne = torch.cat(nose_err)
     check("the nose follows the velocity", float(ne.median()) < 0.5,
           f"median heading error {float(ne.median()):.2f} rad")
 else:
     print("[SKIP] never fast enough to judge the heading follow", flush=True)
-check("the contact sensor fires on something", touches + crashes > 0,
-      f"{touches} touches, {crashes} crashes under a random policy")
+check("detonations and contacts produce events", detonations + crashes > 0,
+      f"{detonations} detonations, {hits} tank hits, {crashes} crashes under a random policy")
 v = float(torch.stack(seen_frac).mean())
-check("the camera denies most forklifts most of the time", 0.0 <= v < 0.5,
-      f"{100*v:.1f}% of forklift-steps in frame (this is a search, not a chase)")
+check("the camera denies most tanks most of the time", 0.0 <= v < 0.5,
+      f"{100*v:.1f}% of tank-steps in frame (this is a search, not a chase)")
 print(f"       drone AGL over the run: mean {float(torch.cat(agl).mean()):.0f} m", flush=True)
 
 if float(w.safe.sum()) > 0:

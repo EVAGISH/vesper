@@ -3,7 +3,7 @@
 The search policy's reward, the vehicles' driver and the geometric sensor all
 reason about terrain, buildings, tree cover and roads without loading USD:
 where the ground is, what blocks line of sight, what attenuates it, where a
-forklift can drive and park. All of that is baked here, once, into rasters on
+tank can drive and park. All of that is baked here, once, into rasters on
 the terrain's own grid.
 
     python3 scripts/export_world_map.py assets/cornell/cornell.usd
@@ -15,7 +15,7 @@ Writes <world>_map.npz (float32 rasters) + <world>_map.json (metadata):
   canopy_d    (n,n)  canopy density 0..1 (how much of the cell a crown covers)
   drivable    (n,n)  uint8: gentle slope, no building, no water -- where a vehicle spawns
   concealed   (n,n)  uint8: drivable AND under canopy -- where a *hidden* vehicle spawns
-  road        (n,n)  uint8: paved road a forklift would use (from the site's OSM dump)
+  road        (n,n)  uint8: paved road a tank would use (from the site's OSM dump)
   road_yaw    (n,n)  road direction, radians in [0, pi)
   parking     (n,n)  uint8: drivable strip a few metres off a building wall
   park_yaw    (n,n)  heading parallel to that wall, radians in [0, pi)
@@ -233,7 +233,7 @@ def main():
     drivable[:m] = drivable[-m:] = drivable[:, :m] = drivable[:, -m:] = 0
     concealed = (drivable & (dens > a.conceal_density)).astype(np.uint8)
     if solid_trees:
-        # under canopy but not in the thick of it: a crawling forklift needs a gap
+        # under canopy but not in the thick of it: a crawling tank needs a gap
         concealed &= (trunks <= 1).astype(np.uint8)
     print(f"drivable {drivable.sum()} cells ({100*drivable.mean():.0f}%), "
           f"concealed {concealed.sum()} cells ({100*concealed.mean():.1f}%)")

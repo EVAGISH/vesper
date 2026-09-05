@@ -14,7 +14,7 @@ over *environments* instead.
             from the stored initial state, backpropagating through the whole
             window (truncated BPTT). Advantages are GAE over the same window.
   aux       the belief head is supervised on the true relative vector to the
-            nearest forklift, but only on steps where one was actually in
+            nearest tank, but only on steps where one was actually in
             frame -- otherwise it would be asked to hallucinate.
 
 Frames dominate memory: at 96 px a step costs ~45 kB per environment (uint8
@@ -85,7 +85,7 @@ class RecurrentPPO:
         }
         h0 = self.h.clone()
         ep_ret = torch.zeros(N, device=dev)
-        rets, touches, ttt = [], [], []
+        rets, hits, tth = [], [], []
         extra = {k: [] for k in c.track}
         for t in range(T):
             px, dp, pr, pv = self._split(obs)
@@ -107,11 +107,11 @@ class RecurrentPPO:
             ep_ret += rew
             for i in torch.nonzero(done).flatten().tolist():
                 rets.append(ep_ret[i].item())
-                if info is not None and "touch" in info:
-                    touches.append(float(info["touch"][i].item()))
-                    v = float(info["time_to_touch"][i].item())
+                if info is not None and "hit" in info:
+                    hits.append(float(info["hit"][i].item()))
+                    v = float(info["time_to_hit"][i].item())
                     if v == v:
-                        ttt.append(v)
+                        tth.append(v)
                 for k in extra:
                     if info is not None and k in info:
                         v = float(info[k][i].item())
@@ -121,7 +121,7 @@ class RecurrentPPO:
         with torch.no_grad():
             px, dp, pr, pv = self._split(obs)
             _, last_v, _, _ = self.ac(px, dp, self.norm(pr), self.h, priv=self.priv_norm(pv), done=done)
-        return obs, done, buf, h0, last_v, rets, touches, ttt, extra
+        return obs, done, buf, h0, last_v, rets, hits, tth, extra
 
     def _split(self, obs):
         px = obs["pixels"]
@@ -129,7 +129,7 @@ class RecurrentPPO:
         return px, dp, obs["policy"], obs["privileged"]
 
     def _belief_target(self, info):
-        """(relative vector to the nearest *visible* forklift / 100 m, mask)."""
+        """(relative vector to the nearest *visible* tank / 100 m, mask)."""
         N, dev = self.env.num_envs, self.device
         if info is None or "belief_target" not in info:
             return torch.zeros(N, 3, device=dev), torch.zeros(N, device=dev)
@@ -207,13 +207,13 @@ class RecurrentPPO:
         done = torch.zeros(N, dtype=torch.bool, device=self.device)
         history = []
         for it in range(iterations):
-            obs, done, buf, h0, last_v, rets, touches, ttt, extra = self._rollout(obs, done)
+            obs, done, buf, h0, last_v, rets, hits, tth, extra = self._rollout(obs, done)
             stats = self.update(buf, h0, last_v, done.float())
             self.h = self.h.detach()
             row = {"iter": it,
                    "ep_return": sum(rets) / len(rets) if rets else float("nan"),
-                   "touch_rate": sum(touches) / len(touches) if touches else float("nan"),
-                   "time_to_touch": sum(ttt) / len(ttt) if ttt else float("nan"),
+                   "hit_rate": sum(hits) / len(hits) if hits else float("nan"),
+                   "time_to_hit": sum(tth) / len(tth) if tth else float("nan"),
                    "episodes": len(rets),
                    **{k: (sum(v) / len(v) if v else float("nan")) for k, v in extra.items()},
                    **stats}

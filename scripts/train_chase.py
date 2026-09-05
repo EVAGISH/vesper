@@ -1,4 +1,4 @@
-"""Train the end-to-end vision policy: camera in, touch a forklift, fast.
+"""Train the end-to-end vision policy: camera in, detonate near a tank, fast.
 
     /isaac-sim/python.sh scripts/train_chase.py --num_envs 128 --iters 3000 \
         --headless --enable_cameras
@@ -30,7 +30,7 @@ parser.add_argument("--targets", type=int, default=12)
 parser.add_argument("--arena", type=float, default=590.0)
 parser.add_argument("--arena_start", type=float, default=None,
                     help="curriculum: begin here and grow to --arena over --arena_iters, so the "
-                         "first touches are found in a small box")
+                         "first hits are found in a small box")
 parser.add_argument("--arena_iters", type=int, default=800)
 parser.add_argument("--episode_s", type=float, default=90.0)
 parser.add_argument("--res", type=int, default=96)
@@ -90,7 +90,7 @@ if args.zones:
 cfg.geofence = args.geofence
 
 env = ChaseEnv(cfg, seed=args.seed)
-track = ("crash", "oob", "flip", "seen")
+track = ("miss", "crash", "oob", "flip", "seen")
 
 
 class Adapter:
@@ -117,7 +117,7 @@ else:
     trainer = RecurrentPPO(env, RPPOCfg(horizon=args.horizon, lr=args.lr, gamma=args.gamma, track=track),
                            device=env.device, seed=args.seed, res=args.res)
     net = trainer.ac
-    rate_key = "touch_rate"
+    rate_key = "hit_rate"
 if args.resume:
     ck = torch.load(args.resume, map_location=env.device)
     net.load_state_dict(ck["ac"])
@@ -140,7 +140,7 @@ cap.note(num_envs=args.num_envs, iters=args.iters, targets=args.targets, arena=a
          mode="teacher" if args.teacher else "vision", res=args.res, params=n_par,
          zones=env.zones_path)
 curve = open(cap.dir / "curve.jsonl", "w")
-print(f"train: {args.num_envs} envs x {args.iters} iters, {args.targets} forklifts in a "
+print(f"train: {args.num_envs} envs x {args.iters} iters, {args.targets} tanks in a "
       f"{2*args.arena:.0f} m box -> {cap.dir}", flush=True)
 
 t0 = time.time()
@@ -153,10 +153,12 @@ def log(row):
     steps = (row["iter"] + 1) * args.horizon * args.num_envs
     sps = steps / (time.time() - t0 + 1e-9)
     rate = row.get(rate_key, float("nan"))
-    print(f"it {row['iter']:5d} | ret {row['ep_return']:8.1f} | touch {rate:.2f} "
-          f"| t {row.get('time_to_touch', float('nan')):5.1f}s | seen {row.get('seen', float('nan')):.2f} "
+    print(f"it {row['iter']:5d} | ret {row['ep_return']:8.1f} | hit {rate:.2f} "
+          f"| t {row.get('time_to_hit', row.get('time_to_intercept', float('nan'))):5.1f}s "
+          f"| seen {row.get('seen', float('nan')):.2f} "
           f"| box {2*env.task.cfg.arena_half:.0f}m "
-          f"| crash {row.get('crash', float('nan')):.2f} oob {row.get('oob', float('nan')):.2f} "
+          f"| miss {row.get('miss', float('nan')):.2f} crash {row.get('crash', float('nan')):.2f} "
+          f"oob {row.get('oob', float('nan')):.2f} "
           f"| eps {row['episodes']:5d} | {sps/1e3:.1f}k step/s", flush=True)
     score = rate
     if score == score and score >= best:
@@ -189,9 +191,10 @@ def avg(key):
 
 summary = {"iters": args.iters, "wall_s": round(time.time() - t0), "envs": args.num_envs,
            "mode": "teacher" if args.teacher else "vision", "params": n_par,
-           "mean_return": avg("ep_return"), "touch_rate": avg(rate_key),
-           "time_to_touch_s": avg("time_to_touch"), "seen": avg("seen"),
-           "crash": avg("crash"), "oob": avg("oob"), "best_touch_rate": round(best, 3),
+           "mean_return": avg("ep_return"), "hit_rate": avg(rate_key),
+           "time_to_hit_s": avg("time_to_hit" if not args.teacher else "time_to_intercept"),
+           "seen": avg("seen"), "miss": avg("miss"), "crash": avg("crash"), "oob": avg("oob"),
+           "best_hit_rate": round(best, 3),
            "policy": str(cap.dir / "chase.pt")}
 print("DONE " + json.dumps(summary), flush=True)
 (cap.dir / "summary.json").write_text(json.dumps(summary, indent=1))

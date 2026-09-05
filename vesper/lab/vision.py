@@ -6,7 +6,7 @@ RGB + depth (four channels at 96 px), and the airframe's own instruments
 
 Why this shape, and why a GRU (see the design notes in STEPS.md, Step 11):
 
-  * a single frame says where a forklift is *now*; the task needs it to be
+  * a single frame says where a tank is *now*; the task needs it to be
     remembered through the seconds it is out of frame (a bank, a tree
     crown, the final dive under the nose), needs range from how fast it grows
     across frames, and needs to know where it has already looked before the
@@ -23,8 +23,8 @@ Sized for the airframe: ~1.4M parameters, ~17M multiply-adds per frame.
   memory    GRU(288 -> 256), carried across the episode, zeroed on reset
   actor     256 -> 128 -> 3 (mean) + learned log-std
   belief    256 -> 3: the true relative target vector (scaled), supervised
-            whenever a forklift is in frame. Gives the recurrent state a
-            reason to hold the target long before the touch reward can.
+            whenever a tank is in frame. Gives the recurrent state a reason to
+            hold the target long before the sparse hit reward can.
   critic    [256, privileged] -> 256 -> 1 (asymmetric: the critic may see
             the truth, the actor never does -- STACK.md section 4)
 

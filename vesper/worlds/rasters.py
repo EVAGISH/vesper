@@ -28,8 +28,8 @@ DEFAULT_H, DEFAULT_CROWN = 10.0, 0.35
 # capsule in vesper.worlds.geo, so PhysX and the map agree on the trunk.
 TRUNK_R, TRUNK_TOP = 0.025, 0.60      # trunk radius, trunk collider top
 
-# Roads a forklift would use, with a paved width in metres. Footways, steps and
-# paths are left out on purpose: a 1.2 m wide, 2.7 t forklift does not take the
+# Roads a tank can use, with a paved width in metres. Footways, steps and paths
+# are left out on purpose: a full-width tracked vehicle does not take the
 # stairs, and on a campus the footway graph is denser than the road graph.
 ROAD_WIDTH_M = {"motorway": 14.0, "trunk": 12.0, "primary": 11.0, "secondary": 10.0,
                 "tertiary": 8.0, "unclassified": 7.0, "residential": 7.0, "service": 5.5,

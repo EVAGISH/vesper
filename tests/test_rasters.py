@@ -15,7 +15,7 @@ def test_roads_are_buffered_to_class_width_and_carry_a_direction():
              (LineString([(0, -80), (0, 80)]), {"highway": "footway"})]      # ignored
     mask, yaw = rasterize_roads(roads, n, half, cell)
     assert mask[50, 50] == 1 and mask[50, 10] == 1
-    assert mask[20, 50] == 0, "footways are not roads for a forklift"
+    assert mask[20, 50] == 0, "footways are not roads for a tank"
     rows = np.flatnonzero(mask[:, 30])
     assert 2 <= len(rows) <= 4                                 # ~5.5 m wide at 2 m cells
     assert yaw[50, 30] == pytest.approx(0.0, abs=1e-4)

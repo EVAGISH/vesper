@@ -2,7 +2,7 @@
 
 The pursuit task (vesper.lab.pursuit_task) hands the policy a relative vector to
 its target every step. That is a homing problem, not a search problem. Here the
-drone starts somewhere random over a real 1.2 km site with several forklifts
+drone starts somewhere random over a real 1.2 km site with several tanks
 scattered across it -- some driving in the open, some parked under tree canopy,
 some painted to blend in -- and the only way it learns where any of them are is
 by looking.
@@ -83,7 +83,7 @@ class SearchCfg:
 
     # --- success / failure geometry ---
     reach_radius: float = 10.0         # 3D range to a vehicle that counts as reaching it
-                                       # (the forklift is 3.5 m long; 8 m is 'arrived at it',
+                                       # (the tank is several metres long; 8 m is 'arrived at it',
                                        #  and it is what makes the first reaches happen at all)
     min_clearance: float = 1.5         # below solid_top + this (and not reaching) = crash
     tilt_limit: float = 1.4            # rad from upright
