@@ -8,6 +8,7 @@ track.png, trajectory.parquet, scenario.json); no state of its own. Videos are
 served with HTTP Range support so <video> can stream and scrub.
 """
 import json
+import math
 import os
 import re
 import subprocess
@@ -335,7 +336,9 @@ def models():
                 lines = [ln for ln in curve.read_text().splitlines() if ln.strip()]
                 if lines:
                     last = json.loads(lines[-1])
-                    metrics = {k: v for k, v in last.items() if isinstance(v, (int, float))}
+                    # drop NaN/Inf -- not JSON-compliant, and they'd 500 the whole response
+                    metrics = {k: v for k, v in last.items()
+                               if isinstance(v, (int, float)) and math.isfinite(v)}
             except (json.JSONDecodeError, UnicodeDecodeError, OSError):
                 pass
         for f in sorted(d.glob("*.pt")):
