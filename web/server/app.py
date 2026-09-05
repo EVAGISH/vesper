@@ -20,7 +20,7 @@ import urllib.request
 from pathlib import Path
 
 import pyarrow.parquet as pq
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel
 
@@ -192,6 +192,90 @@ def build_environment(req: EnvBuildReq):
     threading.Thread(target=_run_env_build,
                      args=(req.name, req.lat, req.lon, req.half_km), daemon=True).start()
     return {"name": req.name, "status": "running"}
+
+
+def _run_reconstruct(name: str, half_km: float) -> None:
+    """photos -> OpenDroneMap (DSM+ortho) on the box -> --dsm surface-model world.
+    Needs the GPU box up (ODM is heavy); the world syncs back when done."""
+    logf = _env_log(name)
+    src = ROOT / "assets" / name / "src_images"
+
+    def log(msg):
+        with open(logf, "a") as f:
+            f.write(msg + "\n")
+
+    try:
+        ip = _droplet_ip()
+        if not ip:
+            log("GPU box is down -- relaunch it (infra/do/launch.sh), then re-run.")
+            ENV_BUILDS[name].update(status="needs_box", finished=time.time())
+            return
+        ssh = f"ssh -i {KEY_FILE} -o StrictHostKeyChecking=accept-new"
+        remote = f"/root/photogrammetry/{name}"
+        log(f"uploading images to the box ({ip})...")
+        subprocess.run(["ssh", "-i", KEY_FILE, f"root@{ip}",
+                        f"mkdir -p {remote}/images"], timeout=60)
+        subprocess.run(["rsync", "-az", "-e", ssh, f"{src}/",
+                        f"root@{ip}:{remote}/images/"], timeout=1800, check=True)
+        log("running OpenDroneMap (photogrammetry -- 20-60 min)...")
+        odm = (f"docker run --rm -v /root/photogrammetry:/datasets opendronemap/odm "
+               f"--project-path /datasets {name} --dsm --fast-orthophoto --skip-report")
+        r = subprocess.run(["ssh", "-i", KEY_FILE, f"root@{ip}", odm],
+                           capture_output=True, text=True, timeout=14400)
+        dsm_remote = f"{remote}/odm_dem/dsm.tif"
+        rc = subprocess.run(["ssh", "-i", KEY_FILE, f"root@{ip}",
+                             f"test -f {dsm_remote} && echo ok"], capture_output=True, text=True)
+        if "ok" not in rc.stdout:
+            log("ODM produced no DSM -- images likely lack overlap/coverage.")
+            ENV_BUILDS[name].update(status="failed", finished=time.time())
+            return
+        log("reconstruction done; pulling DSM + ortho...")
+        dst = ROOT / "assets" / name
+        subprocess.run(["rsync", "-az", "-e", ssh,
+                        f"root@{ip}:{dsm_remote}",
+                        f"root@{ip}:{remote}/odm_orthophoto/odm_orthophoto.tif",
+                        f"{dst}/"], timeout=1800)
+        log("building the USD world from the reconstruction...")
+        p = subprocess.run(
+            [sys.executable, "scripts/build_geo_world.py", name,
+             "--lat", "0", "--lon", "0", "--half-km", str(half_km),
+             "--dsm", f"assets/{name}/dsm.tif",
+             "--ortho", f"assets/{name}/odm_orthophoto.tif", "--surface-model"],
+            cwd=ROOT, capture_output=True, text=True, timeout=1800)
+        with open(logf, "a") as f:
+            f.write(p.stdout[-2000:] + "\n" + p.stderr[-1000:] + "\n")
+        ok = (ROOT / "assets" / name / f"{name}.usd").exists()
+        if ok:
+            subprocess.run(["rsync", "-az", "-e", ssh, str(ROOT / "assets" / name),
+                            f"root@{ip}:{REMOTE_DIR}/assets/"], timeout=900)
+            subprocess.run(["rsync", "-az", "-e", ssh, str(ROOT / f"{name}0.json"),
+                            f"root@{ip}:{REMOTE_DIR}/"], timeout=120)
+        ENV_BUILDS[name].update(status="done" if ok else "failed", finished=time.time())
+    except Exception as e:                                  # noqa: BLE001
+        log(f"error: {e}")
+        ENV_BUILDS[name].update(status="failed", finished=time.time())
+
+
+@app.post("/api/environments/reconstruct")
+async def reconstruct_environment(name: str = Form(...), half_km: float = Form(0.3),
+                                  files: list[UploadFile] = File(...)):
+    if not SITE_NAME.match(name):
+        raise HTTPException(400, "name: lowercase letter then letters/digits/underscore")
+    imgs = [f for f in files if (f.filename or "").lower().endswith((".jpg", ".jpeg", ".png", ".tif", ".tiff"))]
+    if len(imgs) < 8:
+        raise HTTPException(400, "need at least ~8 overlapping photos to reconstruct")
+    if ENV_BUILDS.get(name, {}).get("status") == "running":
+        raise HTTPException(409, "already processing")
+    src = ROOT / "assets" / name / "src_images"
+    src.mkdir(parents=True, exist_ok=True)
+    for i, f in enumerate(imgs):
+        ext = Path(f.filename or f"img{i}.jpg").suffix or ".jpg"
+        (src / f"{i:04d}{ext}").write_bytes(await f.read())
+    _env_log(name).write_text(f"received {len(imgs)} photos\n")
+    ENV_BUILDS[name] = {"status": "running", "started": time.time(), "finished": None,
+                        "mode": "photogrammetry"}
+    threading.Thread(target=_run_reconstruct, args=(name, half_km), daemon=True).start()
+    return {"name": name, "status": "running", "photos": len(imgs)}
 
 
 @app.get("/api/environments")

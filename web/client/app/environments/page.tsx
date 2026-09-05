@@ -159,6 +159,76 @@ function AddEnvironment({ onSubmitted }: { onSubmitted: () => void }) {
   );
 }
 
+function ReconstructFromPhotos({ onSubmitted }: { onSubmitted: () => void }) {
+  const [name, setName] = useState("");
+  const [files, setFiles] = useState<FileList | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState<string | null>(null);
+
+  const submit = async () => {
+    if (!files || files.length < 8) { setMsg("select at least ~8 overlapping photos"); return; }
+    setBusy(true); setMsg(null);
+    try {
+      const fd = new FormData();
+      fd.append("name", name.trim());
+      fd.append("half_km", "0.3");
+      Array.from(files).forEach((f) => fd.append("files", f));
+      const r = await fetch("/api/environments/reconstruct", { method: "POST", body: fd });
+      if (!r.ok) throw new Error((await r.json()).detail || "upload failed");
+      setName(""); setFiles(null);
+      setMsg("uploaded — reconstructing (needs the GPU box up; ~20–60 min)");
+      onSubmitted();
+    } catch (e) {
+      setMsg(e instanceof Error ? e.message : "upload failed");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const ready = /^[a-z][a-z0-9_]{1,31}$/.test(name.trim()) && files && files.length >= 8;
+
+  return (
+    <section className="hud-corners rounded-lg border border-border bg-card">
+      <h3 className="flex items-center border-b border-border px-3 py-1.5 font-mono text-[10px] font-semibold uppercase tracking-[0.14em] text-secondary-foreground">
+        <span className="mr-1.5 text-muted-foreground">▮</span>Reconstruct from photos
+        <span className="ml-auto font-normal normal-case tracking-normal text-muted-foreground">
+          drone footage → OpenDroneMap → world
+        </span>
+      </h3>
+      <div className="flex flex-wrap items-end gap-3 p-3">
+        <label className="flex min-w-[140px] flex-1 flex-col gap-1">
+          <span className="font-mono text-[10px] uppercase tracking-widest text-muted-foreground">name</span>
+          <input
+            value={name} placeholder="recon_site"
+            onChange={(e) => setName(e.target.value)}
+            className="rounded border border-border bg-background px-2 py-1.5 font-mono text-xs text-foreground outline-none focus:border-[#3987e5]"
+          />
+        </label>
+        <label className="flex flex-col gap-1">
+          <span className="font-mono text-[10px] uppercase tracking-widest text-muted-foreground">
+            photos {files ? `(${files.length})` : ""}
+          </span>
+          <input
+            type="file" multiple accept="image/*"
+            onChange={(e) => setFiles(e.target.files)}
+            className="text-xs text-muted-foreground file:mr-2 file:cursor-pointer file:rounded file:border file:border-border file:bg-secondary file:px-2 file:py-1 file:text-xs file:text-foreground"
+          />
+        </label>
+        <Button
+          size="sm" disabled={!ready || busy} onClick={submit}
+          className="h-8 cursor-pointer px-3 font-mono text-[11px] tracking-[0.08em]"
+        >
+          {busy ? "UPLOADING…" : "▶ RECONSTRUCT"}
+        </Button>
+      </div>
+      {msg && <div className="px-3 pb-2 text-[11px] text-muted-foreground">{msg}</div>}
+      <div className="px-3 pb-3 text-[11px] text-muted-foreground">
+        Overlapping (~70%) drone shots reconstruct best; nadir gives terrain, oblique/orbit adds facades.
+      </div>
+    </section>
+  );
+}
+
 function EnvCard({ e }: { e: Environment }) {
   const building = e.build_status === "running";
   const failed = e.build_status === "failed";
@@ -230,8 +300,9 @@ export default function Environments() {
           add any place on earth, then fly or train in it on the box
         </span>
       </div>
-      <div className="mb-3">
+      <div className="mb-3 grid grid-cols-1 gap-3 lg:grid-cols-2">
         <AddEnvironment onSubmitted={load} />
+        <ReconstructFromPhotos onSubmitted={load} />
       </div>
       {envs === null ? (
         <div className="p-10 text-center text-muted-foreground">Loading…</div>
