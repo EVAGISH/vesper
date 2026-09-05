@@ -229,7 +229,9 @@ function ReconstructFromPhotos({ onSubmitted }: { onSubmitted: () => void }) {
   );
 }
 
-function EnvCard({ e }: { e: Environment }) {
+function EnvCard({ e, active, onActivate }: {
+  e: Environment; active: boolean; onActivate: (name: string) => void;
+}) {
   const building = e.build_status === "running";
   const failed = e.build_status === "failed";
   return (
@@ -240,6 +242,11 @@ function EnvCard({ e }: { e: Environment }) {
           style={{ background: building ? "#eda100" : failed ? "#d03b3b" : "#199e70" }}
         />
         {e.name.replace(/_/g, " ")}
+        {active && (
+          <span className="ml-2 rounded bg-[#199e70]/20 px-1.5 font-mono text-[9px] text-[#199e70]">
+            ● ACTIVE
+          </span>
+        )}
         {e.mb != null && (
           <span className="ml-auto font-normal normal-case tracking-normal text-muted-foreground">
             {e.mb} MB{e.map ? " · trainable" : ""}
@@ -260,6 +267,14 @@ function EnvCard({ e }: { e: Environment }) {
           <div className="text-xs text-[#d03b3b]">build failed — check server log</div>
         ) : (
           <div className="flex flex-wrap gap-2">
+            {!active && (
+              <Button
+                size="sm" variant="secondary" onClick={() => onActivate(e.name)}
+                className="h-7 cursor-pointer px-3 font-mono text-[11px] tracking-[0.08em]"
+              >
+                ◉ USE THIS
+              </Button>
+            )}
             {e.scenario && (
               <JobButton label="▶ FLY MISSION" body={{ kind: "mission", scenario: e.scenario }} />
             )}
@@ -283,14 +298,20 @@ function EnvCard({ e }: { e: Environment }) {
 
 export default function Environments() {
   const [envs, setEnvs] = useState<Environment[] | null>(null);
+  const [active, setActive] = useState<string | null>(null);
   const load = useCallback(() => {
     fetchJSON<Environment[]>("/api/environments").then((d) => d && setEnvs(d));
+    fetchJSON<{ name: string } | null>("/api/active").then((d) => setActive(d?.name ?? null));
   }, []);
   useEffect(() => {
     load();
     const id = setInterval(load, POLL_MS);
     return () => clearInterval(id);
   }, [load]);
+
+  const activate = useCallback((name: string) => {
+    postJSON("/api/active", { name }).then(() => { setActive(name); }).catch(() => {});
+  }, []);
 
   return (
     <main className="min-h-0 flex-1 overflow-y-auto p-4">
@@ -312,7 +333,9 @@ export default function Environments() {
         </div>
       ) : (
         <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3">
-          {envs.map((e) => <EnvCard key={e.name} e={e} />)}
+          {envs.map((e) => (
+            <EnvCard key={e.name} e={e} active={e.name === active} onActivate={activate} />
+          ))}
         </div>
       )}
     </main>

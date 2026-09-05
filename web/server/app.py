@@ -566,6 +566,56 @@ def sync_runs():
 
 
 # ---------------------------------------------------------------- site map
+ACTIVE_FILE = ROOT / ".vesper_active.json"
+
+
+class ActiveReq(BaseModel):
+    name: str
+
+
+def _site_entry(world: str) -> dict:
+    d = ASSETS / world
+    half = None
+    mj = d / f"{world}_map.json"
+    if mj.exists():
+        try:
+            half = json.loads(mj.read_text()).get("half_m")
+        except (OSError, json.JSONDecodeError):
+            pass
+    return {
+        "name": world, "world": world, "half_m": half,
+        "ground": f"/site/{world}/ground" if (d / "ground.png").exists() else None,
+        "scenario": f"{world}0.json" if (ROOT / f"{world}0.json").exists() else None,
+        "usd": f"assets/{world}/{world}.usd" if (d / f"{world}.usd").exists() else None,
+        "map": f"assets/{world}/{world}_map.npz" if (d / f"{world}_map.npz").exists() else None,
+    }
+
+
+@app.get("/api/active")
+def get_active():
+    """The environment the app is working with (map, live overlay, job defaults).
+    Falls back to the first built world so the map is never empty."""
+    name = None
+    if ACTIVE_FILE.exists():
+        try:
+            name = json.loads(ACTIVE_FILE.read_text()).get("name")
+        except (OSError, json.JSONDecodeError):
+            pass
+    if not name or not (ASSETS / name / f"{name}.usd").exists():
+        cands = [d.name for d in sorted(ASSETS.iterdir())
+                 if d.is_dir() and (d / f"{d.name}.usd").exists()] if ASSETS.is_dir() else []
+        name = cands[0] if cands else None
+    return _site_entry(name) if name else None
+
+
+@app.post("/api/active")
+def set_active(req: ActiveReq):
+    if not SITE_NAME.match(req.name) or not (ASSETS / req.name / f"{req.name}.usd").exists():
+        raise HTTPException(404, "no such world")
+    ACTIVE_FILE.write_text(json.dumps({"name": req.name}))
+    return _site_entry(req.name)
+
+
 @app.get("/api/site")
 def site():
     """Worlds with a baked map: extent metadata + the ground ortho for map views."""
