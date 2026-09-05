@@ -25,6 +25,10 @@ from pathlib import Path
 import numpy as np
 import torch
 
+# comms signal at or above this counts as a live link (mirrored torch-free in
+# scripts/export_world_map.py's printed connected fraction)
+LINK_THRESHOLD = 0.35
+
 
 class WorldMap:
     FIELDS = ("ground_z", "obstacle_z", "canopy_z", "canopy_d")
@@ -45,6 +49,11 @@ class WorldMap:
         self.tree_z = (torch.as_tensor(np.asarray(d["tree_z"], np.float32), device=device)
                        if "tree_z" in d.files else self.ground_z)
         self.has_tree_solids = "tree_z" in d.files
+        # RF coverage from the fixed base station(s), baked at export time; an
+        # older map without it means "connected everywhere" (no comms play)
+        self.comms = (torch.as_tensor(np.asarray(d["comms"], np.float32), device=device)
+                      if "comms" in d.files else torch.ones_like(self.ground_z))
+        self.has_comms = "comms" in d.files
         self.n = int(self.ground_z.shape[0])
         # zones default to "launch anywhere, nothing protected"; attach_zones overrides
         self.launch = torch.ones_like(self.ground_z)
@@ -93,6 +102,10 @@ class WorldMap:
 
     def canopy_density_at(self, x, y):
         return self.sample(self.canopy_d, x, y)
+
+    def comms_at(self, x, y):
+        """RF signal strength 0..1 at world xy; >= LINK_THRESHOLD is a live link."""
+        return self.sample(self.comms, x, y)
 
     def nearest_cell(self, x, y):
         c, r = self._uv(x, y)

@@ -21,11 +21,18 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 const POLL_MS = 150;
 const MASK = 1024; // offscreen coverage resolution (world-space, ±half)
 const ACCENT = "#0ca30c";
+const LINK_BLUE = "#3b8dff"; // confirmed-connectivity layer (distinct from search green)
 
-type SDrone = { x: number; y: number; z: number; q?: number[] };
+type SDrone = { x: number; y: number; z: number; q?: number[]; linked?: boolean };
 type SVehicle = {
   x: number; y: number; z?: number; hdg?: number; found: boolean; reached: boolean;
+  // sighted by the drone but not yet relayed (it was jammed at the time); the
+  // operator's map intentionally does NOT show these until the report lands
+  pending?: boolean;
 };
+// mission-accumulated connectivity map over the AO (±half m): one digit per
+// cell — 0 unknown, 1 confirmed link, 2 confirmed dead zone; row 0 = south
+type SComms = { n: number; half: number; grid: string; denied_frac?: number };
 type State = {
   t: number;
   world?: string;
@@ -34,6 +41,9 @@ type State = {
   found: number;
   reached: number;
   targets: number;
+  pending?: number;
+  comms?: SComms;
+  comms_denied?: number;
   drones: SDrone[];
   vehicles: SVehicle[];
 };
@@ -130,6 +140,12 @@ export function TacticalView({ ip }: { ip: string }) {
   const detRef = useRef<Map<number, Det>>(new Map());
   const covRef = useRef<HTMLCanvasElement | null>(null); // coverage mask (world space)
   const fogRef = useRef<HTMLCanvasElement | null>(null); // per-frame viewport scratch
+  // comms layer: rebuilt from the server's revealed grid whenever it changes
+  // (server-truth, not client-synthesized like the coverage fog — the field
+  // comes from the baked raster, so only the sim knows where the dead zones are)
+  const commsRef = useRef<HTMLCanvasElement | null>(null);
+  const commsGridRef = useRef<string>("");
+  const linkPctRef = useRef(0); // % of AO cells confirmed connected (HUD)
   const sizeRef = useRef({ w: 0, h: 0, dpr: 1 });
   const focusRef = useRef({ x: 0, y: 0, at: -1e9 }); // detection focus pull
 
@@ -233,7 +249,47 @@ export function TacticalView({ ip }: { ip: string }) {
       rDronesRef.current = [];
       const cov = covRef.current;
       if (cov) cov.getContext("2d")!.clearRect(0, 0, MASK, MASK);
+      commsGridRef.current = ""; // next poll rebuilds the comms layer fresh
+      commsRef.current = null;
+      linkPctRef.current = 0;
     }
+  };
+
+  // rebuild the comms overlay canvas from the server's revealed grid. One pixel
+  // per cell, alpha baked in; render scales it up with smoothing so the coarse
+  // grid reads as soft radio coverage, not blocks.
+  const rebuildComms = (cm: SComms) => {
+    if (!cm.grid || cm.grid === commsGridRef.current) return;
+    commsGridRef.current = cm.grid;
+    let c = commsRef.current;
+    if (!c || c.width !== cm.n) {
+      c = document.createElement("canvas");
+      c.width = cm.n;
+      c.height = cm.n;
+      commsRef.current = c;
+    }
+    const ctx = c.getContext("2d")!;
+    const img = ctx.createImageData(cm.n, cm.n);
+    let connected = 0;
+    for (let r = 0; r < cm.n; r++) {
+      const ir = cm.n - 1 - r; // grid row 0 = south; image row 0 = top (north)
+      for (let col = 0; col < cm.n; col++) {
+        const v = cm.grid.charCodeAt(r * cm.n + col) - 48;
+        const o = (ir * cm.n + col) * 4;
+        if (v === 1) {
+          // confirmed link: cool blue wash
+          img.data[o] = 59; img.data[o + 1] = 141; img.data[o + 2] = 255;
+          img.data[o + 3] = 84;
+          connected++;
+        } else if (v === 2) {
+          // confirmed dead zone: faint warm dark — visible, never shouting
+          img.data[o] = 224; img.data[o + 1] = 72; img.data[o + 2] = 59;
+          img.data[o + 3] = 46;
+        }
+      }
+    }
+    ctx.putImageData(img, 0, 0);
+    linkPctRef.current = Math.round((100 * connected) / (cm.n * cm.n));
   };
 
   // an episode ended and the warm session auto-reset the lead (all targets
@@ -275,6 +331,7 @@ export function TacticalView({ ip }: { ip: string }) {
       // mission clock snapped backwards on the same world → episode rollover
       onRollover();
     }
+    if (d.comms) rebuildComms(d.comms);
     const now = performance.now();
     d.vehicles.forEach((v, i) => {
       let rec = detRef.current.get(i);
@@ -530,6 +587,20 @@ export function TacticalView({ ip }: { ip: string }) {
     const st = stateRef.current;
     const rs = rDronesRef.current;
 
+    // 2.5 ── RF connectivity: blue where the swarm has CONFIRMED a link to the
+    // base station, faint red where it has confirmed a dead zone. Server truth
+    // (the baked comms raster), revealed as the drones fly — composites over
+    // the fog so confirmed radio coverage reads even in unsearched veil.
+    const cc = commsRef.current;
+    const cm = st?.comms;
+    if (cc && cm) {
+      const ch = cm.half;
+      g.save();
+      g.imageSmoothingEnabled = true;
+      g.drawImage(cc, m.toX(-ch), m.toY(ch), 2 * ch * m.ppm, 2 * ch * m.ppm);
+      g.restore();
+    }
+
     // 3 ── lead sensor beam + footprint (where it's looking RIGHT NOW)
     const lead = rs[0];
     if (lead) {
@@ -634,6 +705,18 @@ export function TacticalView({ ip }: { ip: string }) {
         g.fill();
       }
       g.restore();
+      // link lost: amber ring + slash so a drone in a dead zone reads at a glance
+      if (st?.drones[i]?.linked === false) {
+        g.strokeStyle = "rgba(255,158,68,0.9)";
+        g.lineWidth = 1.4;
+        g.beginPath();
+        g.arc(sx, sy, 10, 0, 7);
+        g.stroke();
+        g.beginPath();
+        g.moveTo(sx - 7, sy + 7);
+        g.lineTo(sx + 7, sy - 7);
+        g.stroke();
+      }
     });
 
     // 5 ── targets + detection animation
@@ -882,10 +965,18 @@ export function TacticalView({ ip }: { ip: string }) {
               </span>
               {hud.reached >= hud.targets && hud.targets > 0 ? "AO CLEARED" : "SEARCHING"}
             </div>
+            {hud.drones[0]?.linked === false && (
+              <div className="text-[10px] uppercase tracking-[0.2em] text-amber-400/90">
+                ⚠ lead jammed · reports held
+              </div>
+            )}
             <div className="flex gap-5">
               <Stat label="FOUND" value={`${hud.found}/${hud.targets}`} accent />
               <Stat label="NEUTRALIZED" value={`${hud.reached}/${hud.targets}`} />
               <Stat label="ASSETS" value={`${hud.drones.length}`} />
+              {hud.comms && (
+                <Stat label="LINK" value={`${linkPctRef.current}% AO`} color={LINK_BLUE} />
+              )}
             </div>
           </div>
         ) : (
@@ -929,13 +1020,23 @@ export function TacticalView({ ip }: { ip: string }) {
   );
 }
 
-function Stat({ label, value, accent }: { label: string; value: string; accent?: boolean }) {
+function Stat({
+  label,
+  value,
+  accent,
+  color,
+}: {
+  label: string;
+  value: string;
+  accent?: boolean;
+  color?: string;
+}) {
   return (
     <div className="flex flex-col gap-0.5">
       <span className="text-[8.5px] uppercase tracking-[0.18em] text-white/35">{label}</span>
       <span
         className="text-[14px] font-semibold tabular-nums leading-none"
-        style={{ color: accent ? ACCENT : "rgba(234,245,234,0.92)" }}
+        style={{ color: color ?? (accent ? ACCENT : "rgba(234,245,234,0.92)") }}
       >
         {value}
       </span>

@@ -23,6 +23,15 @@ Writes <world>_map.npz (float32 rasters) + <world>_map.json (metadata):
   tree_z      (n,n)  top of the hard tree (conservative: the crown disc up to the
                      tree top) -- only written when the world's tree species carry
                      colliders; the contact sensor is what decides a real crash
+  comms       (n,n)  effective RF connectivity 0..1: base-station signal
+                     (terrain/building LOS x range falloff at a nominal drone
+                     altitude) suppressed by any jammer with line of sight --
+                     the usable pockets under jamming are the terrain shadows.
+                     Static given fixed emitters + fixed terrain, so it is
+                     baked once here; per-step is a lookup.
+  comms_stations (s,3) antenna positions (x, y, z world) of the base stations
+  jam         (n,n)  raw jammer interference 0..1 (only with --jammer)
+  comms_jammers (j,3) jammer antenna positions (only with --jammer)
 
 Only pxr + numpy + shapely, so it runs on the Mac; the rasters are what ship
 to the GPU.
@@ -170,6 +179,70 @@ def species_have_colliders(usd: Path, species_assets: set) -> bool:
     return True
 
 
+def emitter_field(solid, ground, n, half, cell, emitters_xy, mast_m, rx_agl_m,
+                  range_m, graze_m, samples=48):
+    """Received strength [0..1] per cell from the best of a set of emitters.
+
+    First-order RF, same LOS idea as WorldMap.trace but in numpy over the whole
+    grid at once: a cell receives when the ray from the emitter antenna
+    (ground + mast) to the cell at a nominal drone altitude (ground + rx_agl)
+    clears the solid raster, with a soft penalty when it grazes within
+    `graze_m` of terrain/buildings, times a quadratic range falloff to
+    `range_m`. Works for a friendly base station and for a hostile jammer
+    alike -- an emitter is an emitter; only the sign of "being reached" flips.
+    Returns (field [n,n] float32, emitters [s,3]).
+    """
+    ys = (np.arange(n, dtype=np.float64) * cell) - half           # row -> y
+    xs = (np.arange(n, dtype=np.float64) * cell) - half           # col -> x
+    rx_z = ground.astype(np.float64) + rx_agl_m
+    t = np.linspace(0.0, 1.0, samples + 2)[1:-1]                  # exclude endpoints
+    field = np.zeros((n, n), np.float64)
+    emitters = []
+    for sx, sy in emitters_xy:
+        sc = int(np.clip(round((sx + half) / cell), 0, n - 1))
+        sr = int(np.clip(round((sy + half) / cell), 0, n - 1))
+        sz = float(ground[sr, sc]) + mast_m
+        emitters.append((float(sx), float(sy), sz))
+        for r0 in range(0, n, 64):                                # chunk rows for memory
+            r1 = min(n, r0 + 64)
+            X, Y = np.meshgrid(xs, ys[r0:r1])                     # [R,n]
+            Z = rx_z[r0:r1]
+            # march emitter -> cell: [R,n,S] sample points
+            px = sx + (X[..., None] - sx) * t
+            py = sy + (Y[..., None] - sy) * t
+            pz = sz + (Z[..., None] - sz) * t
+            ci = np.clip(((px + half) / cell).round().astype(np.int32), 0, n - 1)
+            ri = np.clip(((py + half) / cell).round().astype(np.int32), 0, n - 1)
+            clearance = (pz - solid[ri, ci]).min(axis=2)          # worst point on the ray
+            los = np.clip(clearance / max(graze_m, 1e-3), 0.0, 1.0)
+            d = np.sqrt((X - sx) ** 2 + (Y - sy) ** 2 + (Z - sz) ** 2)
+            falloff = np.clip(1.0 - (d / range_m) ** 2, 0.0, 1.0)
+            np.maximum(field[r0:r1], los * falloff, out=field[r0:r1])
+    return field.astype(np.float32), np.asarray(emitters, np.float32)
+
+
+def bake_comms(solid, ground, n, half, cell, stations_xy, mast_m, rx_agl_m,
+               range_m, graze_m, jammers_xy=(), jam_mast_m=40.0, jam_range_m=None):
+    """Effective connectivity [0..1]: base-station signal degraded by jamming.
+
+    Jamming is the same physics inverted: wherever the jammer has line of sight
+    the link is suppressed, and the usable pockets are exactly the terrain
+    shadows -- valleys, the far side of hills, behind buildings -- that block
+    the jammer but still see a station. effective = signal x (1 - jam), so a
+    pocket only counts when both conditions hold at once.
+    Returns (comms, signal, jam, stations, jammers).
+    """
+    sig, stations = emitter_field(solid, ground, n, half, cell, stations_xy,
+                                  mast_m, rx_agl_m, range_m, graze_m)
+    if jammers_xy:
+        jam, jammers = emitter_field(solid, ground, n, half, cell, jammers_xy,
+                                     jam_mast_m, rx_agl_m, jam_range_m or range_m, graze_m)
+    else:
+        jam = np.zeros_like(sig)
+        jammers = np.zeros((0, 3), np.float32)
+    return (sig * (1.0 - jam)).astype(np.float32), sig, jam, stations, jammers
+
+
 def site_roads(usd: Path, osm_path: Path | None):
     """Roads from the site's cached OSM dump, in the world's local frame."""
     osm_path = osm_path or usd.with_name("osm.json")
@@ -199,6 +272,25 @@ def main():
     ap.add_argument("--max-slope-deg", type=float, default=14.0, help="drivable slope limit")
     ap.add_argument("--conceal-density", type=float, default=0.45,
                     help="canopy density above which a cell counts as concealment")
+    ap.add_argument("--comms-station", action="append", default=None, metavar="X,Y",
+                    help="base-station position in world metres; repeatable "
+                         "(default one station at the world centre)")
+    ap.add_argument("--comms-mast", type=float, default=25.0, help="antenna height above ground (m)")
+    ap.add_argument("--comms-rx-agl", type=float, default=15.0,
+                    help="nominal drone altitude the field is evaluated at (m AGL)")
+    ap.add_argument("--comms-range", type=float, default=None,
+                    help="radio range (m); default 1.6 x the world half-extent")
+    ap.add_argument("--comms-graze", type=float, default=4.0,
+                    help="rays clearing terrain by less than this are attenuated (m)")
+    ap.add_argument("--jammer", action="append", default=None, metavar="X,Y",
+                    help="hostile jammer position in world metres; repeatable. With a "
+                         "jammer the picture inverts: the AO is denied wherever the "
+                         "jammer has line of sight, and the usable pockets are the "
+                         "terrain shadows (valleys, behind hills/buildings)")
+    ap.add_argument("--jammer-mast", type=float, default=40.0, help="jammer antenna height (m)")
+    ap.add_argument("--jammer-range", type=float, default=None,
+                    help="jammer effective range (m); default 2.5 x the world half-extent "
+                         "(aggressive: LOS alone decides inside the AO)")
     a = ap.parse_args()
 
     usd = Path(a.usd).resolve()
@@ -238,6 +330,24 @@ def main():
     print(f"drivable {drivable.sum()} cells ({100*drivable.mean():.0f}%), "
           f"concealed {concealed.sum()} cells ({100*concealed.mean():.1f}%)")
 
+    # comms: what stops a ray is what stops the drone -- buildings always, hard trees too
+    solid = np.maximum(obstacle, tree_z) if solid_trees else obstacle
+    stations_xy = ([tuple(float(v) for v in s.split(",")) for s in a.comms_station]
+                   if a.comms_station else [(0.0, 0.0)])
+    jammers_xy = ([tuple(float(v) for v in s.split(",")) for s in a.jammer]
+                  if a.jammer else [])
+    comms_range = a.comms_range if a.comms_range else 1.6 * half
+    jam_range = a.jammer_range if a.jammer_range else 2.5 * half
+    comms, sig, jam, comms_stations, comms_jammers = bake_comms(
+        solid, ground, n, half, cell, stations_xy, a.comms_mast, a.comms_rx_agl,
+        comms_range, a.comms_graze, jammers_xy, a.jammer_mast, jam_range)
+    # 0.35 mirrors vesper.worlds.heightmap.LINK_THRESHOLD (kept torch-free here)
+    connected_frac = float((comms >= 0.35).mean())
+    print(f"comms: {len(stations_xy)} station(s) range {comms_range:.0f} m, "
+          f"{len(jammers_xy)} jammer(s) range {jam_range:.0f} m, "
+          f"connected {100*connected_frac:.1f}% of cells"
+          + (f" (signal alone would give {100*(sig >= 0.35).mean():.1f}%)" if jammers_xy else ""))
+
     roads = site_roads(usd, Path(a.osm) if a.osm else None)
     road, road_yaw = rasterize_roads(roads, n, half, cell)
     road &= drivable
@@ -251,7 +361,11 @@ def main():
                   ground_z=ground, obstacle_z=obstacle, canopy_z=canopy,
                   canopy_d=dens.astype(np.float32), drivable=drivable, concealed=concealed,
                   slope_deg=slope, trees=trees, road=road, road_yaw=road_yaw,
-                  parking=parking, park_yaw=park_yaw, bdist=bdist, trunks=trunks)
+                  parking=parking, park_yaw=park_yaw, bdist=bdist, trunks=trunks,
+                  comms=comms, comms_stations=comms_stations)
+    if len(comms_jammers):
+        layers["jam"] = jam                                 # raw interference, for the UI
+        layers["comms_jammers"] = comms_jammers
     if solid_trees:
         layers["tree_z"] = tree_z
     np.savez_compressed(out, **layers)
@@ -261,7 +375,13 @@ def main():
             "concealed_cells": int(concealed.sum()), "road_cells": int(road.sum()),
             "parking_cells": int(parking.sum()),
             "z_range": [float(ground.min()), float(ground.max())],
-            "max_slope_deg": a.max_slope_deg, "conceal_density": a.conceal_density}
+            "max_slope_deg": a.max_slope_deg, "conceal_density": a.conceal_density,
+            "comms": {"stations": [[float(v) for v in s] for s in comms_stations],
+                      "jammers": [[float(v) for v in s] for s in comms_jammers],
+                      "range_m": float(comms_range), "jam_range_m": float(jam_range),
+                      "mast_m": a.comms_mast, "jammer_mast_m": a.jammer_mast,
+                      "rx_agl_m": a.comms_rx_agl, "graze_m": a.comms_graze,
+                      "connected_frac": round(connected_frac, 4)}}
     out.with_suffix(".json").write_text(json.dumps(meta, indent=1))
     print(f"wrote {out} ({out.stat().st_size/1e6:.1f} MB) and {out.with_suffix('.json')}")
 

@@ -14,8 +14,14 @@ Serves on VESPER_LIVE_PORT (8180):
     GET  /streams          {"run": ..., "streams": ["fpv", "overview"]}
     GET  /fpv.mjpeg        drone 0's own camera, synthetic (task lens)
     GET  /overview.mjpeg   chase view trailing drone 0
-    GET  /state            {t, drones:[{x,y,z}], vehicles:[{x,y,found,reached}], policy, found,
-                            reached, manual, teleop_age_s}
+    GET  /state            {t, drones:[{x,y,z,linked}], vehicles:[{x,y,found,reached,pending}],
+                            policy, found, reached, pending, manual, teleop_age_s,
+                            comms_denied, comms:{n,half,grid,denied_frac}} -- `grid` is the
+                            mission's confirmed-connectivity map over the AO, one digit per
+                            cell (0 unknown, 1 confirmed link, 2 confirmed dead zone),
+                            row 0 = south, revealed as the drones fly. found/reached are
+                            RELAYED reports: a sighting made while the lead is jammed stays
+                            `pending` (off the operator's map) until it regains link
     POST /command          {"kind":"reset"} | {"kind":"deploy","policy":"runs/<id>/<f>.pt"}
                            {"kind":"manual","on":true|false}   hand drone 0 to the operator
                            {"kind":"teleop","axes":[fwd,left,up]} in [-1,1], body frame;
@@ -26,6 +32,7 @@ import math
 import os
 import time
 
+import numpy as np
 import torch
 
 from vesper.capture.live import LiveFrameServer
@@ -82,6 +89,47 @@ env = NativeSearchEnv(cfg, device=args.device, seed=args.seed)
 # world name for the client (assets/<name>/<name>_map.npz convention)
 from pathlib import Path as _P
 world_name = _P(cfg.world_map).stem.replace("_map", "")
+
+# --- comms reveal grid: the mission's confirmed-connectivity map over the AO.
+# The FIELD is static (baked raster, see export_world_map.py); what changes is
+# what the drones have CONFIRMED by flying there. A coarse grid keeps /state
+# small: 64x64 digits ~4 KB. Row 0 = south (raster convention, row indexes +y).
+from vesper.worlds.heightmap import LINK_THRESHOLD
+COMMS_N = 64
+_ao_half = float(args.arena)
+_cc = torch.as_tensor((np.arange(COMMS_N) + 0.5) / COMMS_N * (2 * _ao_half) - _ao_half,
+                      dtype=torch.float32, device=env.device)
+_cx, _cy = torch.meshgrid(_cc, _cc, indexing="xy")               # [row=y, col=x]
+comms_small = env.world.comms_at(_cx.reshape(-1), _cy.reshape(-1)) \
+    .reshape(COMMS_N, COMMS_N).cpu().numpy()
+comms_connected = comms_small >= LINK_THRESHOLD
+comms_denied_frac = float(1.0 - comms_connected.mean())
+comms_seen = np.zeros((COMMS_N, COMMS_N), np.uint8)              # 0 unknown / 1 link / 2 dead
+_comms_cell = 2 * _ao_half / COMMS_N
+
+# relay gating: a sighting (or strike) made while the lead is jammed is a
+# PENDING report -- the operator only learns of it when the drone regains link,
+# so a tank found deep in a dead zone stays off the map until the drone climbs
+# or flies back out of the interference shadow. Dies with the drone: an episode
+# rollover drops whatever it never relayed.
+relayed_found = np.zeros(args.targets, bool)
+relayed_reach = np.zeros(args.targets, bool)
+prev_ep0 = 0
+
+
+def stamp_comms(drones_xy):
+    """Mark the cells around each drone as confirmed (link or dead zone).
+
+    Cell status comes from the baked field at the cell, not the drone's own
+    reading, so a drone skirting a dead zone confirms the zone correctly."""
+    for x, y in drones_xy:
+        c = int((x + _ao_half) / _comms_cell)
+        r = int((y + _ao_half) / _comms_cell)
+        if c < -1 or c > COMMS_N or r < -1 or r > COMMS_N:       # far outside the AO
+            continue
+        r0, r1 = max(0, r - 1), min(COMMS_N, r + 2)
+        c0, c1 = max(0, c - 1), min(COMMS_N, c + 2)
+        comms_seen[r0:r1, c0:c1] = np.where(comms_connected[r0:r1, c0:c1], 1, 2)
 
 
 class Policy:
@@ -208,6 +256,8 @@ def apply_commands():
         elif kind == "reset":
             obs = env.ppo_reset()
             t0, step = 0.0, 0
+            comms_seen[:] = 0                               # fresh mission, fresh reveal
+            relayed_found[:] = relayed_reach[:] = False
             print("[warm] reset", flush=True)
         elif kind == "deploy":
             p = cmd.get("policy")
@@ -215,6 +265,8 @@ def apply_commands():
                 policy.load(p)
                 obs = env.ppo_reset()
                 t0, step = 0.0, 0
+                comms_seen[:] = 0
+                relayed_found[:] = relayed_reach[:] = False
                 print(f"[warm] deployed {policy.name}", flush=True)
             except Exception as e:                          # noqa: BLE001
                 print(f"[warm] deploy failed: {e}", flush=True)
@@ -244,6 +296,17 @@ try:
         known = env.task.known[0].cpu().numpy()
         reached = env.task.reached[0].cpu().numpy()
         v0 = vel[0]
+        linked = env.linked.cpu().numpy()
+        stamp_comms(drones[:, :2])
+        # relay gate: the lead's episode rolled over -> unrelayed contacts die
+        # with it; while linked, everything it knows commits to the operator
+        ep0 = int(env.episode_length_buf[0].item())
+        if ep0 < prev_ep0:
+            relayed_found[:] = relayed_reach[:] = False
+        prev_ep0 = ep0
+        if linked[0]:
+            relayed_found |= known
+            relayed_reach |= reached
         srv.set_state({
             "t": round(float(t), 1),
             "world": world_name,
@@ -252,14 +315,20 @@ try:
             "teleop_age_s": round(time.time() - teleop["t"], 2) if teleop["t"] else None,
             "drone0": {"speed": round(float(v0[:2].norm()), 1), "vz": round(float(v0[2]), 1),
                        "agl": round(float(info["agl"][0]), 1)},
-            "found": int(known.sum()), "reached": int(reached.sum()), "targets": int(args.targets),
+            "found": int(relayed_found.sum()), "reached": int(relayed_reach.sum()),
+            "targets": int(args.targets),
+            "pending": int((known & ~relayed_found).sum()),   # contacts awaiting relay
+            "comms_denied": round(comms_denied_frac, 3),
+            "comms": {"n": COMMS_N, "half": _ao_half, "denied_frac": round(comms_denied_frac, 3),
+                      "grid": (comms_seen + ord("0")).astype(np.uint8).tobytes().decode("ascii")},
             "drones": [{"x": round(float(p[0]), 1), "y": round(float(p[1]), 1),
-                        "z": round(float(p[2]), 1),
+                        "z": round(float(p[2]), 1), "linked": bool(lk),
                         "q": [round(float(v), 3) for v in q]}
-                       for p, q in zip(drones, quats)],
+                       for p, q, lk in zip(drones, quats, linked)],
             "vehicles": [{"x": round(float(tp[k][0]), 1), "y": round(float(tp[k][1]), 1),
                           "z": round(float(tp[k][2]), 1), "hdg": round(float(headings[k]), 2),
-                          "found": bool(known[k]), "reached": bool(reached[k])}
+                          "found": bool(relayed_found[k]), "reached": bool(relayed_reach[k]),
+                          "pending": bool(known[k] and not relayed_found[k])}
                          for k in range(args.targets)],
         })
 

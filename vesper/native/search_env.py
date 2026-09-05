@@ -41,7 +41,7 @@ from vesper.dynamics import GustField, MultirotorDynamics, MultirotorParams
 from vesper.dynamics.reference_integrator import ReferenceIntegrator
 from vesper.lab import ground as GD
 from vesper.lab import search_task as T
-from vesper.worlds.heightmap import WorldMap
+from vesper.worlds.heightmap import LINK_THRESHOLD, WorldMap
 
 REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 CORNELL_MAP = os.path.join(REPO, "assets", "cornell", "cornell_map.npz")
@@ -99,6 +99,9 @@ class NativeSearchEnv:
         self.group = torch.arange(N, device=dev) % self.G       # whose vehicles env i hunts
 
         self.episode_length_buf = torch.zeros(N, dtype=torch.long, device=dev)
+        # each drone's RF reading at its position, refreshed every step; the
+        # field is a baked raster (see export_world_map.py) so this is a lookup
+        self.comms_now = torch.ones(N, device=dev)
         self.yaw_des = torch.zeros(N, device=dev)
         self._setpoint = torch.zeros(N, 3, device=dev)
         self.wind_world = torch.as_tensor(cfg.wind_mean, dtype=torch.float32,
@@ -141,6 +144,11 @@ class NativeSearchEnv:
     def flight_state(self):
         """(pos, vel_w, quat wxyz, ang_vel_body), each [N,...] -- the Isaac names."""
         return self.body.pos, self.body.vel, self.body.quat, self.body.ang_vel
+
+    @property
+    def linked(self):
+        """[N] bool: which drones currently hold a link to the base station."""
+        return self.comms_now >= LINK_THRESHOLD
 
     # ---------------------------------------------------------------- vehicles
     def _drive_vehicles(self):
@@ -263,6 +271,7 @@ class NativeSearchEnv:
 
     def reset(self):
         self._reset_idx(torch.arange(self.num_envs, device=self.device))
+        self.comms_now = self.world.comms_at(self.body.pos[:, 0], self.body.pos[:, 1])
         return self._observations(), {}
 
     def step(self, actions: torch.Tensor):
@@ -291,6 +300,7 @@ class NativeSearchEnv:
 
         self.episode_length_buf += 1
         pos, vel, quat, avb = self.flight_state()
+        self.comms_now = self.world.comms_at(pos[:, 0], pos[:, 1])
         _, reward, term, info = self.task.step(pos, vel, quat, avb, self.target_pos,
                                                self.episode_length_buf)
         trunc = self.episode_length_buf >= self.max_episode_length - 1

@@ -58,6 +58,9 @@ from isaacsim.core.utils.stage import add_reference_to_stage  # noqa: E402
 from isaacsim.core.utils.extensions import enable_extension  # noqa: E402
 from PIL import Image  # noqa: E402
 
+import omni.usd  # noqa: E402
+from pxr import UsdGeom, UsdLux, UsdShade, Sdf, Gf  # noqa: E402
+
 enable_extension("isaacsim.sensors.camera")
 from isaacsim.sensors.camera import Camera  # noqa: E402
 
@@ -166,12 +169,184 @@ for d in streams.values():
 chase_dir = np.array([1.0, 0.0])
 prev_d0 = np.array(frames[0]["d"][0], dtype=float)
 
+# ------------------------------------------------------------ neutralization FX
+# When a target's `reached` flag flips 0->1 we play a lightweight, purely
+# kinematic destruction: an emissive fireball sphere that swells then fades, a
+# dark smoke puff that keeps expanding and lingers, a one-shot light flash, and
+# a swap of the intact tank for a charred wreck box. All keyed to `age` = output
+# frames since impact (the mp4 plays at args.fps, so age/fps is wall-clock secs
+# regardless of --stride). No particle sim -- just per-frame scale/emissive/
+# opacity edits, which never fault the RTX crash path the way physics does.
+stage = omni.usd.get_context().get_stage()
+FPS = float(max(args.fps, 1))
+
+
+def _clamp(v, lo, hi):
+    return max(lo, min(hi, v))
+
+
+def _material(path, diffuse, emissive=(0.0, 0.0, 0.0), opacity=1.0):
+    mat = UsdShade.Material.Define(stage, path)
+    sh = UsdShade.Shader.Define(stage, path + "/S")
+    sh.CreateIdAttr("UsdPreviewSurface")
+    sh.CreateInput("diffuseColor", Sdf.ValueTypeNames.Color3f).Set(Gf.Vec3f(*diffuse))
+    sh.CreateInput("emissiveColor", Sdf.ValueTypeNames.Color3f).Set(Gf.Vec3f(*emissive))
+    sh.CreateInput("opacity", Sdf.ValueTypeNames.Float).Set(float(opacity))
+    sh.CreateInput("roughness", Sdf.ValueTypeNames.Float).Set(0.9)
+    sh.CreateInput("metallic", Sdf.ValueTypeNames.Float).Set(0.0)
+    mat.CreateSurfaceOutput().ConnectToSource(sh.ConnectableAPI(), "surface")
+    return mat, sh
+
+
+def _sphere(path, mat):
+    UsdGeom.Xform.Define(stage, path)
+    geo = UsdGeom.Sphere.Define(stage, path + "/geo")
+    geo.CreateRadiusAttr(1.0)
+    UsdShade.MaterialBindingAPI(geo.GetPrim()).Bind(mat)
+    return XPrim(path)
+
+
+def _box(path, mat, half):
+    UsdGeom.Xform.Define(stage, path)
+    geo = UsdGeom.Cube.Define(stage, path + "/geo")
+    geo.CreateSizeAttr(1.0)  # unit cube spans -0.5..0.5; XPrim scale sets full dims
+    UsdShade.MaterialBindingAPI(geo.GetPrim()).Bind(mat)
+    xp = XPrim(path)
+    xp.set_local_scale(np.array(half))
+    return xp
+
+
+def _set_visible(path, vis):
+    prim = stage.GetPrimAtPath(path)
+    if prim and prim.IsValid():
+        UsdGeom.Imageable(prim).GetVisibilityAttr().Set(
+            UsdGeom.Tokens.inherited if vis else UsdGeom.Tokens.invisible)
+
+
+def _set_emissive(shader, color):
+    shader.GetInput("emissiveColor").Set(Gf.Vec3f(*color))
+
+
+def _set_opacity(shader, o):
+    shader.GetInput("opacity").Set(float(o))
+
+
+def _set_diffuse(shader, color):
+    shader.GetInput("diffuseColor").Set(Gf.Vec3f(*color))
+
+
+fx = []
+for i in range(n_targets):
+    fire_mat, fire_sh = _material(f"/World/Fx_{i}/fire_mat", (1.0, 0.45, 0.08),
+                                  emissive=(9.0, 3.2, 0.5))
+    smoke_mat, smoke_sh = _material(f"/World/Fx_{i}/smoke_mat", (0.05, 0.05, 0.05),
+                                    opacity=0.85)
+    fire = _sphere(f"/World/Fx_{i}/fire", fire_mat)
+    smoke = _sphere(f"/World/Fx_{i}/smoke", smoke_mat)
+    flash = UsdLux.SphereLight.Define(stage, f"/World/Fx_{i}/flash")
+    flash.CreateRadiusAttr(0.4)
+    flash.CreateColorAttr(Gf.Vec3f(1.0, 0.6, 0.25))
+    flash.CreateIntensityAttr(0.0)
+    flash_xp = XPrim(f"/World/Fx_{i}/flash")
+    for p in (f"/World/Fx_{i}/fire", f"/World/Fx_{i}/smoke"):
+        _set_visible(p, False)
+    fx.append(dict(fire=fire, fire_sh=fire_sh, smoke=smoke, smoke_sh=smoke_sh,
+                   flash=flash, flash_xp=flash_xp))
+
+impact_fi = [None] * n_targets      # output-frame index at which each target died
+impact_pos = [None] * n_targets     # tank position captured at impact
+strike_done = False                 # drone 0 (kamikaze) hidden after first kill
+post_strike = False                 # after impact: ease the fpv up off the blast
+strike_cam = None                   # fpv position at the instant of impact
+PULLBACK_H = 13.0                   # fpv settles this high, framing the wreck
+
+
+def play_fx(i, fi):
+    """Drive target i's destruction prims for the current output frame."""
+    e = fx[i]
+    age = fi - impact_fi[i]
+    cx, cy, cz = impact_pos[i]
+
+    # fireball: swells 0.4 -> ~3 m over ~0.3 s, emissive fades out by ~1 s
+    if age < 26:
+        r = 0.4 + 2.6 * _clamp(age / 6.0, 0.0, 1.0) + 0.4 * _clamp((age - 6) / 12.0, 0.0, 1.0)
+        bright = 1.0 if age < 6 else _clamp(1.0 - (age - 6) / 16.0, 0.0, 1.0)
+        e["fire"].set_world_pose(np.array([cx, cy, cz + 0.8 + 0.04 * age]),
+                                 np.array([1.0, 0.0, 0.0, 0.0]))
+        e["fire"].set_local_scale(np.array([r, r, r]))
+        # cools orange -> deep red as it fades
+        _set_emissive(e["fire_sh"], (9.0 * bright, 3.2 * bright * bright, 0.5 * bright ** 3))
+        _set_opacity(e["fire_sh"], _clamp(0.4 + 0.6 * bright, 0.0, 1.0))
+        _set_visible(f"/World/Fx_{i}/fire", True)
+    else:
+        _set_visible(f"/World/Fx_{i}/fire", False)
+
+    # light flash: one hard pulse over the first ~0.2 s
+    inten = 8.0e5 * _clamp(1.0 - age / 5.0, 0.0, 1.0) if age <= 5 else 0.0
+    e["flash_xp"].set_world_pose(np.array([cx, cy, cz + 1.5]),
+                                 np.array([1.0, 0.0, 0.0, 0.0]))
+    e["flash"].GetIntensityAttr().Set(float(inten))
+
+    # smoke: starts ~0.1 s in, expands 1 -> 6 m, rises, fades but lingers
+    if age >= 3:
+        a = age - 3
+        rs = 1.0 + 5.0 * _clamp(a / 36.0, 0.0, 1.0)
+        zs = cz + 1.0 + 3.0 * _clamp(a / 36.0, 0.0, 1.0)
+        op = _clamp(0.85 * (1.0 - a / 70.0), 0.12, 0.85)
+        g = _clamp(0.05 + 0.06 * (a / 70.0), 0.05, 0.14)  # greys out as it thins
+        e["smoke"].set_world_pose(np.array([cx, cy, zs]), np.array([1.0, 0.0, 0.0, 0.0]))
+        e["smoke"].set_local_scale(np.array([rs, rs, rs]))
+        _set_diffuse(e["smoke_sh"], (g, g, g))
+        _set_opacity(e["smoke_sh"], op)
+        _set_visible(f"/World/Fx_{i}/smoke", True)
+
+
+# ----------------------------------------------------------- kamikaze dive
+# The logged drone 0 is a high-altitude searcher: at the `reached` flip it sits
+# ~20 m up and several metres out, and never actually descends onto the tank --
+# so the raw flip detonates in mid-air and reads as a fly-past, not a strike.
+# Override drone 0's final DIVE_FRAMES to plunge from its logged path straight
+# down onto the struck tank, holding the fpv locked on the target as it drops,
+# and fire the explosion at contact. MESH_H = where the drone body ends up (on
+# the tank); CAM_H = where the fpv freezes (safely above the fireball).
+DIVE_FRAMES = 22
+MESH_H, CAM_H = 1.4, 6.0
+strike_fi = strike_ti = None
+for _fi, _fr in enumerate(frames):
+    _hit = next((i for i in range(n_targets)
+                 if len(_fr["tg"][i]) > 3 and _fr["tg"][i][3] >= 0.5), None)
+    if _hit is not None:
+        strike_fi, strike_ti = _fi, _hit
+        break
+strike_contact = None
+if strike_fi is not None:
+    _tx, _ty = frames[strike_fi]["tg"][strike_ti][0], frames[strike_fi]["tg"][strike_ti][1]
+    _tz = float(wmap.ground_at(torch.tensor([_tx]), torch.tensor([_ty]))[0]) + TANK_CLEARANCE
+    strike_contact = np.array([_tx, _ty, _tz])
+    dive_start_fi = max(0, strike_fi - DIVE_FRAMES)
+    dive_p0 = np.array(frames[dive_start_fi]["d"][0], dtype=float)
+    print(f"[replay] kamikaze dive: drone 0 -> target {strike_ti}, "
+          f"frames {dive_start_fi}..{strike_fi} (impact t={frames[strike_fi]['t']:.1f}s)",
+          flush=True)
+
+
+def dive_alpha(fi):
+    """Ease-in progress [0,1] through the dive; accelerates into the target."""
+    return (_clamp((fi - dive_start_fi) / max(strike_fi - dive_start_fi, 1), 0.0, 1.0)) ** 1.6
+
+
 for _ in range(args.settle):
     world.render()
 
 for fi, fr in enumerate(frames):
     dpos = np.array(fr["d"], dtype=float)
     hdg = fr["hdg"]
+    diving = (strike_fi is not None and not strike_done
+              and dive_start_fi <= fi <= strike_fi)
+    if diving:
+        # drone 0 body plunges from its logged path onto the tank
+        dpos[0] = (1 - dive_alpha(fi)) * dive_p0 + dive_alpha(fi) * (
+            strike_contact + np.array([0.0, 0.0, MESH_H]))
     for i, prim in enumerate(drones):
         prim.set_world_pose(dpos[i], yaw_quat(hdg[i]))
     for i, prim in enumerate(tanks):
@@ -182,13 +357,47 @@ for fi, fr in enumerate(frames):
             tank_z[i] = float(wmap.ground_at(torch.tensor([x]), torch.tensor([y]))[0]) + TANK_CLEARANCE
         prim.set_world_pose(np.array([x, y, tank_z[i]]), yaw_quat(tank_yaw[i]))
 
+    # detect the neutralization: tg = [x, y, found, reached]; reached 0->1
+    for i in range(n_targets):
+        reached = len(fr["tg"][i]) > 3 and fr["tg"][i][3] >= 0.5
+        if reached and impact_fi[i] is None:
+            impact_fi[i] = fi
+            impact_pos[i] = np.array([txy[i, 0], txy[i, 1], tank_z[i]])
+            _set_visible(f"/World/Tank_{i}", False)      # tank destroyed; smoke covers it
+            if not strike_done:                          # drone 0 detonated on it
+                _set_visible("/World/Drone_0", False)
+                strike_done = True
+            print(f"[replay] neutralization: target {i} at frame {fi} t={fr['t']:.1f}s",
+                  flush=True)
+    for i in range(n_targets):
+        if impact_fi[i] is not None:
+            play_fx(i, fi)
+
     d0 = dpos[0]
     if want_fpv:
-        # drone 0's own camera: body-fixed, pitched forward-down, the task's lens
-        p = torch.tensor(d0, dtype=torch.float32).unsqueeze(0)
-        q = torch.tensor(yaw_quat(hdg[0]), dtype=torch.float32).unsqueeze(0)
-        cp, cq = sensor_pose(p, q, CAM_PITCH_DEG, CAM_OFFSET)
-        fpv.set_world_pose(cp[0].numpy(), cq[0].numpy())
+        # drone 0's own camera: body-fixed, pitched forward-down, the task's lens.
+        # During the dive the camera plunges toward the tank locked on the target;
+        # at contact it freezes just above the blast so the fireball, smoke and
+        # wreck linger instead of the log's continued drone-0 path swinging away.
+        if post_strike:
+            # ease up off the fireball to frame the burning wreck on the road
+            b = _clamp((fi - strike_fi) / 14.0, 0.0, 1.0)
+            b = b * b * (3.0 - 2.0 * b)  # smoothstep
+            cam_pos = (1 - b) * strike_cam + b * (strike_contact + np.array([0.0, 0.0, PULLBACK_H]))
+            look_at(fpv, cam_pos, strike_contact + np.array([0.0, 0.0, 0.6]))
+        elif diving:
+            a = dive_alpha(fi)
+            cam_pos = (1 - a) * dive_p0 + a * (strike_contact + np.array([0.0, 0.0, CAM_H]))
+            look_at(fpv, cam_pos, strike_contact + np.array([0.0, 0.0, 0.6]))
+            if fi == strike_fi:
+                post_strike = True
+                strike_cam = cam_pos
+        else:
+            p = torch.tensor(d0, dtype=torch.float32).unsqueeze(0)
+            q = torch.tensor(yaw_quat(hdg[0]), dtype=torch.float32).unsqueeze(0)
+            cp, cq = sensor_pose(p, q, CAM_PITCH_DEG, CAM_OFFSET)
+            pose = (cp[0].numpy(), cq[0].numpy())
+            fpv.set_world_pose(*pose)
     if want_chase:
         # trail 10 m behind, 3 m above, along the smoothed direction of travel
         v_xy = d0[:2] - prev_d0[:2]

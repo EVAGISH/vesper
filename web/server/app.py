@@ -891,6 +891,21 @@ def world3d(world: str):
            "terrain": {"n": int(zg.shape[0]), "step": cell * stride,
                        "z": [round(float(v), 1) for v in zg.reshape(-1)]},
            "buildings": buildings, "trees": trees}
+
+    # --- static RF coverage (optional layer, absent on maps baked before it):
+    # the full-AO signal field + station positions for a connectivity underlay
+    if "comms" in m.files:
+        comms = np.asarray(m["comms"], np.float32)
+        cs = max(1, (n - 1) // 96)
+        cz = comms[::cs, ::cs]
+        stations = (np.asarray(m["comms_stations"], np.float32).tolist()
+                    if "comms_stations" in m.files else [])
+        jammers = (np.asarray(m["comms_jammers"], np.float32).tolist()
+                   if "comms_jammers" in m.files else [])
+        out["comms"] = {"n": int(cz.shape[0]), "step": cell * cs,
+                        "v": [round(float(v), 2) for v in cz.reshape(-1)],
+                        "stations": [[round(float(x), 1) for x in s] for s in stations],
+                        "jammers": [[round(float(x), 1) for x in s] for s in jammers]}
     cache.write_text(json.dumps(out, separators=(",", ":")))
     return FileResponse(cache, media_type="application/json")
 
