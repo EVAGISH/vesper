@@ -21,6 +21,8 @@ type Environment = {
 
 const POLL_MS = 4000;
 
+type Hit = { name: string; lat: number; lon: number; half_km: number; type: string };
+
 function AddEnvironment({ onSubmitted }: { onSubmitted: () => void }) {
   const [name, setName] = useState("");
   const [lat, setLat] = useState("");
@@ -28,6 +30,35 @@ function AddEnvironment({ onSubmitted }: { onSubmitted: () => void }) {
   const [halfKm, setHalfKm] = useState("1.0");
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+
+  const [query, setQuery] = useState("");
+  const [hits, setHits] = useState<Hit[] | null>(null);
+  const [searching, setSearching] = useState(false);
+
+  const search = async () => {
+    if (query.trim().length < 2) return;
+    setSearching(true); setHits(null); setErr(null);
+    try {
+      const r = await fetchJSON<Hit[]>(`/api/geocode?q=${encodeURIComponent(query.trim())}`);
+      setHits(r || []);
+    } catch {
+      setErr("place search failed");
+    } finally {
+      setSearching(false);
+    }
+  };
+
+  const pick = (h: Hit) => {
+    setLat(h.lat.toFixed(5));
+    setLon(h.lon.toFixed(5));
+    setHalfKm(String(h.half_km));
+    if (!name.trim()) {
+      const slug = h.name.split(",")[0].toLowerCase().replace(/[^a-z0-9]+/g, "_")
+        .replace(/^_+|_+$/g, "").slice(0, 24) || "site";
+      setName(/^[a-z]/.test(slug) ? slug : "site_" + slug);
+    }
+    setHits(null);
+  };
 
   const submit = async () => {
     setBusy(true); setErr(null);
@@ -55,6 +86,47 @@ function AddEnvironment({ onSubmitted }: { onSubmitted: () => void }) {
           Copernicus + Esri + OSM · any coordinates
         </span>
       </h3>
+      <div className="relative border-b border-border/60 p-3">
+        <label className="flex flex-col gap-1">
+          <span className="font-mono text-[10px] uppercase tracking-widest text-muted-foreground">
+            search a place
+          </span>
+          <div className="flex gap-2">
+            <input
+              value={query}
+              placeholder="Kramatorsk, Ukraine   ·   Cornell Arts Quad   ·   Kyiv"
+              onChange={(e) => setQuery(e.target.value)}
+              onKeyDown={(e) => e.key === "Enter" && search()}
+              className="flex-1 rounded border border-border bg-background px-2 py-1.5 text-xs text-foreground outline-none focus:border-[#3987e5]"
+            />
+            <Button
+              size="sm" variant="secondary" disabled={searching} onClick={search}
+              className="h-8 cursor-pointer px-3 font-mono text-[11px]"
+            >
+              {searching ? "…" : "SEARCH"}
+            </Button>
+          </div>
+        </label>
+        {hits && (
+          <div className="absolute left-3 right-3 z-10 mt-1 max-h-56 overflow-y-auto rounded border border-border bg-card shadow-xl">
+            {hits.length === 0 && (
+              <div className="px-3 py-2 text-xs text-muted-foreground">no matches</div>
+            )}
+            {hits.map((h, i) => (
+              <button
+                key={i}
+                onClick={() => pick(h)}
+                className="block w-full cursor-pointer border-b border-border/50 px-3 py-2 text-left last:border-0 hover:bg-secondary"
+              >
+                <div className="truncate text-xs">{h.name}</div>
+                <div className="font-mono text-[10px] text-muted-foreground">
+                  {h.lat.toFixed(4)}, {h.lon.toFixed(4)} · {h.half_km} km · {h.type}
+                </div>
+              </button>
+            ))}
+          </div>
+        )}
+      </div>
       <div className="flex flex-wrap items-end gap-3 p-3">
         {[
           ["name", name, setName, "kramatorsk", "flex-1 min-w-[140px]"],

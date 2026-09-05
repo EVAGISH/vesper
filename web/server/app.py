@@ -15,6 +15,7 @@ import sys
 import tempfile
 import threading
 import time
+import urllib.parse
 import urllib.request
 from pathlib import Path
 
@@ -141,6 +142,39 @@ def _run_env_build(name: str, lat: float, lon: float, half_km: float) -> None:
         ENV_BUILDS[name].update(status="done" if ok else "failed", finished=time.time())
     except Exception as e:                                  # noqa: BLE001
         ENV_BUILDS[name].update(status="failed", finished=time.time(), error=str(e))
+
+
+@app.get("/api/geocode")
+def geocode(q: str):
+    """Place name -> coordinates, so users search a city/area instead of typing
+    lat/lon. OpenStreetMap Nominatim (free, no key)."""
+    q = q.strip()
+    if len(q) < 2:
+        return []
+    try:
+        url = "https://nominatim.openstreetmap.org/search?" + urllib.parse.urlencode(
+            {"q": q, "format": "jsonv2", "limit": 5})
+        req = urllib.request.Request(url, headers={"User-Agent": "vesper-sim/0.1 (research)"})
+        with urllib.request.urlopen(req, timeout=8) as r:
+            hits = json.load(r)
+    except (OSError, json.JSONDecodeError):
+        raise HTTPException(502, "geocoding service unavailable")
+    out = []
+    for h in hits:
+        # suggest a radius from the place's bounding box, clamped to a sane range
+        half_km = 1.0
+        bb = h.get("boundingbox")
+        if bb and len(bb) == 4:
+            import math as _m
+            s, n, w, e = (float(bb[0]), float(bb[1]), float(bb[2]), float(bb[3]))
+            lat_c = (s + n) / 2
+            span_km = max((n - s) * 110.574,
+                          (e - w) * 111.320 * _m.cos(_m.radians(lat_c))) / 2
+            half_km = round(min(3.0, max(0.3, span_km)), 1)
+        out.append({"name": h.get("display_name", q), "lat": float(h["lat"]),
+                    "lon": float(h["lon"]), "half_km": half_km,
+                    "type": h.get("type", "")})
+    return out
 
 
 @app.post("/api/environments/build")
