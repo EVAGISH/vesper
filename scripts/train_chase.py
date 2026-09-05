@@ -122,6 +122,10 @@ if args.resume:
     ck = torch.load(args.resume, map_location=env.device)
     net.load_state_dict(ck["ac"])
     trainer.norm.load_state_dict(ck["norm"])
+    if "priv_norm" in ck and hasattr(trainer, "priv_norm"):
+        # the critic's input scaling is state too: resuming without it feeds the
+        # value head unnormalised truth until the statistics recover
+        trainer.priv_norm.load_state_dict(ck["priv_norm"])
     print(f"resumed from {args.resume}", flush=True)
 
 n_par = sum(p.numel() for p in net.parameters())

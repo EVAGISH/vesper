@@ -212,6 +212,9 @@ class ChaseEnv(VesperQuadEnv):
         self._veh_step = 0
 
     def _drive_vehicles(self):
+        # the arena can shrink under a curriculum; forklifts placed outside the
+        # box the drone is confined to are forklifts it can never reach
+        self.driver.half = self.tcfg.arena_half
         d = self._vehicles.data
         q = d.root_quat_w
         yaw = yaw_from_quat(q) - self._veh_yaw_offset
