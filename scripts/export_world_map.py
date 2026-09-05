@@ -20,9 +20,9 @@ Writes <world>_map.npz (float32 rasters) + <world>_map.json (metadata):
   parking     (n,n)  uint8: drivable strip a few metres off a building wall
   park_yaw    (n,n)  heading parallel to that wall, radians in [0, pi)
   trunks      (n,n)  trunks per cell
-  tree_z      (n,n)  top of the hard tree (trunk + crown colliders) -- only written
-                     when the world's tree species carry colliders, so that what
-                     the map calls solid is exactly what PhysX stops
+  tree_z      (n,n)  top of the hard tree (conservative: the crown disc up to the
+                     tree top) -- only written when the world's tree species carry
+                     colliders; the contact sensor is what decides a real crash
 
 Only pxr + numpy + shapely, so it runs on the Mac; the rasters are what ship
 to the GPU.
@@ -161,7 +161,11 @@ def species_have_colliders(usd: Path, species_assets: set) -> bool:
         if not p.exists():
             return False
         st = Usd.Stage.Open(str(p))
-        if not st.GetPrimAtPath("/Tree/trunk_col"):
+        root = st.GetPrimAtPath("/Tree")
+        if not root or not st.GetPrimAtPath("/Tree/trunk_col"):
+            return False
+        from pxr import UsdGeom, UsdPhysics
+        if not any(pr.IsA(UsdGeom.Mesh) and pr.HasAPI(UsdPhysics.CollisionAPI) for pr in Usd.PrimRange(root)):
             return False
     return True
 

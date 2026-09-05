@@ -102,14 +102,22 @@ def test_species_carry_colliders_and_the_map_sees_them(tmp_path):
     rep = build_site(site, data, _veg_dir(tmp_path), data / "site.usd")
     for name, *_ in geo.SPECIES:
         sp = Usd.Stage.Open(str(data / "species" / f"{name}.usd"))
-        trunk, crown = sp.GetPrimAtPath("/Tree/trunk_col"), sp.GetPrimAtPath("/Tree/crown_col")
-        assert trunk and crown, f"{name}: colliders missing"
-        assert trunk.HasAPI(UsdPhysics.CollisionAPI) and crown.HasAPI(UsdPhysics.CollisionAPI)
+        trunk = sp.GetPrimAtPath("/Tree/trunk_col")
+        assert trunk and trunk.HasAPI(UsdPhysics.CollisionAPI), f"{name}: trunk capsule missing"
         assert UsdGeom.Imageable(trunk).GetPurposeAttr().Get() == UsdGeom.Tokens.guide
+        meshes = [pr for pr in Usd.PrimRange(sp.GetPrimAtPath("/Tree")) if pr.IsA(UsdGeom.Mesh)]
+        assert meshes, f"{name}: no meshes under /Tree"
+        for m in meshes:
+            # leaves are solid, and shaped like leaves: a convex decomposition of the mesh itself
+            assert m.HasAPI(UsdPhysics.CollisionAPI) and m.HasAPI(UsdPhysics.MeshCollisionAPI)
+            assert UsdPhysics.MeshCollisionAPI(m).GetApproximationAttr().Get() == UsdPhysics.Tokens.convexDecomposition
+            assert m.GetAttribute("physxConvexDecompositionCollision:maxConvexHulls").Get() == geo.TREE_MAX_HULLS
     # and a visual-only build has none
     site2 = GeoSite(LAT, LON, half_m=250.0, res_m=10.0, tex_px=512, seed=1, tree_colliders=False)
     build_site(site2, data, _veg_dir(tmp_path), data / "site2.usd")
-    assert not Usd.Stage.Open(str(data / "species" / "Hawthorn.usd")).GetPrimAtPath("/Tree/trunk_col")
+    sp2 = Usd.Stage.Open(str(data / "species" / "Hawthorn.usd"))
+    assert not sp2.GetPrimAtPath("/Tree/trunk_col")
+    assert not any(pr.HasAPI(UsdPhysics.CollisionAPI) for pr in Usd.PrimRange(sp2.GetPrimAtPath("/Tree")))
 
 
 def test_build_manifest_and_variant(tmp_path):

@@ -46,6 +46,9 @@ class WorldMap:
                        if "tree_z" in d.files else self.ground_z)
         self.has_tree_solids = "tree_z" in d.files
         self.n = int(self.ground_z.shape[0])
+        # zones default to "launch anywhere, nothing protected"; attach_zones overrides
+        self.launch = torch.ones_like(self.ground_z)
+        self.safe = torch.zeros_like(self.ground_z)
         meta_path = Path(str(npz_path)).with_suffix(".json")
         if "half_m" in d:
             self.half_m, self.cell = float(d["half_m"]), float(d["cell"])
@@ -96,6 +99,39 @@ class WorldMap:
     def is_drivable(self, x, y):
         r, c = self.nearest_cell(x, y)
         return self.drivable[r, c] > 0.5
+
+    def sample_cells_xy(self, mask: torch.Tensor, n: int, generator=None, half: float | None = None):
+        """n random xy drawn uniformly from the set cells of `mask` (jittered inside the cell).
+
+        Exact rather than rejection-based, so a small zone -- a launch pad that is
+        1% of the site -- is sampled every time. `half` restricts to the arena box.
+        Returns (xy [n,2], ok [n]); ok is False everywhere when the mask is empty.
+        """
+        dev = self.ground_z.device
+        m = mask > 0.5
+        if half is not None:
+            c = (torch.arange(self.n, device=dev) * self.cell) - self.half_m
+            inside = (c.abs() <= half)
+            m = m & inside.view(1, -1) & inside.view(-1, 1)
+        idx = torch.nonzero(m)                                                     # [M,2] (row, col)
+        if idx.numel() == 0:
+            return torch.zeros(n, 2, device=dev), torch.zeros(n, dtype=torch.bool, device=dev)
+        pick = torch.randint(0, idx.shape[0], (n,), device=dev, generator=generator)
+        rc = idx[pick].float()
+        jit = (torch.rand(n, 2, device=dev, generator=generator) - 0.5) * self.cell
+        x = rc[:, 1] * self.cell - self.half_m + jit[:, 0]
+        y = rc[:, 0] * self.cell - self.half_m + jit[:, 1]
+        return torch.stack([x, y], dim=1), torch.ones(n, dtype=torch.bool, device=dev)
+
+    def attach_zones(self, zones):
+        """Rasterise operator zones (vesper.worlds.zones.Zones) onto this grid."""
+        launch, safe = zones.masks(self.n, self.half_m, self.cell)
+        self.launch = torch.as_tensor(launch.astype(np.float32), device=self.device)
+        self.safe = torch.as_tensor(safe.astype(np.float32), device=self.device)
+
+    def in_safe(self, x, y):
+        r, c = self.nearest_cell(x, y)
+        return self.safe[r, c] > 0.5
 
     def yaw_at(self, field: torch.Tensor, x, y):
         """Nearest-cell read of a heading raster (radians), no interpolation:

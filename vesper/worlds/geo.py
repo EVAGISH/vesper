@@ -13,8 +13,9 @@ Output: <site>.usd with
   /World/water      flat water polygons
   /World/trees      instanceable references: woodland polygons, tree rows, scrub, gardens
   /World/sun, /World/sky
-  static triangle-mesh colliders on terrain and buildings; a trunk capsule and a
-  crown sphere per tree species (authored once, shared by every instance).
+  static triangle-mesh colliders on terrain and buildings; per tree species a
+  convex-decomposition collider on every mesh plus a trunk capsule (authored
+  once, shared by every instance) -- leaves are solid, and shaped like leaves.
 Local frame: ENU meters, origin at (lat0, lon0), z = DEM height minus DEM height at the origin.
 
 Repeatability: the same cached inputs, seed and variant give the same USD.
@@ -37,7 +38,9 @@ import numpy as np
 from PIL import Image, ImageDraw
 from pxr import Gf, Sdf, Usd, UsdGeom, UsdLux, UsdPhysics, UsdShade, Vt
 
-from vesper.worlds.rasters import CROWN_Z, DEFAULT_CROWN, SPECIES_CROWN, TRUNK_R, TRUNK_TOP
+from vesper.worlds.rasters import TRUNK_R, TRUNK_TOP
+
+TREE_MAX_HULLS = 24     # convex chunks per species mesh: enough for the crown outline, cheap to cook
 from shapely.geometry import LineString, Point, Polygon
 from shapely.strtree import STRtree
 
@@ -620,23 +623,41 @@ def _tree_native_bounds(usd_path: Path):
 
 
 def _author_tree_colliders(stage, root, src_usd: Path, name: str):
-    """Trunk capsule + crown sphere under the species root, in the asset's units."""
+    """Colliders shaped by the tree itself, shared by every instance.
+
+    Leaves are solid: a drone cannot fly through a crown. But the depth camera
+    renders the real foliage with its dents and gaps, so the physics has to
+    follow that outline or the policy learns an invisible ball instead of the
+    tree. Every mesh under the species root gets a convex-decomposition
+    collider (PhysX cooks a few dozen convex chunks per species, once, and
+    caches them). The trunk additionally gets an exact capsule so the map's
+    hard-tree layer and the trunk count have a primitive to agree with.
+    """
     zmin, zmax = _tree_native_bounds(src_usd)
     H = max(zmax - zmin, 1e-3)
-    crown = SPECIES_CROWN.get(name, DEFAULT_CROWN) * H
+    for prim in Usd.PrimRange(root.GetPrim()):
+        if not prim.IsA(UsdGeom.Mesh):
+            continue
+        UsdPhysics.CollisionAPI.Apply(prim)
+        mca = UsdPhysics.MeshCollisionAPI.Apply(prim)
+        mca.CreateApproximationAttr().Set(UsdPhysics.Tokens.convexDecomposition)
+        # PhysX decomposition knobs, authored as the schema attributes so the
+        # cooker sees them without the PhysX python module on the build machine
+        prim.CreateAttribute("physxConvexDecompositionCollision:maxConvexHulls",
+                             Sdf.ValueTypeNames.Int).Set(TREE_MAX_HULLS)
+        prim.CreateAttribute("physxConvexDecompositionCollision:hullVertexLimit",
+                             Sdf.ValueTypeNames.Int).Set(32)
+        prim.CreateAttribute("physxConvexDecompositionCollision:voxelResolution",
+                             Sdf.ValueTypeNames.Int).Set(200000)
     r_t = TRUNK_R * H
     trunk_len = max(TRUNK_TOP * H - 2 * r_t, r_t)
     cap = UsdGeom.Capsule.Define(stage, root.GetPath().AppendChild("trunk_col"))
     cap.CreateAxisAttr("Z"); cap.CreateRadiusAttr(r_t); cap.CreateHeightAttr(trunk_len)
     UsdGeom.Xformable(cap).AddTranslateOp().Set(Gf.Vec3d(0.0, 0.0, zmin + r_t + trunk_len / 2))
-    sph = UsdGeom.Sphere.Define(stage, root.GetPath().AppendChild("crown_col"))
-    sph.CreateRadiusAttr(crown)
-    UsdGeom.Xformable(sph).AddTranslateOp().Set(Gf.Vec3d(0.0, 0.0, zmin + CROWN_Z * H))
-    for prim in (cap.GetPrim(), sph.GetPrim()):
-        UsdPhysics.CollisionAPI.Apply(prim)
-        img = UsdGeom.Imageable(prim)
-        img.CreatePurposeAttr(UsdGeom.Tokens.guide)          # renderers skip guides; PhysX does not
-        img.CreateVisibilityAttr(UsdGeom.Tokens.invisible)
+    UsdPhysics.CollisionAPI.Apply(cap.GetPrim())
+    img = UsdGeom.Imageable(cap.GetPrim())
+    img.CreatePurposeAttr(UsdGeom.Tokens.guide)          # renderers skip guides; PhysX does not
+    img.CreateVisibilityAttr(UsdGeom.Tokens.invisible)
 
 
 def _has_nested_instancer(usd_path: Path) -> bool:

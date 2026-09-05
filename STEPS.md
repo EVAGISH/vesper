@@ -173,6 +173,49 @@ the forward view with the policy's 128 px input inset, rolling with the hull.
 
 ---
 
+## Step 12 — Close the loop: touch it, with nothing but the camera
+
+Step 11 made the environment honest. This step makes the task closeable end to
+end by one small network that could run on the airframe.
+
+**The task** (`vesper.lab.chase_task`, `chase_env.py`). Forklifts drive around
+the site as global prims — no assignment, every drone can hit every one. A
+drone launches from the **launch zone**, has to *see* a forklift with its own
+camera, fly to it through the trees and buildings, and **touch** it. The touch
+is a PhysX contact, it ends the episode, and the bonus scales with how much of
+the episode is left, so the only thing worth optimising is time. A contact with
+anything else is a crash.
+
+**Zones** (`vesper.worlds.zones`, `<site>_zones.json`). A launch polygon: every
+drone spawns inside it. Any number of no-track safe polygons: a forklift inside
+one pays no sighting bonus, no touch reward, and touching it does not end the
+episode. Both are drawn on the AO map.
+
+**The policy** (`vesper.lab.vision`, `recurrent_ppo.py`). RGB + depth at 96 px
+and the 11 proprio values, four stride-2 convolutions, a 256-unit GRU, actor
+and belief heads; an asymmetric critic that sees the privileged vector.
+**1.44M parameters on the airframe, 17.9M multiply-adds per frame** — an order
+of magnitude under a Jetson Orin Nano at 25 Hz. The GRU is what holds a
+forklift through the seconds it is out of frame, turns frame-to-frame growth
+into range, and remembers which way the drone has already looked. The belief
+head regresses the true relative vector whenever a forklift is in frame, which
+is what teaches the encoder to see forklifts long before the sparse touch
+reward could.
+
+**Depth** is a stereo-class sensor, not the renderer's truth: clipped at 20 m,
+error growing with range squared, holes on far and thin returns
+(`vesper.sensors.depth`). Trees are solid and shaped like trees — every species
+mesh carries a convex-decomposition collider, so a gap the depth camera shows
+is a gap the drone can fly through.
+
+**Inspect:** `check_chase.py --camera` passes on the box and reports
+env-steps/s and VRAM; `runs/<id>/fpv.mp4` from `fly_chase.py` shows the forward
+view with the policy's own RGB and depth tensors inset and its belief head's
+cross on the forklift; `track.png` shows the launch zone, the safe zones, the
+forklift paths and where each touch happened.
+
+---
+
 ## Standing rules
 
 - Every step ends with a commit on completion, and messy in-between states get committed too — the branch history should let any step be revisited.

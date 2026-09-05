@@ -44,11 +44,11 @@ def test_parking_hugs_the_facade_and_runs_along_it():
     assert abs(math.cos(yaw[42, 30])) > 0.95
 
 
-def test_tree_solids_have_a_trunk_and_a_crown_cap():
+def test_tree_solids_are_a_conservative_crown_disc():
     n, half, cell = 51, 50.0, 2.0
     ground = np.zeros((n, n), np.float32)
     trees = [(0.0, 0.0, 20.0, 6.0)]                                        # 20 m tree, 6 m crown
     tz, trunks = splat_tree_solids(trees, ground, n, half, cell)
     assert trunks[25, 25] == 1.0 and trunks.sum() == 1.0
-    assert tz[25, 25] == pytest.approx(0.65 * 20 + 6.0, abs=0.01)          # crown top over the trunk
-    assert tz[25, 27] > 12.0 and tz[25, 30] == 0.0                         # inside / outside the crown
+    assert tz[25, 25] == pytest.approx(20.0, abs=0.01)                     # tree top over the trunk
+    assert tz[25, 27] == pytest.approx(20.0) and tz[25, 30] == 0.0         # inside / outside the crown

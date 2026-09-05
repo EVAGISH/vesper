@@ -51,6 +51,14 @@ export type Job = {
 
 export type Site = { world: string; half_m: number; ground: string };
 
+/** Operator-drawn zones on a site, in site metres. */
+export type SiteZones = {
+  world: string;
+  launch: [number, number][] | null;
+  safe: [number, number][][];
+  source: string | null;
+};
+
 /** Live world snapshot published by the warm session's /state endpoint. */
 export type LiveState = {
   t: number;

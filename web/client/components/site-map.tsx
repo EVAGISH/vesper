@@ -4,7 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useVesper } from "@/components/vesper-provider";
 import {
   fetchJSON, media, parseEvents,
-  type LiveState, type RunEvent, type Site, type Trajectory,
+  type LiveState, type RunEvent, type Site, type SiteZones, type Trajectory,
 } from "@/lib/vesper";
 
 // Interactive AO map: the site's own ground ortho (world frame, ±half_m,
@@ -31,6 +31,7 @@ export function SiteMap({ liveIp }: { liveIp?: string | null }) {
   const [picked, setPicked] = useState<Pick | null>(null);
 
   const [liveRaw, setLiveRaw] = useState<LiveState | null>(null);
+  const [zones, setZones] = useState<SiteZones | null>(null);
 
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const imgRef = useRef<HTMLImageElement | null>(null);
@@ -38,6 +39,15 @@ export function SiteMap({ liveIp }: { liveIp?: string | null }) {
   const drag = useRef({ on: false, x: 0, y: 0, moved: 0 });
   const hover = useRef<{ sx: number; sy: number } | null>(null);
   const trail = useRef<[number, number][]>([]); // drone 0's path this session
+
+  // the operator's zones for this site: where drones launch, where targets are
+  // off limits. Static per world, so fetched once when the site resolves.
+  useEffect(() => {
+    if (!site) return;
+    let alive = true;
+    fetchJSON<SiteZones>(`/api/zones/${site.world}`).then((z) => alive && setZones(z));
+    return () => { alive = false; };
+  }, [site]);
 
   // live telemetry from the warm session's /state (CORS-open on the box);
   // shown only while an ip is known, so stale state can't linger
@@ -160,6 +170,33 @@ export function SiteMap({ liveIp }: { liveIp?: string | null }) {
     g.fillRect(0, 0, m.W, m.H);
     const size = 2 * m.half * m.ppm;
     g.drawImage(img, m.toX(-m.half), m.toY(m.half), size, size);
+
+    // operator zones, under everything else: the launch pad (green) and the
+    // no-track safe areas (cyan), where a target is off limits
+    const zonePolys: [string, string, [number, number][]][] = [];
+    if (zones?.launch) zonePolys.push(["rgba(12,163,12,0.16)", "#0ca30c", zones.launch]);
+    for (const poly of zones?.safe ?? []) zonePolys.push(["rgba(120,220,255,0.14)", "#78dcff", poly]);
+    for (const [fill, stroke, poly] of zonePolys) {
+      if (poly.length < 3) continue;
+      g.beginPath();
+      g.moveTo(m.toX(poly[0][0]), m.toY(poly[0][1]));
+      for (const [x, y] of poly.slice(1)) g.lineTo(m.toX(x), m.toY(y));
+      g.closePath();
+      g.fillStyle = fill;
+      g.fill();
+      g.strokeStyle = stroke;
+      g.lineWidth = 1.5;
+      g.setLineDash([6, 4]);
+      g.stroke();
+      g.setLineDash([]);
+      const cx = poly.reduce((a, p) => a + p[0], 0) / poly.length;
+      const cy = poly.reduce((a, p) => a + p[1], 0) / poly.length;
+      g.fillStyle = stroke;
+      g.font = "9px ui-monospace, monospace";
+      g.textAlign = "center";
+      g.fillText(stroke === "#0ca30c" ? "LAUNCH" : "NO TRACK", m.toX(cx), m.toY(cy));
+      g.textAlign = "left";
+    }
 
     // mission waypoints: dashed route + diamonds (last sortie — hidden while live)
     if (!live && waypoints.length) {
@@ -322,7 +359,7 @@ export function SiteMap({ liveIp }: { liveIp?: string | null }) {
     g.textAlign = "right";
     g.fillText(`${nice >= 1000 ? `${nice / 1000} km` : `${nice} m`}`, m.W - 14, m.H - 22);
     g.textAlign = "left";
-  }, [site, traj, events, waypoints, live, mapping]);
+  }, [site, zones, traj, events, waypoints, live, mapping]);
 
   useEffect(() => {
     draw();

@@ -24,10 +24,9 @@ SPECIES_CROWN = {"Norway_Spruce": 0.26, "Lombardy_Poplar": 0.16, "Largetooth_Asp
                  "American_Beech": 0.46, "Hawthorn": 0.44, "Gray_Birch": 0.36}
 DEFAULT_H, DEFAULT_CROWN = 10.0, 0.35
 
-# Trunk and crown solids, as fractions of tree height. The same numbers author
-# the colliders in vesper.worlds.geo, so PhysX and the map agree on what is hard.
+# Trunk capsule, as fractions of tree height. The same numbers author the
+# capsule in vesper.worlds.geo, so PhysX and the map agree on the trunk.
 TRUNK_R, TRUNK_TOP = 0.025, 0.60      # trunk radius, trunk collider top
-CROWN_Z = 0.65                        # crown sphere centre
 
 # Roads a forklift would use, with a paved width in metres. Footways, steps and
 # paths are left out on purpose: a 1.2 m wide, 2.7 t forklift does not take the
@@ -154,9 +153,12 @@ def splat_canopy(trees, ground, n, half, cell):
 def splat_tree_solids(trees, ground, n, half, cell):
     """(tree_z float32, trunks float32) -- what a tree with colliders stops.
 
-    tree_z is the top of the hard tree over each cell: the crown sphere's upper
-    surface where the crown is, the trunk top over the trunk cell. trunks counts
-    trunks per cell, for keeping vehicles out of the thick of a wood.
+    The species colliders follow the leaf meshes, which the map cannot
+    reproduce; it keeps a conservative stand-in: over the crown disc the hard
+    top is the tree top, over the trunk cell it is at least the trunk top.
+    trunks counts trunks per cell, for keeping vehicles out of the thick of a
+    wood. Used for the privileged teacher's clearance and the fallback crash
+    test only -- the contact sensor is what actually decides a crash.
     """
     tree_z = ground.copy()
     trunks = np.zeros_like(ground)
@@ -166,7 +168,6 @@ def splat_tree_solids(trees, ground, n, half, cell):
             trunks[ri, ci] += 1.0
             tree_z[ri, ci] = max(tree_z[ri, ci], ground[ri, ci] + TRUNK_TOP * h)
         R = max(crown_r, cell * 0.5)
-        zc = CROWN_Z * h
         c0 = max(0, int((x - R + half) / cell)); c1 = min(n - 1, int(math.ceil((x + R + half) / cell)))
         r0 = max(0, int((y - R + half) / cell)); r1 = min(n - 1, int(math.ceil((y + R + half) / cell)))
         if c1 < c0 or r1 < r0:
@@ -177,7 +178,6 @@ def splat_tree_solids(trees, ground, n, half, cell):
         inside = d2 <= R * R
         if not inside.any():
             continue
-        cap = zc + np.sqrt(np.maximum(R * R - d2, 0.0))
         sub = tree_z[r0:r1 + 1, c0:c1 + 1]
-        np.copyto(sub, np.maximum(sub, ground[r0:r1 + 1, c0:c1 + 1] + cap), where=inside)
+        np.copyto(sub, np.maximum(sub, ground[r0:r1 + 1, c0:c1 + 1] + h), where=inside)
     return tree_z.astype(np.float32), trunks.astype(np.float32)
