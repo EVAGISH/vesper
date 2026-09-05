@@ -186,13 +186,19 @@ is a PhysX contact, it ends the episode, and the bonus scales with how much of
 the episode is left, so the only thing worth optimising is time. A contact with
 anything else is a crash.
 
-**Zones** (`vesper.worlds.zones`, `<site>_zones.json`). A launch polygon: every
-drone spawns inside it. Any number of no-track safe polygons, which bind twice
-over. A forklift inside one is protected: no sighting bonus, no touch reward,
-and touching it ends nothing. And the drone itself should not be there — a
-per-step penalty ramps up over the 25 m outside the boundary, is maximal
-inside, and going 15 m in ends the episode the way leaving the arena does. Both
-polygons are drawn on the AO map.
+**Zones** (`vesper.worlds.zones`, `<site>_zones.json`). Safe polygons are
+**friendly ground**, and the launch pad sits inside one. Every drone spawns at a
+random point on the pad with a random heading, and every step it spends over
+friendly ground costs — so the first thing worth learning is to leave. The
+penalty is monotone in the distance to the boundary (worst deep inside, half at
+the line, zero 25 m clear of it), so it points the way out the whole time, and
+nothing about it ends the episode. A forklift on friendly ground is protected:
+no sighting bonus, no touch reward, touching it ends nothing. Both polygons are
+drawn on the AO map.
+
+On Cornell the friendly zone is everything below the slope break, traced along
+the −12 m contour, and the pad is a 50 m square at (−170, −250) — 28 to 52 m of
+flying to clear friendly ground.
 
 The actor has no map, so on a general site it could not perceive that boundary.
 On one fixed site it can learn it from landmarks, which is what this is; if that

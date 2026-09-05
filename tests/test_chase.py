@@ -201,10 +201,10 @@ def _safe_world(world, poly):
     return world
 
 
-def test_the_drone_is_pushed_away_from_a_safe_zone(world):
-    # a 60 m square safe zone in the north-west quarter, clear of the building at x>40
+def test_leaving_friendly_ground_pays_all_the_way_out(world):
+    """The drone launches on friendly ground, so the penalty must point outward
+    the whole way -- deep inside worse than the edge, the edge worse than clear."""
     _safe_world(world, [[-80, 20], [-20, 20], [-20, 80], [-80, 80]])
-    task, cfg = _task(world)
     quat, vel, avb = _state()
     tgt = torch.full((2, 2, 3), 500.0)
     step = torch.zeros(2, dtype=torch.long)
@@ -215,26 +215,42 @@ def test_the_drone_is_pushed_away_from_a_safe_zone(world):
         _, r, term, info = t.step(torch.tensor([[x, y, 40.0]] * 2), vel, quat, avb, tgt, step, touched=no)
         return float(r[0]), bool(term[0]), info
 
-    far, _, i_far = at(0.0, -20.0)             # 45 m away: outside the ramp entirely
-    near, _, i_near = at(-10.0, 50.0)          # 10 m outside the east edge
-    edge, _, i_edge = at(-22.0, 50.0)          # 2 m inside
-    deep, deep_term, i_deep = at(-50.0, 50.0)  # 30 m in: a breach
+    deep, deep_term, i_deep = at(-50.0, 50.0)   # 30 m inside
+    edge_in, _, i_ein = at(-22.0, 50.0)         # 2 m inside
+    edge_out, _, i_eout = at(-18.0, 50.0)       # 2 m outside
+    clear, _, i_clear = at(0.0, -20.0)          # 45 m away: past the ramp
 
-    assert not i_far["in_safe"].any() and not i_near["in_safe"].any()
-    assert i_edge["in_safe"].all() and i_deep["in_safe"].all()
-    # the penalty grows all the way in, so there is a gradient pushing away
-    assert far > near > edge, f"{far:.2f} {near:.2f} {edge:.2f}"
-    assert not i_edge["safe_breach"].any(), "brushing the edge should cost, not kill"
-    assert i_deep["safe_breach"].all() and deep_term and deep < edge - 50
+    assert i_deep["in_safe"].all() and i_ein["in_safe"].all()
+    assert not i_eout["in_safe"].any() and not i_clear["in_safe"].any()
+    # strictly better the further out it gets, with no flat plateau inside
+    assert deep < edge_in < edge_out < clear, f"{deep:.3f} {edge_in:.3f} {edge_out:.3f} {clear:.3f}"
+    # being over friendly ground never ends the episode: the drone starts there
+    assert not deep_term
+    assert float(i_clear["safe_cost"][0]) == 0.0 and float(i_deep["safe_cost"][0]) > 0.5
+
+
+def test_launch_pad_sits_inside_friendly_ground_and_spawns_spread(world):
+    from vesper.worlds.zones import Zones
+    world.attach_zones(Zones(launch=[[-70, 30], [-30, 30], [-30, 70], [-70, 70]],
+                             safe=[[[-80, 20], [-20, 20], [-20, 80], [-80, 80]]]))
+    assert bool(((world.launch > 0.5) <= (world.safe > 0.5)).all()), "the pad must be friendly ground"
+    g = torch.Generator().manual_seed(3)
+    xy, ok = world.sample_cells_xy(world.launch, 400, g)
+    assert ok.all()
+    assert (xy[:, 0] >= -71).all() and (xy[:, 0] <= -29).all()
+    assert (xy[:, 1] >= 29).all() and (xy[:, 1] <= 71).all()
+    # a random position in the pad, not one corner of it
+    assert xy[:, 0].std() > 8 and xy[:, 1].std() > 8
+    assert world.in_safe(xy[:, 0], xy[:, 1]).all()
 
 
 def test_the_geofence_signal_is_signed_and_bounded(world):
     _safe_world(world, [[-80, 20], [-20, 20], [-20, 80], [-80, 80]])
     task, cfg = _task(world)
     g = task.geofence(torch.tensor([[0.0, -20.0, 40.0], [-10.0, 50.0, 40.0], [-50.0, 50.0, 40.0]]))
-    assert g[0].item() == pytest.approx(1.0)                 # well outside
-    assert 0.0 < g[1].item() < 1.0                           # approaching
-    assert g[2].item() == pytest.approx(-1.0)                # well inside
+    assert g[0].item() == pytest.approx(1.0)                 # well clear
+    assert 0.0 < g[1].item() < 1.0                           # just outside
+    assert g[2].item() < 0.0                                 # inside friendly ground
     assert float(g.abs().max()) <= 1.0
 
 
@@ -245,5 +261,5 @@ def test_no_safe_zone_means_no_penalty_and_no_termination(world):
     no = torch.zeros(2, 2, dtype=torch.bool)
     _, r, term, info = task.step(torch.tensor([[-50.0, 50.0, 40.0]] * 2), vel, quat, avb, tgt,
                                  torch.zeros(2, dtype=torch.long), touched=no)
-    assert not info["in_safe"].any() and not info["safe_breach"].any() and not term.any()
+    assert not info["in_safe"].any() and float(info["safe_cost"].max()) == 0.0 and not term.any()
     assert float(task.geofence(torch.tensor([[-50.0, 50.0, 40.0]] * 2))[0]) == pytest.approx(1.0)

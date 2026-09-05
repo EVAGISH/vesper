@@ -99,14 +99,17 @@ if env.zones_path:
     r, c = w.nearest_cell(d0[:, 0], d0[:, 1])
     check("drones launch inside the launch zone", float((w.launch[r, c] > 0.5).float().mean()) > 0.99,
           f"{100*float((w.launch[r, c] > 0.5).float().mean()):.0f}%")
+    check("drones spawn spread over the pad, not at one point",
+          float(d0[:, 0].std()) > 3.0 or float(d0[:, 1].std()) > 3.0,
+          f"spread {float(d0[:, 0].std()):.0f} x {float(d0[:, 1].std()):.0f} m")
     if float(w.safe.sum()) > 0:
-        check("no drone launches inside a safe zone",
-              not bool(w.in_safe(d0[:, 0], d0[:, 1]).any()))
-        check("the safe zone's distance field is finite where it should be",
+        check("the launch pad is friendly ground", bool(w.in_safe(d0[:, 0], d0[:, 1]).all()),
+              "the drone starts friendly and has to leave")
+        check("the friendly zone's distance field is built",
               float(w.safe_in.max()) > 5.0 and float(w.safe_out[w.safe > 0.5].max()) == 0.0,
               f"deepest point {float(w.safe_in.max()):.0f} m inside")
     else:
-        print("[SKIP] no safe zone in this world's zones file", flush=True)
+        print("[SKIP] no friendly zone in this world's zones file", flush=True)
 
 # --- camera
 if args.camera:
@@ -137,7 +140,8 @@ check("forklifts start inside the arena", float(vp[:, :2].abs().max()) <= args.a
 print(f"       roles: {[ROLES[int(i)][0] for i in env.driver.role.tolist()]}", flush=True)
 
 # --- step it under a random policy, biased forward so the drones actually fly
-zs, spd, agl, touches, crashes, nose_err, seen_frac, breaches, in_safe = [], [], [], 0, 0, [], [], 0, 0
+zs, spd, agl, touches, crashes, nose_err, seen_frac, in_safe, exits = [], [], [], 0, 0, [], [], 0, []
+was_in = None
 torch.manual_seed(0)
 t0 = time.time()
 act = torch.zeros(env.num_envs, env.num_actions, device=env.device)
@@ -162,8 +166,10 @@ for i in range(args.steps):
             head = torch.atan2(dv[fast, 1], dv[fast, 0])
             nose_err.append(torch.atan2(torch.sin(head - yaw), torch.cos(head - yaw)).abs())
         seen_frac.append(info["visible"].float().mean().clone())
-        breaches += int(info["safe_breach"].sum())
         in_safe += int(info["in_safe"].sum())
+        if was_in is not None:
+            exits.append(int((was_in & ~info["in_safe"]).sum()))
+        was_in = info["in_safe"].clone()
 else:
     check("observations stay finite", True)
 wall = time.time() - t0
@@ -193,7 +199,8 @@ check("the camera denies most forklifts most of the time", 0.0 <= v < 0.5,
 print(f"       drone AGL over the run: mean {float(torch.cat(agl).mean()):.0f} m", flush=True)
 
 if float(w.safe.sum()) > 0:
-    print(f"       safe zone: {in_safe} drone-steps inside, {breaches} breaches", flush=True)
+    print(f"       friendly ground: {in_safe} drone-steps over it, {sum(exits)} exits "
+          f"(the policy's first job is to leave)", flush=True)
 
 # --- the actor's vector must carry no world position
 pr = obs["policy"]
