@@ -105,16 +105,16 @@ def test_species_carry_colliders_and_the_map_sees_them(tmp_path):
         trunk = sp.GetPrimAtPath("/Tree/trunk_col")
         assert trunk and trunk.HasAPI(UsdPhysics.CollisionAPI), f"{name}: trunk capsule missing"
         assert UsdGeom.Imageable(trunk).GetPurposeAttr().Get() == UsdGeom.Tokens.guide
-            meshes = [pr for pr in Usd.PrimRange(sp.GetPrimAtPath("/Tree")) if pr.IsA(UsdGeom.Mesh)]
-            assert meshes, f"{name}: no meshes under /Tree"
-            for m in meshes:
-                if not UsdGeom.Mesh(m).GetPointsAttr().Get():
-                    # A few source assets use empty Mesh prims as grouping
-                    # nodes. PhysX rejects collision schemas on these.
-                    assert not m.HasAPI(UsdPhysics.CollisionAPI)
-                    continue
-                # leaves are solid, and shaped like leaves: a convex decomposition of the mesh itself
-                assert m.HasAPI(UsdPhysics.CollisionAPI) and m.HasAPI(UsdPhysics.MeshCollisionAPI)
+        meshes = [pr for pr in Usd.PrimRange(sp.GetPrimAtPath("/Tree")) if pr.IsA(UsdGeom.Mesh)]
+        assert meshes, f"{name}: no meshes under /Tree"
+        for m in meshes:
+            if not UsdGeom.Mesh(m).GetPointsAttr().Get():
+                # A few source assets use empty Mesh prims as grouping
+                # nodes. PhysX rejects collision schemas on these.
+                assert not m.HasAPI(UsdPhysics.CollisionAPI)
+                continue
+            # leaves are solid, and shaped like leaves: a convex decomposition of the mesh itself
+            assert m.HasAPI(UsdPhysics.CollisionAPI) and m.HasAPI(UsdPhysics.MeshCollisionAPI)
             assert UsdPhysics.MeshCollisionAPI(m).GetApproximationAttr().Get() == UsdPhysics.Tokens.convexDecomposition
             assert m.GetAttribute("physxConvexDecompositionCollision:maxConvexHulls").Get() == geo.TREE_MAX_HULLS
     # and a visual-only build has none

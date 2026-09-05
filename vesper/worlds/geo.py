@@ -969,7 +969,11 @@ def build_manifest(site: GeoSite, data_dir: Path, rep: "BuildReport") -> dict:
 
 
 def build_site(site: GeoSite, data_dir: Path, veg_dir: Path, out_usd: Path,
-               spawn_override=None) -> BuildReport:
+               spawn_override=None, surface_model: bool = False) -> BuildReport:
+    """surface_model=True: the DEM is a Digital Surface Model (buildings + trees
+    already in the elevation, e.g. from satellite stereo), so the terrain mesh
+    carries the built structure itself -- skip OSM building extrusion and imagery
+    canopy so they are not doubled on top of what the DSM already contains."""
     rng = np.random.default_rng(site.seed)                     # textures, spawn
     vrng = np.random.default_rng([site.seed, site.variant])    # the scatter: heights, trees
     data_dir, veg_dir, out_usd = Path(data_dir), Path(veg_dir).resolve(), Path(out_usd).resolve()
@@ -987,15 +991,21 @@ def build_site(site: GeoSite, data_dir: Path, veg_dir: Path, out_usd: Path,
     # terrain
     pts, faces, st = terrain.mesh()
     tex = out_dir / "ground.png"
-    naip = data_dir / "naip.png"
-    bake_ground_texture(site, osm, tex, rng, ortho=naip if naip.exists() else None)
+    # US builds cache the ortho as naip.png; global builds as imagery.png. Either
+    # one, when present, is draped as the ground albedo instead of painted cover.
+    ortho_src = next((data_dir / f for f in ("naip.png", "imagery.png") if (data_dir / f).exists()), None)
+    bake_ground_texture(site, osm, tex, rng, ortho=ortho_src)
     tmesh = _mesh(stage, "/World/terrain", pts, np.full(len(faces) // 4, 4), faces, st=st, collide=True)
     mat = _preview_material(stage, "/World/Looks/ground", tex, out_dir, roughness=0.95)
     UsdShade.MaterialBindingAPI.Apply(tmesh.GetPrim()).Bind(mat)
     rep.terrain_verts = len(pts); rep.z_range = [round(float(pts[:, 2].min()), 1), round(float(pts[:, 2].max()), 1)]
 
-    facades, roofs = bake_facade_textures(out_dir, rng)
-    rep.buildings, building_h = build_buildings(stage, terrain, osm, vrng, facades, roofs, out_dir)
+    if surface_model:
+        rep.buildings = 0                       # the DSM already carries the buildings
+        building_h = None
+    else:
+        facades, roofs = bake_facade_textures(out_dir, rng)
+        rep.buildings, building_h = build_buildings(stage, terrain, osm, vrng, facades, roofs, out_dir)
     rep.water = build_water(stage, terrain, osm, out_dir)
 
     if spawn_override is not None:
@@ -1003,7 +1013,9 @@ def build_site(site: GeoSite, data_dir: Path, veg_dir: Path, out_usd: Path,
     else:
         spawn = choose_spawn(site, terrain, osm, rng)
     ortho = next((data_dir / f for f in ("naip.png", "imagery.png") if (data_dir / f).exists()), None)
-    canopy_xy = canopy_from_imagery(ortho, site, vrng) if (ortho and site.imagery_canopy) else None
+    # a DSM already has tree crowns baked into the surface; don't stamp models on top
+    canopy_xy = (canopy_from_imagery(ortho, site, vrng)
+                 if (ortho and site.imagery_canopy and not surface_model) else None)
     rep.trees, tree_xy, tree_h = build_trees(stage, site, terrain, osm, vrng, veg_dir, out_dir, spawn,
                                              canopy_xy=canopy_xy)
 

@@ -34,6 +34,8 @@ parser.add_argument("--targets", type=int, default=3)
 parser.add_argument("--arena", type=float, default=300.0)
 parser.add_argument("--hfov", type=float, default=75.0)
 parser.add_argument("--policy", default=None, help="initial checkpoint (optional)")
+parser.add_argument("--world", default=None, help="world USD (default the Cornell site)")
+parser.add_argument("--map", default=None, help="world map npz (default beside the USD)")
 parser.add_argument("--every", type=int, default=2, help="render 1 frame per N control steps")
 parser.add_argument("--groups", type=int, default=1,
                     help="vehicle sets shared by groups of envs; 1 = every drone hunts the same three")
@@ -71,6 +73,10 @@ from vesper.lab.search_env import SearchEnv, SearchEnvCfg  # noqa: E402
 from vesper.lab.search_task import sensor_pose  # noqa: E402
 
 cfg = SearchEnvCfg()
+if args.world:
+    cfg.world_usd = args.world
+if args.map:
+    cfg.world_map = args.map
 # The RTX-render crash on the 16k-tree world faults inside omni.physx.fabric's
 # GPU sync. Fabric is a throughput optimization we don't need for a live render
 # session -- disabling it renders the drone feeds cleanly (same fix as fly_search).

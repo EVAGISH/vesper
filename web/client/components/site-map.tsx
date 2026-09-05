@@ -97,9 +97,13 @@ export function SiteMap({ liveIp }: { liveIp?: string | null }) {
 
   useEffect(() => {
     let alive = true;
-    fetchJSON<Site[]>("/api/site").then((d) => alive && setSite(d?.[0] ?? null));
+    // the map follows the active environment; poll so it updates when you switch
+    const load = () => fetchJSON<Site>("/api/active").then((d) => alive && setSite(d ?? null));
+    load();
+    const id = setInterval(load, 5000);
     return () => {
       alive = false;
+      clearInterval(id);
     };
   }, []);
 

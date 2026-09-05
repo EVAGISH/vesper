@@ -111,6 +111,15 @@ export function runKind(run: Run): RunKind {
   return "flight";
 }
 
+// Two lanes, matching the app's two modes: Operations replays sorties (a policy
+// or mission executing a task); Lab holds how policies are made and evaluated.
+export type RunLane = "operations" | "lab";
+
+export function runLane(run: Run): RunLane {
+  const k = runKind(run);
+  return k === "flight" || k === "search" ? "operations" : "lab";
+}
+
 export const media = (runId: string, file: string) => `/media/${runId}/${file}`;
 
 // Operator-facing names for run artifacts — never show raw file names in the UI.
