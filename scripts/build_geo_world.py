@@ -31,6 +31,15 @@ ap.add_argument("--leg-m", type=float, default=90.0,
 ap.add_argument("--max-sim-s", type=float, default=75.0)
 ap.add_argument("--source", choices=["auto", "us", "global"], default="auto",
                 help="auto picks USGS 3DEP+NAIP inside the US, Copernicus+painted elsewhere")
+ap.add_argument("--dsm", default=None, metavar="GEOTIFF",
+                help="ingest a provided elevation GeoTIFF (any CRS) instead of fetching. "
+                     "A high-res Digital Surface Model (Maxar/Airbus, ~0.5 m) is the "
+                     "high-fidelity path for places with no open lidar (e.g. Ukraine).")
+ap.add_argument("--ortho", default=None, metavar="IMG",
+                help="ingest a provided ortho image (GeoTIFF or PNG covering the site) as the ground albedo")
+ap.add_argument("--surface-model", action="store_true",
+                help="treat --dsm as a surface model (buildings+trees in the elevation): "
+                     "build them into the terrain mesh, skip OSM prisms and stamped trees")
 ap.add_argument("--spawn", type=float, nargs=2, default=None, metavar=("X", "Y"),
                 help="local ENU metres from the lat/lon origin; default picks open ground automatically")
 ap.add_argument("--tex-px", type=int, default=4096,
@@ -48,7 +57,12 @@ US_LON = (-125.0, -66.0)
 US_LAT = (24.0, 50.0)
 in_us = US_LON[0] < a.lon < US_LON[1] and US_LAT[0] < a.lat < US_LAT[1]
 use_us = {"us": True, "global": False, "auto": in_us}[a.source]
-if use_us:
+ingest = a.dsm is not None
+if ingest:
+    use_us = False
+    print(f"source: provided DSM {a.dsm}" + (" (surface model)" if a.surface_model else "")
+          + (f" + ortho {a.ortho}" if a.ortho else " + Esri ortho"))
+elif use_us:
     print(f"source: USGS 3DEP (1 m lidar DEM) + NAIP (1 m aerial imagery)")
 else:
     print("source: Copernicus GLO-30 (30 m DEM) + Esri World Imagery ortho + OSM")
@@ -141,7 +155,45 @@ if use_us and (a.refetch or not (data / "naip.png").exists()):
     canvas.save(data / "naip.png")
     print(f"NAIP: {TILES*TPX}px mosaic at ~{2*half_m/(TILES*TPX):.2f} m/px")
 
-if (not use_us) and (a.refetch or not (data / "dem.npy").exists()):
+if ingest and (a.refetch or not (data / "dem.npy").exists()):
+    # Read a provided elevation GeoTIFF (any CRS) reprojected to EPSG:4326 and
+    # cropped to the site bbox -- the drop-in point for Maxar/Airbus DSMs.
+    import rasterio
+    from rasterio.vrt import WarpedVRT
+    from rasterio.windows import from_bounds
+    with rasterio.open(a.dsm) as src, WarpedVRT(src, crs="EPSG:4326") as vrt:
+        win = from_bounds(bbox[1], bbox[0], bbox[3], bbox[2], transform=vrt.transform)
+        arr = vrt.read(1, window=win).astype(np.float32); tr = vrt.window_transform(win)
+    arr[arr < -1000] = np.nan
+    if np.isnan(arr).all():
+        raise SystemExit("DSM has no data over this bbox -- check coordinates/coverage")
+    arr[np.isnan(arr)] = np.nanmean(arr)
+    np.save(data / "dem.npy", arr)
+    (data / "dem_meta.json").write_text(json.dumps(
+        {"transform": list(tr)[:6], "bbox": bbox, "source": f"DSM {a.dsm}"}))
+    span = (half_m + 300) * 2
+    print(f"DSM: {arr.shape} cells at ~{span/max(arr.shape):.1f} m/px, {arr.min():.0f}-{arr.max():.0f} m")
+
+if a.ortho and (a.refetch or not (data / "imagery.png").exists()):
+    # Provided ortho -> ground albedo. GeoTIFF is warped+cropped to the site
+    # square; a plain image is assumed to already cover it 1:1.
+    from PIL import Image as _Im
+    if a.ortho.lower().endswith((".tif", ".tiff")):
+        import rasterio
+        from rasterio.vrt import WarpedVRT
+        from rasterio.windows import from_bounds
+        dlat_s = half_m / 110574.0
+        dlon_s = half_m / (111320.0 * math.cos(math.radians(a.lat)))
+        with rasterio.open(a.ortho) as src, WarpedVRT(src, crs="EPSG:4326") as vrt:
+            win = from_bounds(a.lon - dlon_s, a.lat - dlat_s, a.lon + dlon_s, a.lat + dlat_s,
+                              transform=vrt.transform)
+            rgb = vrt.read((1, 2, 3), window=win)
+        _Im.fromarray(np.transpose(rgb, (1, 2, 0)).astype(np.uint8)).save(data / "imagery.png")
+    else:
+        _Im.open(a.ortho).convert("RGB").save(data / "imagery.png")
+    print(f"ortho: ingested {a.ortho}")
+
+if (not use_us) and (not ingest) and (a.refetch or not (data / "dem.npy").exists()):
     import rasterio
     from rasterio.windows import from_bounds
     # Copernicus GLO-30 tiles are 1x1 deg; a site can straddle a tile edge, so
@@ -157,7 +209,7 @@ if (not use_us) and (a.refetch or not (data / "dem.npy").exists()):
     (data / "dem_meta.json").write_text(json.dumps({"transform": list(tr)[:6], "bbox": bbox, "source": url}))
     print(f"DEM (Copernicus GLO-30): {arr.shape} cells, {arr.min():.0f}-{arr.max():.0f} m")
 
-if (not use_us) and (a.refetch or not (data / "imagery.png").exists()):
+if (not use_us) and (not a.ortho) and (a.refetch or not (data / "imagery.png").exists()):
     # Global true-colour ortho. Esri World Imagery is sub-metre over most populated
     # areas (incl. Ukrainian cities) and covers the whole planet -- enough to drape
     # the ground and detect canopy. Same site-exact tiled mosaic as the NAIP path.
@@ -171,26 +223,41 @@ if (not use_us) and (a.refetch or not (data / "imagery.png").exists()):
     TILES = max(3, a.tex_px // 1024)
     TPX = a.tex_px // TILES
     canvas = _Im.new("RGB", (TILES * TPX, TILES * TPX))
-    ok = True
+
+    def _tile(w0, n0, w1, n1):
+        # ArcGIS export is flaky under load; retry with backoff before giving up
+        for attempt in range(4):
+            try:
+                rr = requests.get(
+                    "https://services.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/export",
+                    params={"bbox": f"{w0},{n0},{w1},{n1}", "bboxSR": 4326,
+                            "size": f"{TPX},{TPX}", "format": "jpg", "f": "image"}, timeout=120)
+                if rr.ok and not rr.headers.get("content-type", "").startswith(("application/json", "text/")):
+                    return _Im.open(_io.BytesIO(rr.content)).convert("RGB")
+            except requests.exceptions.RequestException:
+                pass
+            time.sleep(2 * (attempt + 1))
+        return None
+
+    missing = 0
     for ty in range(TILES):
         for tx in range(TILES):
             w0 = Wn + (En - Wn) * tx / TILES
             w1 = Wn + (En - Wn) * (tx + 1) / TILES
             n1 = Nn - (Nn - Sn) * ty / TILES
             n0 = Nn - (Nn - Sn) * (ty + 1) / TILES
-            rr = requests.get(
-                "https://services.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/export",
-                params={"bbox": f"{w0},{n0},{w1},{n1}", "bboxSR": 4326,
-                        "size": f"{TPX},{TPX}", "format": "jpg", "f": "image"}, timeout=300)
-            if not rr.ok or rr.headers.get("content-type", "").startswith(("application/json", "text/")):
-                print(f"  Esri imagery tile failed ({rr.status_code}); ground will be painted from land cover")
-                ok = False; break
-            canvas.paste(_Im.open(_io.BytesIO(rr.content)).convert("RGB"), (tx * TPX, ty * TPX))
-        if not ok:
-            break
-    if ok:
+            tile = _tile(w0, n0, w1, n1)
+            if tile is None:
+                missing += 1                          # tolerate a straggler; leave it black
+                print(f"  Esri tile {ty},{tx} failed after retries; leaving a gap")
+            else:
+                canvas.paste(tile, (tx * TPX, ty * TPX))
+    if missing < TILES * TILES:                       # got at least some imagery
         canvas.save(data / "imagery.png")
-        print(f"imagery (Esri World Imagery): {TILES*TPX}px mosaic at ~{2*half_m/(TILES*TPX):.2f} m/px")
+        print(f"imagery (Esri World Imagery): {TILES*TPX}px mosaic at ~{2*half_m/(TILES*TPX):.2f} m/px"
+              + (f" ({missing} tile gaps)" if missing else ""))
+    else:
+        print("  all Esri tiles failed; ground will be painted from land cover")
 if a.refetch or not (data / "osm.json").exists():
     import requests
     S, W, N, E = bbox
@@ -219,7 +286,7 @@ if a.refetch or not (data / "osm.json").exists():
 t0 = time.time()
 site = GeoSite(a.lat, a.lon, half_m, res_m=a.res, seed=a.seed, leg_m=a.leg_m, tex_px=a.tex_px)
 rep = build_site(site, data, root / "assets" / "vegetation", data / f"{a.site}.usd",
-                 spawn_override=a.spawn)
+                 spawn_override=a.spawn, surface_model=a.surface_model)
 print(f"built in {time.time() - t0:.0f}s: terrain {rep.terrain_verts} verts z[{rep.z_range[0]},{rep.z_range[1]}], "
       f"{rep.buildings} buildings, {rep.water} water bodies, {rep.trees} trees")
 print(f"spawn (x,y)={rep.spawn_xy} ground z={rep.spawn_ground_z}; takeoff {rep.takeoff_alt_m} m; waypoints {rep.waypoints}")
