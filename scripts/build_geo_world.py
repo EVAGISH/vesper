@@ -40,6 +40,9 @@ ap.add_argument("--ortho", default=None, metavar="IMG",
 ap.add_argument("--surface-model", action="store_true",
                 help="treat --dsm as a surface model (buildings+trees in the elevation): "
                      "build them into the terrain mesh, skip OSM prisms and stamped trees")
+ap.add_argument("--smooth-dsm-m", type=float, default=3.0,
+                help="median-filter window (m) for an ingested --dsm, to remove tree/edge "
+                     "spikes; 0 disables")
 ap.add_argument("--spawn", type=float, nargs=2, default=None, metavar=("X", "Y"),
                 help="local ENU metres from the lat/lon origin; default picks open ground automatically")
 ap.add_argument("--tex-px", type=int, default=4096,
@@ -156,23 +159,45 @@ if use_us and (a.refetch or not (data / "naip.png").exists()):
     print(f"NAIP: {TILES*TPX}px mosaic at ~{2*half_m/(TILES*TPX):.2f} m/px")
 
 if ingest and (a.refetch or not (data / "dem.npy").exists()):
-    # Read a provided elevation GeoTIFF (any CRS) reprojected to EPSG:4326 and
-    # cropped to the site bbox -- the drop-in point for Maxar/Airbus DSMs.
+    # Ingest a provided elevation GeoTIFF (any CRS) -- the drop-in for Maxar/Airbus
+    # or OpenDroneMap DSMs. The DSM's OWN extent defines the site: we center on it
+    # and clamp half_m to fit inside, so the saved transform always matches the
+    # array (a request bbox larger than the data would desync them and flatten it).
     import rasterio
     from rasterio.vrt import WarpedVRT
-    from rasterio.windows import from_bounds
     with rasterio.open(a.dsm) as src, WarpedVRT(src, crs="EPSG:4326") as vrt:
-        win = from_bounds(bbox[1], bbox[0], bbox[3], bbox[2], transform=vrt.transform)
-        arr = vrt.read(1, window=win).astype(np.float32); tr = vrt.window_transform(win)
-    arr[arr < -1000] = np.nan
+        b = vrt.bounds
+        a.lat = (b.bottom + b.top) / 2.0
+        a.lon = (b.left + b.right) / 2.0
+        span_lat_m = (b.top - b.bottom) * 110574.0
+        span_lon_m = (b.right - b.left) * 111320.0 * math.cos(math.radians(a.lat))
+        half_m = min(half_m, 0.45 * min(span_lat_m, span_lon_m))   # fit inside, 10% margin
+        scale = min(1.0, 4000.0 / max(vrt.width, vrt.height))       # cap the raster size
+        oh, ow = max(1, int(vrt.height * scale)), max(1, int(vrt.width * scale))
+        arr = vrt.read(1, out_shape=(oh, ow)).astype(np.float32)
+        tr = [(b.right - b.left) / ow, 0.0, b.left, 0.0, -(b.top - b.bottom) / oh, b.top]
+    void = (arr <= -1000) | (arr == 0)                             # ODM fills outside-hull with 0/nodata
+    arr[void] = np.nan
     if np.isnan(arr).all():
-        raise SystemExit("DSM has no data over this bbox -- check coordinates/coverage")
-    arr[np.isnan(arr)] = np.nanmean(arr)
+        raise SystemExit("DSM has no valid data")
+    arr[np.isnan(arr)] = np.nanmin(arr)                            # voids drop to the low point, no spikes
+    if a.smooth_dsm_m > 0:
+        # Raw DSM meshed as terrain spikes at trees / reconstruction noise. A
+        # median filter over ~smooth_dsm_m removes isolated spikes and turns tree
+        # canopy into gentle mounds -- the honest form of DSM terrain.
+        from scipy.ndimage import median_filter
+        px_m = (b.right - b.left) * 111320.0 * math.cos(math.radians(a.lat)) / ow
+        k = max(3, int(round(a.smooth_dsm_m / max(px_m, 1e-6))) | 1)   # odd window
+        arr = median_filter(arr, size=min(k, 41)).astype(np.float32)
+        print(f"  denoised DSM: {a.smooth_dsm_m:.0f} m median ({k}px)")
+    dlat = (half_m + 300) / 110574.0
+    dlon = (half_m + 300) / (111320.0 * math.cos(math.radians(a.lat)))
+    bbox = (a.lat - dlat, a.lon - dlon, a.lat + dlat, a.lon + dlon)
     np.save(data / "dem.npy", arr)
     (data / "dem_meta.json").write_text(json.dumps(
-        {"transform": list(tr)[:6], "bbox": bbox, "source": f"DSM {a.dsm}"}))
-    span = (half_m + 300) * 2
-    print(f"DSM: {arr.shape} cells at ~{span/max(arr.shape):.1f} m/px, {arr.min():.0f}-{arr.max():.0f} m")
+        {"transform": tr, "bbox": list(bbox), "source": f"DSM {a.dsm}"}))
+    print(f"DSM: {arr.shape} cells over a {2*half_m:.0f} m site, "
+          f"{np.nanmin(arr):.0f}-{np.nanmax(arr):.0f} m; center {a.lat:.5f},{a.lon:.5f}")
 
 if a.ortho and (a.refetch or not (data / "imagery.png").exists()):
     # Provided ortho -> ground albedo. GeoTIFF is warped+cropped to the site
