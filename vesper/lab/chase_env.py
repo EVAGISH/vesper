@@ -57,7 +57,7 @@ CRASH_FORCE_N = 2.0          # contact force with anything else that counts as a
 
 @configclass
 class ChaseEnvCfg(VesperQuadEnvCfg):
-    episode_length_s = 60.0
+    episode_length_s = 90.0          # ~1200 m of path: enough to cross the site
     decimation = 4                                  # 25 Hz guidance over a 100 Hz inner loop
     sim: SimulationCfg = SimulationCfg(dt=1 / 100, render_interval=4)
     action_space = 3                                # body-frame forward / left / up
@@ -68,7 +68,7 @@ class ChaseEnvCfg(VesperQuadEnvCfg):
     world_map: str = CORNELL_MAP
     zones: str | None = None                        # zones.json; default: beside the map or <site>_zones.json
     vehicle_model: str | None = None
-    n_targets: int = 6
+    n_targets: int = 12
     vehicle_cycle_s: float = 180.0                  # forklifts are re-placed this often
     accel_limit: float = 11.0
     yaw_follow_tau_s: float = 0.6

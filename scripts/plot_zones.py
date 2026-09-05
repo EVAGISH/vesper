@@ -24,7 +24,7 @@ ap.add_argument("--map", default=str(ROOT / "assets" / "cornell" / "cornell_map.
 ap.add_argument("--zones", default=None, help="default: beside the map, else <site>_zones.json")
 ap.add_argument("--ground", default=None, help="default: ground.png beside the map")
 ap.add_argument("--out", default=str(ROOT / "docs" / "cornell_zones.png"))
-ap.add_argument("--arena", type=float, default=300.0)
+ap.add_argument("--arena", type=float, default=590.0)
 ap.add_argument("--px", type=int, default=1400)
 ap.add_argument("--spawns", type=int, default=200)
 a = ap.parse_args()

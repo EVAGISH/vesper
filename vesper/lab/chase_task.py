@@ -47,8 +47,11 @@ from vesper.lab.frames import PROPRIO_DIM, camera_axis, proprio, tilt_from_quat,
 
 @dataclass
 class ChaseCfg:
-    n_targets: int = 6                 # forklifts on the site, shared by every drone
-    arena_half: float = 300.0          # square about the world centre the episode lives in
+    n_targets: int = 12                # forklifts on the site, shared by every drone
+    # The whole site, not a box inside it: the Cornell raster is 1200 m square,
+    # and with oob_margin the hard limit lands exactly on its edge, so the drone
+    # is bounded by the terrain rather than by an invisible wall inside it.
+    arena_half: float = 590.0
 
     # --- drone spawn ---
     spawn_alt_min: float = 25.0        # above local ground (m)
@@ -69,7 +72,7 @@ class ChaseCfg:
     clear_min: float = 6.0             # clearance below which the shaping penalty starts (m)
     tilt_limit: float = 1.4
     ceiling: float = 150.0
-    oob_margin: float = 40.0
+    oob_margin: float = 10.0
 
     # --- reward ---
     # Ordering, best to worst: touch early > touch late > see one > fly around

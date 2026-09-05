@@ -196,9 +196,12 @@ nothing about it ends the episode. A forklift on friendly ground is protected:
 no sighting bonus, no touch reward, touching it ends nothing. Both polygons are
 drawn on the AO map.
 
-On Cornell the friendly zone is everything below the slope break, traced along
-the −12 m contour, and the pad is a 50 m square at (−170, −250) — 28 to 52 m of
-flying to clear friendly ground.
+On Cornell the slope bisects the site. Everything below the break is friendly
+(42% of the 1200 m square, traced along the −12 m contour, so the line follows
+Libe Slope and runs east along both gorge floors); the campus above it is the
+hunting ground where the forklifts drive. The whole raster is in play — the
+arena is the terrain's own edge, not a box inside it — and the pad is a 50 m
+square at (−170, −250), 65 to 132 m of flying to clear friendly ground.
 
 The actor has no map, so on a general site it could not perceive that boundary.
 On one fixed site it can learn it from landmarks, which is what this is; if that
