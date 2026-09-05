@@ -14,6 +14,7 @@ controller in the env. Forward is +X.
     python3 -c "from vesper.worlds.vehicle import write_tank_usd; \
                 write_tank_usd('assets/vehicles/tank.usd')"
 """
+import math
 from pathlib import Path
 
 from pxr import Gf, Sdf, Usd, UsdGeom, UsdPhysics, UsdShade
@@ -42,29 +43,81 @@ def _material(stage, path, rgb, rough=0.85):
     return mat
 
 
+def _mesh(stage, path, points, counts, indices, mat):
+    """A polygon mesh with authored extent and no subdivision.
+
+    The visual parts were UsdGeom.Cube/Cylinder implicit gprims, and those were
+    wrongly blamed for the tank never appearing in any render. They were not the
+    cause: the pose simply never reached the renderer (see
+    ChaseEnv._sync_render_poses). Meshes are kept because this is the form that
+    has been verified end to end on the GPU box, and because authoring points and
+    extent explicitly removes any dependence on implicit-gprim support.
+
+    subdivisionScheme must be "none" -- the UsdGeom.Mesh default is catmullClark,
+    which would round every box off into a blob.
+    """
+    m = UsdGeom.Mesh.Define(stage, path)
+    m.CreatePointsAttr([Gf.Vec3f(*p) for p in points])
+    m.CreateFaceVertexCountsAttr(counts)
+    m.CreateFaceVertexIndicesAttr(indices)
+    m.CreateSubdivisionSchemeAttr(UsdGeom.Tokens.none)
+    m.CreateDoubleSidedAttr(True)
+    lo = [min(p[i] for p in points) for i in range(3)]
+    hi = [max(p[i] for p in points) for i in range(3)]
+    m.CreateExtentAttr([Gf.Vec3f(*lo), Gf.Vec3f(*hi)])
+    UsdShade.MaterialBindingAPI.Apply(m.GetPrim()).Bind(mat)
+    return m
+
+
 def _box(stage, path, size, translate, mat):
-    c = UsdGeom.Cube.Define(stage, path)
-    c.CreateSizeAttr(2.0)                      # unit cube of edge 2; scale to size
-    x = UsdGeom.Xformable(c)
-    x.AddTranslateOp().Set(Gf.Vec3d(*translate))
-    x.AddScaleOp().Set(Gf.Vec3f(size[0] / 2, size[1] / 2, size[2] / 2))
-    UsdShade.MaterialBindingAPI.Apply(c.GetPrim()).Bind(mat)
-    return c
+    sx, sy, sz = size[0] / 2, size[1] / 2, size[2] / 2
+    tx, ty, tz = translate
+    points = [(tx + x * sx, ty + y * sy, tz + z * sz)
+              for x, y, z in ((-1, -1, -1), (1, -1, -1), (1, 1, -1), (-1, 1, -1),
+                              (-1, -1, 1), (1, -1, 1), (1, 1, 1), (-1, 1, 1))]
+    faces = [(0, 3, 2, 1), (4, 5, 6, 7), (0, 1, 5, 4),
+             (1, 2, 6, 5), (2, 3, 7, 6), (3, 0, 4, 7)]
+    indices = [i for f in faces for i in f]
+    return _mesh(stage, path, points, [4] * 6, indices, mat)
 
 
-def _cyl(stage, path, radius, height, translate, mat, axis="X"):
-    c = UsdGeom.Cylinder.Define(stage, path)
-    c.CreateRadiusAttr(radius); c.CreateHeightAttr(height); c.CreateAxisAttr(axis)
-    UsdGeom.Xformable(c).AddTranslateOp().Set(Gf.Vec3d(*translate))
-    UsdShade.MaterialBindingAPI.Apply(c.GetPrim()).Bind(mat)
-    return c
+def _cyl(stage, path, radius, height, translate, mat, axis="X", segments=16):
+    """Tessellated cylinder centred on `translate`, its length along `axis`."""
+    basis = {"X": ((1, 0, 0), (0, 1, 0), (0, 0, 1)),
+             "Y": ((0, 1, 0), (0, 0, 1), (1, 0, 0)),
+             "Z": ((0, 0, 1), (1, 0, 0), (0, 1, 0))}[axis]
+    d, u, v = basis
+    half = height / 2
+
+    def point(theta, end):
+        c, s = math.cos(theta), math.sin(theta)
+        return tuple(translate[i] + d[i] * end * half + u[i] * radius * c + v[i] * radius * s
+                     for i in range(3))
+
+    step = 2.0 * math.pi / segments
+    points = ([point(i * step, -1.0) for i in range(segments)]
+              + [point(i * step, 1.0) for i in range(segments)])
+    counts, indices = [], []
+    for i in range(segments):                                   # side wall
+        j = (i + 1) % segments
+        counts.append(4)
+        indices += [i, j, segments + j, segments + i]
+    counts.append(segments)                                     # end caps
+    indices += list(range(segments - 1, -1, -1))
+    counts.append(segments)
+    indices += list(range(segments, 2 * segments))
+    return _mesh(stage, path, points, counts, indices, mat)
 
 
 def write_tank_usd(out_path, paint=(0.24, 0.31, 0.18)) -> Path:
     """Write the custom drivable tank rigid body used by the training tasks."""
     out = Path(out_path); out.parent.mkdir(parents=True, exist_ok=True)
-    stage = Usd.Stage.CreateNew(str(out)) if not out.exists() else Usd.Stage.Open(str(out))
-    stage.RemovePrim("/Vehicle")
+    # Always rebuild from nothing. Opening an existing stage and removing
+    # /Vehicle leaves the old run's materials and gprims behind, so a file
+    # regenerated across a geometry change ends up holding both versions.
+    if out.exists():
+        out.unlink()
+    stage = Usd.Stage.CreateNew(str(out))
     UsdGeom.SetStageUpAxis(stage, UsdGeom.Tokens.z)
     UsdGeom.SetStageMetersPerUnit(stage, 1.0)
 
@@ -86,8 +139,14 @@ def write_tank_usd(out_path, paint=(0.24, 0.31, 0.18)) -> Path:
     # z=0 so placement on sampled terrain is predictable.
     _box(stage, "/Vehicle/lower_hull", HULL, (0.0, 0.0, HULL_Z), body)
     col_h = HULL_Z + HULL[2] / 2
-    col = _box(stage, "/Vehicle/collision", (HULL[0], HULL[1], col_h),
-               (0.0, 0.0, col_h / 2), body)
+    # The collider stays an implicit UsdGeom.Cube: PhysX reads it as a box
+    # shape, which is what a dynamic rigid body needs. A mesh here would become
+    # a triangle collider and be rejected for a moving body.
+    col = UsdGeom.Cube.Define(stage, "/Vehicle/collision")
+    col.CreateSizeAttr(2.0)
+    col_x = UsdGeom.Xformable(col)
+    col_x.AddTranslateOp().Set(Gf.Vec3d(0.0, 0.0, col_h / 2))
+    col_x.AddScaleOp().Set(Gf.Vec3f(HULL[0] / 2, HULL[1] / 2, col_h / 2))
     UsdPhysics.CollisionAPI.Apply(col.GetPrim())
     UsdGeom.Imageable(col).CreateVisibilityAttr(UsdGeom.Tokens.invisible)
 

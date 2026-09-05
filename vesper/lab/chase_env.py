@@ -138,6 +138,11 @@ class ChaseEnv(VesperQuadEnv):
         self._seg_labels_n = -1
         self._veh_step = 0
         self._veh_cycle = int(cfg.vehicle_cycle_s / self._dt)
+        self._veh_ops = None
+        self._robot_ops = None
+        # Syncing costs USD writes per step, so only pay it when something
+        # is actually being rendered: a tiled camera, or an external one.
+        self._render_sync = bool(cfg.camera) or render_mode is not None
         self._place_vehicles()
 
     # ---------------------------------------------------------------- scene
@@ -218,6 +223,61 @@ class ChaseEnv(VesperQuadEnv):
         self._vehicles.write_root_pose_to_sim(root[:, :7])
         self._vehicles.write_root_velocity_to_sim(root[:, 7:])
         self._veh_step = 0
+        self._sync_render_poses()
+
+    def _sync_render_poses(self):
+        """Push PhysX poses into USD so the renderer draws things where they are.
+
+        Isaac's RTX path in this stack draws the USD transform, but every pose in
+        this env is written with write_root_pose_to_sim, which reaches only the
+        PhysX tensor buffers. Nothing then updates USD, with or without
+        sim.use_fabric. So the airframe stayed drawn at the (0,0,0.1) spawn from
+        iris_cfg and every tank at its (0,0,40) placeholder, while the task read
+        the truth: contacts, ranges, rewards and the whole teleop strike suite
+        were correct and every rendered frame was of empty ground.
+
+        scripts/diag_robot.py and scripts/diag_tank_pose.py measure both halves
+        and prove this write is what the renderer follows.
+
+        The policy's own camera is a child of /World/envs/env_*/Robot/body, so
+        this is not only a video problem: without the sync that camera renders
+        from the world origin, and the segmentation mask feeding the sighting
+        reward never contains a tank.
+
+        Cost is 2(N+K) small host copies and USD writes per control step, so it
+        is gated on actually rendering.
+        """
+        # _get_observations can fire from the base class before __init__ finishes
+        if not getattr(self, "_render_sync", False):
+            return
+        from pxr import Gf, UsdGeom
+        if self._veh_ops is None:
+            import isaacsim.core.utils.stage as stage_utils
+            stage = stage_utils.get_current_stage()
+
+            def ops_for(path):
+                xf = UsdGeom.Xformable(stage.GetPrimAtPath(path))
+                have = {o.GetOpName(): o for o in xf.GetOrderedXformOps()}
+                return (have.get("xformOp:translate") or xf.AddTranslateOp(),
+                        have.get("xformOp:orient") or xf.AddOrientOp())
+
+            self._veh_ops = [ops_for(f"{VEHICLE_ROOT}/v{i}/Tank") for i in range(self.k)]
+            self._robot_ops = [ops_for(f"/World/envs/env_{i}/Robot")
+                               for i in range(self.num_envs)]
+
+        def push(ops, pos, quat):
+            for i, (t_op, o_op) in enumerate(ops):
+                t_op.Set(Gf.Vec3d(*(float(v) for v in pos[i])))
+                w, x, y, z = (float(v) for v in quat[i])
+                try:
+                    o_op.Set(Gf.Quatd(w, x, y, z))
+                except (TypeError, ValueError):
+                    o_op.Set(Gf.Quatf(w, x, y, z))
+
+        v = self._vehicles.data
+        push(self._veh_ops, v.root_pos_w.cpu().numpy(), v.root_quat_w.cpu().numpy())
+        r = self._robot.data
+        push(self._robot_ops, r.root_pos_w.cpu().numpy(), r.root_quat_w.cpu().numpy())
 
     def _drive_vehicles(self):
         # the arena can shrink under a curriculum; tanks placed outside the box
@@ -323,6 +383,7 @@ class ChaseEnv(VesperQuadEnv):
         self._evaluated = True
 
     def _get_observations(self):
+        self._sync_render_poses()   # after physics: what the next render will draw
         d = self._robot.data
         ground = self.world.ground_at(d.root_pos_w[:, 0], d.root_pos_w[:, 1])
         agl = (d.root_pos_w[:, 2] - ground).clamp(min=0.0)
