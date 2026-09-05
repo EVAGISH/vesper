@@ -4,10 +4,12 @@
         --seconds 90 --headless --enable_cameras
 
 Writes into runs/<id>/:
-  fpv.mp4       the drone's own sensor view: a nadir camera at the airframe with
-                the task's sensor cone as its lens (2 x fov_half_deg), the cone
-                edge drawn, and a box on any vehicle the policy currently holds.
-                What is inside this circle is what the detector gets to see.
+  fpv.mp4       the drone's own sensor view: the body-fixed camera, pitched
+                forward-down, with the task's lens (2 x fov_half_deg) -- the
+                same pose and intrinsics as the policy's TiledCamera, so the
+                frame is what the policy sees, at video resolution. With
+                --camera the actual 128 px policy tensor is inset. A box marks
+                any vehicle the policy currently holds a fix on.
   chase.mp4     the same moment from behind the drone, framed against whatever it
                 is going for -- the nearest vehicle it has a fix on, or its own
                 heading while it is still sweeping.
@@ -34,6 +36,9 @@ parser.add_argument("--seed", type=int, default=7)
 parser.add_argument("--stochastic", action="store_true")
 parser.add_argument("--every", type=int, default=2, help="capture one frame every N control steps")
 parser.add_argument("--vehicle", default=None)
+parser.add_argument("--groups", type=int, default=0, help="vehicle sets shared by groups of envs")
+parser.add_argument("--camera", action="store_true",
+                    help="render the policy's own tiled camera too (pixel sightings + inset)")
 parser.add_argument("--tag", default="search")
 AppLauncher.add_app_launcher_args(parser)
 args = parser.parse_args()
@@ -63,8 +68,10 @@ from isaacsim.sensors.camera import Camera  # noqa: E402
 import isaacsim.core.utils.numpy.rotations as rot_utils  # noqa: E402
 
 from vesper.capture import RunCapture  # noqa: E402
-from vesper.lab.ppo import ActorCritic, RunningNorm  # noqa: E402
+from vesper.lab.ppo import load_policy  # noqa: E402
 from vesper.lab.search_env import SearchEnv, SearchEnvCfg  # noqa: E402
+from vesper.lab.search_task import sensor_pose  # noqa: E402
+from vesper.control.se3 import quat_to_rot  # noqa: E402
 
 cfg = SearchEnvCfg()
 # The RTX-render crash on the 16k-tree world faults inside omni.physx.fabric's
@@ -81,13 +88,14 @@ cfg.n_targets = args.targets
 cfg.episode_length_s = args.seconds
 cfg.search = {"arena_half": args.arena}
 cfg.vehicle_model = args.vehicle
+cfg.n_groups = args.groups
+cfg.camera = args.camera
 env = SearchEnv(cfg, render_mode="rgb_array", seed=args.seed)
 
 ck = torch.load(args.policy, map_location=env.device)
-ac = ActorCritic(ck["obs_dim"], ck["act_dim"]).to(env.device)
-ac.load_state_dict(ck["ac"]); ac.eval()
-norm = RunningNorm(ck["obs_dim"]).to(env.device)
-norm.load_state_dict(ck["norm"])
+ac, norm = load_policy(ck, env.device)
+if ck["obs_dim"] != env.num_obs:
+    raise SystemExit(f"policy expects {ck['obs_dim']}-wide observations, env gives {env.num_obs}")
 
 
 @torch.no_grad()
@@ -127,61 +135,74 @@ peak_found = peak_reached = 0
 
 
 def look_at(camhf, pos, target):
+    """Aim a free camera (roll zero) and return (pos, R, hfov) for projection."""
     cam, hfov = camhf
     d = target - pos
     yaw = np.degrees(np.arctan2(d[1], d[0]))
     pitch = np.degrees(np.arctan2(-d[2], np.linalg.norm(d[:2]) + 1e-6))
-    cam.set_world_pose(pos, rot_utils.euler_angles_to_quats(
-        np.array([0.0, pitch, yaw]), degrees=True))
-    return pos, target, hfov
+    q = rot_utils.euler_angles_to_quats(np.array([0.0, pitch, yaw]), degrees=True)
+    cam.set_world_pose(pos, q)
+    R = quat_to_rot(torch.as_tensor(q, dtype=torch.float32).view(1, 4))[0].numpy()
+    return pos, R, hfov
 
 
-def project(pos, target, hfov, p, w, h):
-    """World point -> pixel, for the camera look_at() just placed.  Roll is zero,
-    so the basis is fixed by the look direction alone."""
-    f = target - pos
-    f = f / (np.linalg.norm(f) + 1e-9)
-    r = np.cross(f, np.array([0.0, 0.0, 1.0]))
-    rn = np.linalg.norm(r)
-    if rn < 1e-6:                                  # straight down: pick world +x
-        r = np.array([0.0, -1.0, 0.0])
-    else:
-        r = r / rn
-    u = np.cross(r, f)
+def body_camera(camhf):
+    """Put the render camera exactly where the policy's camera is: on env 0's
+    airframe, pitched forward-down, rolling and pitching with the hull."""
+    cam, hfov = camhf
+    d = env._robot.data
+    cp, cq = sensor_pose(d.root_pos_w[:1], d.root_quat_w[:1], env.task.cfg.cam_pitch_deg,
+                         tuple(cfg.cam_offset))
+    pos, q = cp[0].cpu().numpy(), cq[0].cpu().numpy()
+    cam.set_world_pose(pos, q)
+    return pos, quat_to_rot(cq)[0].cpu().numpy(), hfov
+
+
+def project(pos, R, hfov, p, w, h):
+    """World point -> pixel for a camera at `pos` with rotation `R` (columns:
+    forward, left, up -- Isaac's 'world' camera convention)."""
+    f, left, up = R[:, 0], R[:, 1], R[:, 2]
     d = p - pos
     z = float(d @ f)
     if z <= 0.5:
         return None
     fx = (w / 2.0) / np.tan(np.radians(hfov) / 2.0)
-    return float(w / 2 + (d @ r) / z * fx), float(h / 2 - (d @ u) / z * fx), z, fx
+    return float(w / 2 - (d @ left) / z * fx), float(h / 2 - (d @ up) / z * fx), z, fx
 
 
 AMBER, GREEN, CYAN, WHITE = (255, 200, 70), (110, 255, 150), (120, 220, 255), (255, 255, 255)
 
 
-def annotate(rgb, cam, t, agl, known, reached, vis, tp, drone, cone=False):
+def annotate(rgb, cam, t, agl, known, reached, vis, tp, drone, sensor=False, inset=None):
     """Burn in what the policy knows.  Only vehicles it has actually detected get
     a marker -- drawing the others would show the viewer a hunt the policy is not
     running."""
     img = Image.fromarray(rgb)
     d = ImageDraw.Draw(img)
     w, h = img.size
-    pos, look, hfov = cam
+    pos, R, hfov = cam
 
-    if cone:
-        # edge of the detector cone.  At half-angle a, the cone maps to a circle of
-        # radius fx*tan(a) px; with the lens set to 2a that is exactly w/2.
-        rad = (w / 2.0) / np.tan(np.radians(hfov) / 2.0) * np.tan(
-            np.radians(env.task.cfg.fov_half_deg))
-        d.ellipse([w / 2 - rad, h / 2 - rad, w / 2 + rad, h / 2 + rad],
-                  outline=(255, 255, 255), width=2)
+    if sensor:
+        # the whole frame is the lens now: a crosshair on the camera axis and a
+        # horizon tick mark where level would be (cam_pitch_deg above centre)
         d.line([w / 2 - 12, h / 2, w / 2 + 12, h / 2], fill=WHITE, width=1)
         d.line([w / 2, h / 2 - 12, w / 2, h / 2 + 12], fill=WHITE, width=1)
+        fx = (w / 2.0) / np.tan(np.radians(hfov) / 2.0)
+        hy = h / 2 - fx * np.tan(np.radians(env.task.cfg.cam_pitch_deg))
+        if 0 < hy < h:
+            d.line([w / 2 - 40, hy, w / 2 + 40, hy], fill=(200, 200, 200), width=1)
+    if inset is not None:
+        # the policy's actual input tensor, scaled up, in the corner
+        s = 2
+        tile = Image.fromarray(inset).resize((inset.shape[1] * s, inset.shape[0] * s), Image.NEAREST)
+        img.paste(tile, (w - tile.width - 8, h - tile.height - 8))
+        d.rectangle([w - tile.width - 9, h - tile.height - 9, w - 8, h - 8], outline=CYAN, width=2)
+        d.text((w - tile.width - 8, h - tile.height - 24), "POLICY INPUT", fill=CYAN)
 
     for k in range(len(known)):
         if not known[k]:
             continue
-        pr = project(pos, look, hfov, tp[k], w, h)
+        pr = project(pos, R, hfov, tp[k], w, h)
         if not pr:
             continue
         x, y, z, fx = pr
@@ -251,14 +272,16 @@ for i in range(steps):
         f2 = smooth / (np.linalg.norm(smooth) + 1e-6)
         goal = d + np.array([f2[0], f2[1], 0.0]) * 70.0 - np.array([0.0, 0.0, 30.0])
 
-    # the drone's own sensor view: at the airframe, straight down, cone lens
-    cam = look_at(fpv, d + np.array([0.0, 0.0, -0.6]), d + np.array([0.0, 0.0, -50.0]))
+    # the drone's own sensor view: on the airframe, pitched forward-down, the task's lens
+    cam = body_camera(fpv)
     env.sim.render()
     rgba = fpv[0].get_rgba()
     agl = float(info["agl"][0].item())
+    px = env.pixels()
+    inset = px[0].cpu().numpy() if px is not None else None
     if rgba is not None and rgba.size:
         cap.add_frame(annotate(np.asarray(rgba[:, :, :3], dtype=np.uint8), cam,
-                               t, agl, known, reached, vis, tp, d, cone=True),
+                               t, agl, known, reached, vis, tp, d, sensor=True, inset=inset),
                       stream="fpv")
 
     to = goal - d

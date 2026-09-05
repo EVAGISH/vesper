@@ -18,7 +18,7 @@ parser.add_argument("--seconds", type=float, default=20.0)
 parser.add_argument("--target_speed", type=float, default=4.0)
 parser.add_argument("--hfov", type=float, default=70.0)
 parser.add_argument("--stochastic", action="store_true")
-parser.add_argument("--vehicle", default=None, help="forklift | cart | path to a USD")
+parser.add_argument("--vehicle", default=None, help="tank | path to a custom USD")
 parser.add_argument("--tag", default="pursuit")
 AppLauncher.add_app_launcher_args(parser)
 args = parser.parse_args()
@@ -37,7 +37,7 @@ from isaacsim.sensors.camera import Camera  # noqa: E402
 import isaacsim.core.utils.numpy.rotations as rot_utils  # noqa: E402
 
 from vesper.capture import RunCapture  # noqa: E402
-from vesper.lab.ppo import ActorCritic, RunningNorm  # noqa: E402
+from vesper.lab.ppo import load_policy  # noqa: E402
 from vesper.lab.pursuit_env import PursuitEnv, PursuitEnvCfg  # noqa: E402
 
 cfg = PursuitEnvCfg()
@@ -48,10 +48,7 @@ cfg.vehicle_model = args.vehicle
 env = PursuitEnv(cfg, render_mode="rgb_array", seed=1)
 
 ck = torch.load(args.policy, map_location=env.device)
-ac = ActorCritic(ck["obs_dim"], ck["act_dim"]).to(env.device)
-ac.load_state_dict(ck["ac"]); ac.eval()
-norm = RunningNorm(ck["obs_dim"]).to(env.device)
-norm.load_state_dict(ck["norm"])
+ac, norm = load_policy(ck, env.device)
 
 
 @torch.no_grad()

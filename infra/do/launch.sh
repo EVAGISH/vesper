@@ -45,7 +45,7 @@ rule() { echo "{\"protocol\":\"$1\",\"ports\":\"$2\",\"sources\":{\"addresses\":
 if [ -z "$FW" ]; then
   api POST /firewalls "{
     \"name\": \"$FIREWALL_NAME\", \"droplet_ids\": [$ID],
-    \"inbound_rules\": [$(rule tcp 22),$(rule tcp 49100),$(rule tcp 47995-48012),$(rule udp 47995-48012),$(rule tcp 49000-49007),$(rule udp 49000-49007)],
+    \"inbound_rules\": [$(rule tcp 22),$(rule tcp 8180),$(rule tcp 49100),$(rule tcp 47995-48012),$(rule udp 47995-48012),$(rule tcp 49000-49007),$(rule udp 49000-49007)],
     \"outbound_rules\": [
       {\"protocol\":\"tcp\",\"ports\":\"0\",\"destinations\":{\"addresses\":[\"0.0.0.0/0\",\"::/0\"]}},
       {\"protocol\":\"udp\",\"ports\":\"0\",\"destinations\":{\"addresses\":[\"0.0.0.0/0\",\"::/0\"]}},
@@ -54,6 +54,10 @@ if [ -z "$FW" ]; then
   }" | jq -r '.firewall.id // .message'
 else
   api POST "/firewalls/$FW/droplets" "{\"droplet_ids\":[$ID]}" >/dev/null && echo "firewall attached"
+  # the live frame server (8180) was added after the firewall was first created
+  if ! api GET "/firewalls/$FW" | jq -e '.firewall.inbound_rules[] | select(.ports=="8180")' >/dev/null; then
+    api POST "/firewalls/$FW/rules" "{\"inbound_rules\":[$(rule tcp 8180)]}" >/dev/null && echo "opened 8180 (live feeds)"
+  fi
 fi
 
 echo "ready: $(droplet_ip)   (~\$0.76-1.57/hr while it exists -- snapshot.sh or destroy.sh when done)"

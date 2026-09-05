@@ -6,6 +6,7 @@ import { DroneFeeds } from "@/components/drone-feeds";
 import { JobsPanel } from "@/components/job-controls";
 import { LiveViewport } from "@/components/live-viewport";
 import { SiteMap } from "@/components/site-map";
+import { Teleop } from "@/components/teleop";
 import { useVesper } from "@/components/vesper-provider";
 import { fetchJSON, fmtTime, KIND_COLOR, runKind } from "@/lib/vesper";
 
@@ -89,7 +90,12 @@ export default function Live() {
             }
           >
             {ip ? (
-              <DroneFeeds ip={ip} />
+              <>
+                <DroneFeeds ip={ip} />
+                <div className="border-t border-border">
+                  <Teleop ip={ip} />
+                </div>
+              </>
             ) : (
               <div className="flex aspect-video flex-col items-center justify-center gap-2 bg-black text-center">
                 <div className="font-mono text-sm tracking-[0.3em] text-muted-foreground">

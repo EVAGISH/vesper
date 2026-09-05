@@ -732,6 +732,25 @@ def site():
     return out
 
 
+@app.get("/api/zones/{world}")
+def zones(world: str):
+    """Operator zones for a world: the launch pad and any no-track safe areas.
+
+    assets/<world>/zones.json wins; a tracked <world>_zones.json at the repo
+    root is the fallback default (vesper.worlds.zones.find_zones)."""
+    if not RUN_ID.match(world):
+        raise HTTPException(400, "bad world")
+    for cand in (ASSETS / world / "zones.json", ROOT / f"{world}_zones.json"):
+        if cand.is_file():
+            try:
+                d = json.loads(cand.read_text())
+            except (OSError, json.JSONDecodeError):
+                raise HTTPException(500, f"{cand.name} is not valid JSON")
+            return {"world": world, "launch": d.get("launch"), "safe": list(d.get("safe") or []),
+                    "source": cand.name}
+    return {"world": world, "launch": None, "safe": [], "source": None}
+
+
 @app.get("/demo/{world}/{name}")
 def demo_media(world: str, name: str):
     """Serve a cached demo-pack file (assets/<world>/demo/<name>)."""

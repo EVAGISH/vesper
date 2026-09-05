@@ -26,6 +26,9 @@ ap.add_argument("--lon", type=float, required=True)
 ap.add_argument("--half-km", type=float, default=1.5)
 ap.add_argument("--res", type=float, default=5.0, help="terrain grid spacing (m)")
 ap.add_argument("--seed", type=int, default=0)
+ap.add_argument("--variant", type=int, default=0,
+                help="reseed only the scatter (trees, building heights): many worlds from one fetch")
+ap.add_argument("--no-tree-colliders", action="store_true", help="visual-only trees (the old behaviour)")
 ap.add_argument("--leg-m", type=float, default=90.0,
                 help="mission loop leg length (m); ~90 gives a ~30 s flight video")
 ap.add_argument("--max-sim-s", type=float, default=75.0)
@@ -376,12 +379,14 @@ if a.ms_buildings and not a.surface_model:
             print(f"MS footprints skipped: {exc}")
 
 t0 = time.time()
-site = GeoSite(a.lat, a.lon, half_m, res_m=a.res, seed=a.seed, leg_m=a.leg_m, tex_px=a.tex_px)
+site = GeoSite(a.lat, a.lon, half_m, res_m=a.res, seed=a.seed, variant=a.variant, leg_m=a.leg_m,
+               tex_px=a.tex_px, tree_colliders=not a.no_tree_colliders)
 rep = build_site(site, data, root / "assets" / "vegetation", data / f"{a.site}.usd",
                  spawn_override=a.spawn, surface_model=a.surface_model)
 print(f"built in {time.time() - t0:.0f}s: terrain {rep.terrain_verts} verts z[{rep.z_range[0]},{rep.z_range[1]}], "
       f"{rep.buildings} buildings, {rep.water} water bodies, {rep.trees} trees")
 print(f"spawn (x,y)={rep.spawn_xy} ground z={rep.spawn_ground_z}; takeoff {rep.takeoff_alt_m} m; waypoints {rep.waypoints}")
+print(f"build manifest: {rep.manifest}")
 
 spec = imported_scenario(str(Path(rep.usd).relative_to(root)), tuple(rep.spawn_xy), rep.spawn_ground_z, a.seed)
 spec.world = a.site; spec.waypoints = rep.waypoints; spec.takeoff_alt_m = rep.takeoff_alt_m

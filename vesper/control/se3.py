@@ -39,8 +39,14 @@ class SE3Controller:
         ])
         self.mix_inv = torch.linalg.inv(A)                              # [4,4]
 
-    def compute(self, pos, vel, quat, ang_vel_body, target_pos):
-        """All [N,3] / quat [N,4] wxyz -> rotor omegas [N,4]."""
+    def compute(self, pos, vel, quat, ang_vel_body, target_pos, yaw_des=None):
+        """All [N,3] / quat [N,4] wxyz -> rotor omegas [N,4].
+
+        `yaw_des` [N] (rad, world frame, 0 = +x) is the heading the airframe is
+        turned to while it flies; None holds the old behaviour, nose to world +x.
+        A body-fixed camera only looks somewhere useful if the airframe turns to
+        face its travel, so the env feeds the smoothed velocity heading here.
+        """
         N = pos.shape[0]
         p = self.p
         a_des = self.kp * (target_pos - pos) - self.kv * vel
@@ -50,9 +56,13 @@ class SE3Controller:
         b3 = R[:, :, 2]
         thrust = (f_world * b3).sum(dim=1).clamp(min=0.1)
 
-        # desired frame: z along f_world, yaw -> world +x
+        # desired frame: z along f_world, x projected from the commanded heading
         z_d = f_world / f_world.norm(dim=1, keepdim=True).clamp(min=1e-6)
-        x_c = torch.tensor([1.0, 0.0, 0.0], device=pos.device).expand(N, 3)
+        if yaw_des is None:
+            x_c = torch.tensor([1.0, 0.0, 0.0], device=pos.device).expand(N, 3)
+        else:
+            x_c = torch.stack([torch.cos(yaw_des), torch.sin(yaw_des),
+                               torch.zeros_like(yaw_des)], dim=1)
         y_d = torch.cross(z_d, x_c, dim=1)
         y_d = y_d / y_d.norm(dim=1, keepdim=True).clamp(min=1e-6)
         x_d = torch.cross(y_d, z_d, dim=1)

@@ -1,12 +1,17 @@
 """Torch view of a geo world: the rasters a policy needs but USD cannot give it fast.
 
-scripts/export_world_map.py bakes a world USD into four height rasters plus two
-masks; this loads them onto the GPU and answers the three questions the search
-task asks every step, batched over thousands of environments:
+scripts/export_world_map.py bakes a world USD into height rasters plus masks;
+this loads them onto the GPU and answers the questions the search task asks
+every step, batched over thousands of environments:
 
   ground/canopy height under a point      -> bilinear sample
   can A see B                             -> march the segment against terrain + buildings
   how much foliage is in the way          -> integrate canopy density along the same march
+  where can a vehicle spawn / drive       -> road, parking and trunk layers
+
+Optional layers (road, road_yaw, parking, park_yaw, trunks, tree_z) default to
+empty when an older export lacks them, so a map built before they existed still
+loads -- the vehicles then fall back to plain drivable ground.
 
 Pure numpy/torch: no Isaac, no pxr, unit-testable on a Mac.
 Frame: x east, y north, z up, metres, origin at the world centre. Raster row
@@ -23,6 +28,7 @@ import torch
 
 class WorldMap:
     FIELDS = ("ground_z", "obstacle_z", "canopy_z", "canopy_d")
+    OPTIONAL = ("road", "road_yaw", "parking", "park_yaw", "trunks")
 
     def __init__(self, npz_path, device="cpu"):
         d = np.load(str(npz_path))
@@ -31,7 +37,20 @@ class WorldMap:
             setattr(self, f, torch.as_tensor(np.asarray(d[f], np.float32), device=device))
         self.drivable = torch.as_tensor(np.asarray(d["drivable"], np.float32), device=device)
         self.concealed = torch.as_tensor(np.asarray(d["concealed"], np.float32), device=device)
+        for f in self.OPTIONAL:
+            arr = np.asarray(d[f], np.float32) if f in d.files else np.zeros_like(d["ground_z"], np.float32)
+            setattr(self, f, torch.as_tensor(arr, device=device))
+        # hard tree geometry (trunk + crown colliders), absent when the world's
+        # trees are visual only; then it is just the ground and changes nothing
+        self.tree_z = (torch.as_tensor(np.asarray(d["tree_z"], np.float32), device=device)
+                       if "tree_z" in d.files else self.ground_z)
+        self.has_tree_solids = "tree_z" in d.files
         self.n = int(self.ground_z.shape[0])
+        # zones default to "launch anywhere, nothing protected"; attach_zones overrides
+        self.launch = torch.ones_like(self.ground_z)
+        self.safe = torch.zeros_like(self.ground_z)
+        self.safe_out = torch.full_like(self.ground_z, 1e6)
+        self.safe_in = torch.zeros_like(self.ground_z)
         meta_path = Path(str(npz_path)).with_suffix(".json")
         if "half_m" in d:
             self.half_m, self.cell = float(d["half_m"]), float(d["cell"])
@@ -40,9 +59,10 @@ class WorldMap:
             self.half_m, self.cell = float(m["half_m"]), float(m["cell"])
         else:
             raise ValueError(f"{npz_path} has no half_m/cell and no sidecar json")
-        # solid top: what stops a ray or a drone. Trees are not solid (a quad can
-        # be flown into a crown, and the canopy layer models that separately).
-        self.solid_z = torch.maximum(self.ground_z, self.obstacle_z)
+        # solid top: what stops a ray or a drone. Buildings always; trees only
+        # when the world gave them colliders (tree_z), otherwise a quad can be
+        # flown into a crown and the canopy layer models that separately.
+        self.solid_z = torch.maximum(torch.maximum(self.ground_z, self.obstacle_z), self.tree_z)
 
     # ---------------------------------------------------------------- sampling
     def _uv(self, x, y):
@@ -81,6 +101,66 @@ class WorldMap:
     def is_drivable(self, x, y):
         r, c = self.nearest_cell(x, y)
         return self.drivable[r, c] > 0.5
+
+    def sample_cells_xy(self, mask: torch.Tensor, n: int, generator=None, half: float | None = None):
+        """n random xy drawn uniformly from the set cells of `mask` (jittered inside the cell).
+
+        Exact rather than rejection-based, so a small zone -- a launch pad that is
+        1% of the site -- is sampled every time. `half` restricts to the arena box.
+        Returns (xy [n,2], ok [n]); ok is False everywhere when the mask is empty.
+        """
+        dev = self.ground_z.device
+        m = mask > 0.5
+        if half is not None:
+            c = (torch.arange(self.n, device=dev) * self.cell) - self.half_m
+            inside = (c.abs() <= half)
+            m = m & inside.view(1, -1) & inside.view(-1, 1)
+        idx = torch.nonzero(m)                                                     # [M,2] (row, col)
+        if idx.numel() == 0:
+            return torch.zeros(n, 2, device=dev), torch.zeros(n, dtype=torch.bool, device=dev)
+        pick = torch.randint(0, idx.shape[0], (n,), device=dev, generator=generator)
+        rc = idx[pick].float()
+        jit = (torch.rand(n, 2, device=dev, generator=generator) - 0.5) * self.cell
+        x = rc[:, 1] * self.cell - self.half_m + jit[:, 0]
+        y = rc[:, 0] * self.cell - self.half_m + jit[:, 1]
+        return torch.stack([x, y], dim=1), torch.ones(n, dtype=torch.bool, device=dev)
+
+    def attach_zones(self, zones):
+        """Rasterise operator zones (vesper.worlds.zones.Zones) onto this grid.
+
+        Also bakes two distance fields for the safe zones, because a mask alone
+        gives the reward a cliff and no gradient: `safe_out` is metres from a
+        point to the nearest protected cell (0 inside), `safe_in` is how deep
+        inside the boundary it is (0 outside).
+        """
+        from vesper.worlds.rasters import chamfer_distance
+        launch, safe = zones.masks(self.n, self.half_m, self.cell)
+        self.launch = torch.as_tensor(launch.astype(np.float32), device=self.device)
+        self.safe = torch.as_tensor(safe.astype(np.float32), device=self.device)
+        if safe.any():
+            out = chamfer_distance(safe, self.cell)
+            inside = chamfer_distance(1 - safe, self.cell)
+        else:
+            out = np.full(safe.shape, 1e6, np.float32)
+            inside = np.zeros(safe.shape, np.float32)
+        self.safe_out = torch.as_tensor(out, device=self.device)
+        self.safe_in = torch.as_tensor(inside, device=self.device)
+
+    def in_safe(self, x, y):
+        r, c = self.nearest_cell(x, y)
+        return self.safe[r, c] > 0.5
+
+    def safe_field(self, x, y):
+        """(metres to the zone, metres inside it) -- one is zero wherever the
+        other is not, so `depth - dist` is a signed distance to the boundary."""
+        r, c = self.nearest_cell(x, y)
+        return self.safe_out[r, c], self.safe_in[r, c]
+
+    def yaw_at(self, field: torch.Tensor, x, y):
+        """Nearest-cell read of a heading raster (radians), no interpolation:
+        angles wrap, so blending neighbours would invent directions."""
+        r, c = self.nearest_cell(x, y)
+        return field[r, c]
 
     # ---------------------------------------------------------------- visibility
     def trace(self, p0: torch.Tensor, p1: torch.Tensor, samples: int = 40):

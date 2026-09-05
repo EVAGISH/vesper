@@ -49,6 +49,7 @@ def mlp(sizes, act=nn.ELU):
 class ActorCritic(nn.Module):
     def __init__(self, obs_dim, act_dim, hidden=(256, 256, 128), init_std=1.0):
         super().__init__()
+        self.hidden = tuple(int(h) for h in hidden)
         self.actor = mlp([obs_dim, *hidden, act_dim])
         self.critic = mlp([obs_dim, *hidden, 1])
         self.log_std = nn.Parameter(torch.ones(act_dim) * torch.tensor(init_std).log())
@@ -185,6 +186,9 @@ class PPO:
 
     def learn(self, iterations, log_every=10, on_log=None):
         obs = self.env.reset()
+        if obs.dim() != 2:
+            raise ValueError(f"PPO expects a flat [N, obs] observation, got {tuple(obs.shape)}; "
+                             "the pixel policy (vesper.lab.vision) needs the recurrent trainer, not this one")
         history = []
         for it in range(iterations):
             obs, batch, rets, intercepts, tti, extra = self._rollout(obs)
@@ -203,9 +207,25 @@ class PPO:
 
     def save(self, path):
         torch.save({"ac": self.ac.state_dict(), "norm": self.norm.state_dict(),
-                    "obs_dim": self.env.num_obs, "act_dim": self.env.num_actions}, path)
+                    "obs_dim": self.env.num_obs, "act_dim": self.env.num_actions,
+                    "hidden": list(self.ac.hidden)}, path)
 
     @torch.no_grad()
     def action(self, obs, deterministic=True):
         nobs = self.norm(obs)
         return self.ac.actor(nobs) if deterministic else self.ac.dist(nobs).sample()
+
+
+def load_policy(ck, device="cpu"):
+    """(ActorCritic, RunningNorm) rebuilt from a checkpoint dict, whatever width it was.
+
+    The network shape lives in the checkpoint ("hidden"); older files without
+    it were all trained at the class default. Every script that flies, scores
+    or serves a policy goes through here rather than guessing the width.
+    """
+    hidden = tuple(ck.get("hidden", ActorCritic.__init__.__defaults__[0]))
+    ac = ActorCritic(ck["obs_dim"], ck["act_dim"], hidden).to(device)
+    ac.load_state_dict(ck["ac"]); ac.eval()
+    norm = RunningNorm(ck["obs_dim"]).to(device)
+    norm.load_state_dict(ck["norm"])
+    return ac, norm

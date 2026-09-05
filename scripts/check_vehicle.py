@@ -1,6 +1,6 @@
 """Verify a pursuit target actually loads and behaves in PhysX. Needs a GPU.
 
-    /isaac-sim/python.sh scripts/check_vehicle.py --vehicle forklift --headless
+    /isaac-sim/python.sh scripts/check_vehicle.py --vehicle tank --headless
     /isaac-sim/python.sh scripts/check_vehicle.py --vehicle cart --headless
 
 Exits non-zero if any check fails, so it works as a smoke test. Everything it
@@ -16,7 +16,7 @@ import math
 from isaaclab.app import AppLauncher
 
 parser = argparse.ArgumentParser()
-parser.add_argument("--vehicle", default="forklift")
+parser.add_argument("--vehicle", default="tank")
 parser.add_argument("--num_envs", type=int, default=16)
 parser.add_argument("--steps", type=int, default=250)
 AppLauncher.add_app_launcher_args(parser)

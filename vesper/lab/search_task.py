@@ -2,24 +2,43 @@
 
 The pursuit task (vesper.lab.pursuit_task) hands the policy a relative vector to
 its target every step. That is a homing problem, not a search problem. Here the
-drone starts somewhere random over a real 1.2 km site with several forklifts
+drone starts somewhere random over a real 1.2 km site with several tanks
 scattered across it -- some driving in the open, some parked under tree canopy,
 some painted to blend in -- and the only way it learns where any of them are is
-by looking: a downward camera cone, limited slant range, blocked by terrain and
-buildings, attenuated by foliage, degraded by a target's own contrast.
+by looking.
 
-So the observation carries a *belief*, not the truth:
-  - per target: whether it has ever been seen, the last fix, and how stale it is
-  - a coverage grid: which parts of the arena this episode has already swept
+The look is a body-fixed camera pitched forward and down, the way a real
+airframe carries one: it sees where it is flying, and it sees the ground ahead.
+There are two ways a sighting is decided, and the task supports both:
 
-and the reward pays for sweeping ground, for first sightings, for closing on a
-known target, and most of all for clearing every target quickly.
+  pixels    the env renders that camera and hands `step()` how many pixels of
+            each vehicle's segmentation mask are in the frame. This is the real
+            thing: occlusion, foliage and range are whatever the renderer says.
+  geometry  no renderer: a cone around the camera axis, limited slant range,
+            blocked by terrain and buildings, attenuated by foliage, degraded by
+            a target's own contrast. Cheap, runs at thousands of envs, and is
+            what a state-based teacher policy trains against.
+
+The policy is GPS-denied. Two observation vectors come out of here:
+
+  proprio     what the airframe can measure on its own: body-frame velocity
+              (optical flow / VIO class), gravity direction in the body frame
+              (attitude from the IMU), body rates, rangefinder height, clock.
+              Together with the camera image this is all the actor gets.
+  privileged  world position, the belief (per target: ever seen, last fix, its
+              staleness) and a coverage grid of what has already been swept.
+              For the critic and for a state-based teacher only.
+
+The reward pays for sweeping ground, for first sightings, for closing on a
+known target, and most of all for clearing every target quickly. It is a
+training-time signal and may use the truth freely.
 
 Everything here is pure torch over a vesper.worlds.heightmap.WorldMap, so the
 whole task -- sensor, belief, reward, termination -- runs and is tested on a Mac
 CPU against a synthetic map. The Isaac env is a thin shell around it.
 
-Frame: world metres, x east, y north, z up. Shapes: N envs, K targets.
+Frame: world metres, x east, y north, z up. Body: x forward, y left, z up.
+Shapes: N envs, K targets.
 """
 from __future__ import annotations
 
@@ -39,29 +58,32 @@ class SearchCfg:
     spawn_alt_min: float = 35.0        # above local ground (m)
     spawn_alt_max: float = 90.0
 
-    # --- sensor: a gimballed camera looking down ---
-    # 120 deg full angle, matching the FPV lens the fidelity lane already flies.
-    # At 45 deg the footprint radius equals the altitude, so the cone collapses
-    # during a descent, the vehicle drops out of view, and the drone finishes the
-    # dive onto a fix several seconds stale while the vehicle has driven off it.
-    # At 60 deg the radius is 1.73x altitude and the fix stays fresh all the way in.
-    fov_half_deg: float = 60.0         # half-angle of the nadir cone
+    # --- camera: body-fixed, pitched forward and down ---
+    # 40 deg below the horizon with a 110 deg lens spans from 15 deg above the
+    # horizon (the drone sees where it is going) to 5 deg past nadir (a target
+    # it is descending onto stays in frame all the way in). The same numbers
+    # drive the rendered TiledCamera in the env and the geometric cone here, so
+    # a teacher trained on geometry and a student trained on pixels look at the
+    # same patch of ground.
+    cam_pitch_deg: float = 40.0        # camera axis below horizontal
+    fov_half_deg: float = 55.0         # half-angle of the lens cone
     detect_range: float = 220.0        # slant range on a plain target in clear air (m)
     min_detect_range: float = 15.0     # you can always see it from close enough
     canopy_k: float = 0.15             # extinction per density-weighted metre of foliage
     miss_p: float = 0.04               # per-step dropout on an otherwise valid detection
     fix_noise_m: float = 2.5           # error on a reported fix
     stale_tau_s: float = 8.0           # a fix this old tells you little about a moving target
+    sight_px: int = 6                  # pixel mode: mask pixels in frame that count as a sighting
 
     # --- coverage memory ---
     recency_tau_s: float = 25.0        # how fast a swept cell goes stale in the observation
 
-    # --- guidance action ---
+    # --- guidance action: body-frame velocity command ---
     look_ahead: float = 25.0           # tanh(action) * look_ahead = setpoint offset (m)
 
     # --- success / failure geometry ---
     reach_radius: float = 10.0         # 3D range to a vehicle that counts as reaching it
-                                       # (the forklift is 3.5 m long; 8 m is 'arrived at it',
+                                       # (the tank is several metres long; 8 m is 'arrived at it',
                                        #  and it is what makes the first reaches happen at all)
     min_clearance: float = 1.5         # below solid_top + this (and not reaching) = crash
     tilt_limit: float = 1.4            # rad from upright
@@ -94,20 +116,14 @@ class SearchCfg:
     r_flip: float = 60.0
 
 
-def tilt_from_quat(quat):
-    """Angle [N] between body +z and world +z, from a wxyz quaternion."""
-    w, x, y, z = quat.unbind(dim=1)
-    return torch.arccos((1 - 2 * (x * x + y * y)).clamp(-1.0, 1.0))
+from vesper.lab.frames import (PROPRIO_DIM, camera_axis, proprio as _proprio, quat_mul, seg_counts,  # noqa: F401,E402
+                               seg_lookup, sensor_pose, tilt_from_quat, yaw_from_quat)
+from vesper.lab.frames import setpoint as _setpoint  # noqa: E402
 
 
-def yaw_from_quat(quat):
-    w, x, y, z = quat.unbind(dim=1)
-    return torch.atan2(2 * (w * z + x * y), 1 - 2 * (y * y + z * z))
-
-
-def setpoint(drone_pos_w, action, cfg: SearchCfg):
-    """Guidance action [N,3] in [-1,1] -> world setpoint for the SE3 inner loop."""
-    return drone_pos_w + torch.tanh(action) * cfg.look_ahead
+def setpoint(drone_pos_w, action, yaw, cfg: SearchCfg):
+    """Body-frame guidance action -> world setpoint (see vesper.lab.frames)."""
+    return _setpoint(drone_pos_w, action, yaw, cfg.look_ahead)
 
 
 class SearchTask:
@@ -136,8 +152,11 @@ class SearchTask:
         self.prev_dist = torch.zeros(n, device=device)
 
         self.tan_fov = math.tan(math.radians(cfg.fov_half_deg))
+        self.cos_fov = math.cos(math.radians(cfg.fov_half_deg))
+        self.pitch = math.radians(cfg.cam_pitch_deg)
         self.set_arena(cfg.arena_half)
-        self.obs_dim = 12 + 8 * k + g * g + 3
+        self.obs_dim = 12 + 8 * k + g * g + 3          # privileged width
+        self.proprio_dim = PROPRIO_DIM
 
     def set_arena(self, half: float):
         """Resize the search box, rebuilding the coverage grid over it.
@@ -170,10 +189,10 @@ class SearchTask:
             self.contrast[env_ids] = contrast
 
     # ------------------------------------------------------------------ sensor
-    def detect(self, drone_pos, target_pos):
-        """Which targets are visible this step. Returns (visible [N,K], slant [N,K]).
+    def detect(self, drone_pos, quat, target_pos):
+        """Geometric sighting. Returns (visible [N,K], slant [N,K]).
 
-        A target is seen when it is inside the downward cone, inside the effective
+        A target is seen when it is inside the camera cone, inside the effective
         range for its contrast and the foliage in the way, with unbroken line of
         sight over terrain and buildings -- and the sensor does not happen to miss
         it this frame.
@@ -181,9 +200,9 @@ class SearchTask:
         cfg = self.cfg
         rel = target_pos - drone_pos.unsqueeze(1)                     # [N,K,3]
         slant = rel.norm(dim=2)
-        horiz = rel[..., :2].norm(dim=2)
-        drop = (-rel[..., 2]).clamp(min=0.1)                          # drone above target
-        in_cone = horiz <= self.tan_fov * drop
+        axis = camera_axis(quat, self.pitch)                          # [N,3]
+        cos_off = (rel * axis.unsqueeze(1)).sum(dim=2) / slant.clamp(min=1e-6)
+        in_cone = cos_off >= self.cos_fov
 
         p0 = drone_pos.unsqueeze(1).expand(-1, self.k, -1).reshape(-1, 3)
         p1 = target_pos.reshape(-1, 3)
@@ -199,14 +218,39 @@ class SearchTask:
             hit = hit & keep
         return hit, slant
 
+    def footprint(self, drone_xy, agl, quat):
+        """Ground patch the camera covers: (centre [N,2], radius [N]).
+
+        The true intersection of a tilted cone with the terrain is a distorted
+        ellipse that runs to the horizon when the lens reaches above it. For
+        paying coverage a disc is enough: centred where the camera axis meets
+        the ground, radius the nadir footprint, both capped at detect range.
+        """
+        cfg = self.cfg
+        axis = camera_axis(quat, self.pitch)
+        down = (-axis[:, 2]).clamp(min=0.2)
+        horiz = axis[:, :2]
+        hn = horiz.norm(dim=1).clamp(min=1e-6)
+        ahead = (agl / down * hn).clamp(max=cfg.detect_range * math.cos(self.pitch))
+        centre = drone_xy + horiz / hn.unsqueeze(1) * ahead.unsqueeze(1)
+        radius = torch.minimum(agl * self.tan_fov, torch.full_like(agl, cfg.detect_range))
+        return centre, radius
+
     # ------------------------------------------------------------------ step
-    def step(self, drone_pos, drone_vel, quat, ang_vel_b, target_pos, step_count):
+    def step(self, drone_pos, drone_vel, quat, ang_vel_b, target_pos, step_count, seen_px=None):
         """One control step of belief + reward. All inputs world-frame [N,...].
 
-        Returns (obs [N,obs_dim], reward [N], terminated [N], info dict).
+        `seen_px` [N,K]: pixels of each target's mask in this env's rendered
+        frame. Given, a sighting is decided by the renderer; None falls back to
+        the geometric cone. Returns (privileged obs [N,obs_dim], reward [N],
+        terminated [N], info dict).
         """
         cfg, dev = self.cfg, drone_pos.device
-        visible, slant = self.detect(drone_pos, target_pos)
+        if seen_px is None:
+            visible, slant = self.detect(drone_pos, quat, target_pos)
+        else:
+            slant = (target_pos - drone_pos.unsqueeze(1)).norm(dim=2)
+            visible = (seen_px >= cfg.sight_px) & ~self.reached
 
         # --- belief update -------------------------------------------------
         new_find = visible & ~self.known
@@ -226,8 +270,8 @@ class SearchTask:
         # --- coverage ------------------------------------------------------
         ground = self.world.ground_at(drone_pos[:, 0], drone_pos[:, 1])
         agl = (drone_pos[:, 2] - ground).clamp(min=0.0)
-        foot = torch.minimum(agl * self.tan_fov, torch.full_like(agl, cfg.detect_range))
-        d_cell = (self.cell_xy.unsqueeze(0) - drone_pos[:, :2].unsqueeze(1)).norm(dim=2)
+        centre, foot = self.footprint(drone_pos[:, :2], agl, quat)
+        d_cell = (self.cell_xy.unsqueeze(0) - centre.unsqueeze(1)).norm(dim=2)
         swept = d_cell <= (foot + self.cell_reach).unsqueeze(1)
         fresh = swept & ~self.visited
         self.visited |= swept
@@ -287,7 +331,7 @@ class SearchTask:
         r = r - cfg.r_oob * oob.float()
         r = r - cfg.r_flip * flip.float()
 
-        obs = self.observations(drone_pos, drone_vel, quat, ang_vel_b, agl, time_frac)
+        obs = self.privileged(drone_pos, drone_vel, quat, ang_vel_b, agl, time_frac)
         info = {
             "intercept": all_done,                                  # episode fully cleared
             "time_to_intercept": torch.where(all_done, step_count.float() * self.dt,
@@ -301,8 +345,16 @@ class SearchTask:
         return obs, r, terminated, info
 
     # ------------------------------------------------------------------ obs
-    def observations(self, drone_pos, drone_vel, quat, ang_vel_b, agl, time_frac):
-        """[N, 12 + 8K + G*G + 3] -- belief only, never a target's true position."""
+    def proprio(self, drone_vel, quat, ang_vel_b, agl, time_frac):
+        """[N, 11] -- see vesper.lab.frames.proprio."""
+        return _proprio(drone_vel, quat, ang_vel_b, agl, time_frac)
+
+    def privileged(self, drone_pos, drone_vel, quat, ang_vel_b, agl, time_frac):
+        """[N, 12 + 8K + G*G + 3] -- world pose plus the belief and coverage.
+
+        Never a target's true position: what the sensor has reported, and only
+        that. For the critic and the state-based teacher, not the actor.
+        """
         cfg = self.cfg
         A = cfg.arena_half
         yaw = yaw_from_quat(quat)

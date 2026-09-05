@@ -120,7 +120,7 @@ Only now. Residual-over-guidance (or setpoint policy — decided by what Steps 5
 Step 9's pursuit policy is handed a vector to its target every step, so it never
 has to find anything. This step removes that.
 
-- Several forklifts scattered at random over the Cornell world every reset, by
+- Several tanks scattered at random over the Cornell world every reset, by
   concealment class: driving in the open, painted down, crawling under canopy,
   parked against the buildings. Which slot holds which is reshuffled per episode.
 - The policy sees a *belief*, not the truth: what a downward camera cone reports,
@@ -136,6 +136,105 @@ has to find anything. This step removes that.
 **Inspect:** `runs/<id>/chase.mp4` with the policy's own belief burned into the
 frame, `overview.mp4` of the sweep, and `track.png` — drone path, vehicle paths,
 and where each vehicle was first seen and reached, over the site's ground texture.
+
+---
+
+## Step 11 — Eyes on the airframe
+
+Step 10's drone found tanks with a geometric detector fed the truth, and
+navigated on its own world position. This step makes the environment honest
+before any policy is trained on it: the actor gets a camera and its own
+instruments, nothing else.
+
+- The camera is body-fixed and pitched 40° forward-down with a 110° lens, so the
+  drone sees where it is flying and the ground ahead. The SE3 inner loop yaws
+  the nose onto the velocity, and the action is a body-frame velocity command.
+- No GPS. The actor's observation is the rendered frame (`pixels`) plus what the
+  airframe measures (`policy`): body velocity, gravity direction, rates,
+  rangefinder height, clock. World position, the belief and the coverage grid
+  live in a separate `privileged` vector for the critic and a state-based
+  teacher only.
+- A first sighting is decided by the camera's segmentation mask, not a cone.
+  The geometric cone stays, pitched to the same axis, for training a teacher
+  at thousands of environments without rendering.
+- One shared world means every camera sees every vehicle, so vehicles come in
+  `--groups`: G sets on the site, environment i hunts set i % G, a group's
+  episodes start and end together. Tanks follow the roads, park along
+  facades, ramp their speed and cannot spin on the spot.
+- Trees are physical: a trunk capsule and a crown sphere per species, authored
+  once and shared by every instance; the map's solid layer carries the same
+  geometry so a crash in the task is a contact in PhysX.
+- Worlds are repeatable: `<site>_build.json` records seed, variant and input
+  hashes; `--variant` reshuffles trees and building heights from one fetch.
+
+**Inspect:** `check_search.py --camera` passes on the box and reports env-steps/s
+and VRAM with 64 tiled cameras; `fpv.mp4` from `fly_search.py --camera` shows
+the forward view with the policy's 128 px input inset, rolling with the hull.
+
+---
+
+## Step 12 — Close the loop: detonate near it, with nothing but the camera
+
+Step 11 made the environment honest. This step makes the task closeable end to
+end by one small network that could run on the airframe.
+
+**The task** (`vesper.lab.chase_task`, `chase_env.py`). Custom tracked tanks
+drive around the site as global prims — no assignment, every drone can hit every
+one. A drone launches from the **launch zone**, has to *see* a tank with its own
+camera, fly close, and trigger its fourth action to **detonate**. Every tank
+inside the 4 m 3D blast radius is marked hit. A hit ends the episode and earns
+the former terminal bonus, scaled by how much of the episode remains; a miss
+also consumes the attempt and is penalised. Physical contact before detonation
+is a crash.
+
+**Zones** (`vesper.worlds.zones`, `<site>_zones.json`). Safe polygons are
+**friendly ground**, and the launch pad sits inside one. Every drone spawns at a
+random point on the pad with a random heading, and every step it spends over
+friendly ground costs — so the first thing worth learning is to leave. The
+penalty is monotone in the distance to the boundary (worst deep inside, half at
+the line, zero 25 m clear of it), so it points the way out the whole time, and
+nothing about it ends the episode. A tank on friendly ground is protected: no
+sighting bonus or hit reward. A detonation still consumes the drone. Both
+polygons are drawn on the AO map.
+
+On Cornell the slope bisects the site. Everything below the break is friendly
+(42% of the 1200 m square, traced along the −12 m contour, so the line follows
+Libe Slope and runs east along both gorge floors); the campus above it is the
+hunting ground where the tanks drive. The whole raster is in play — the
+arena is the terrain's own edge, not a box inside it — and the pad is a 50 m
+square at (−170, −250), 65 to 132 m of flying to clear friendly ground.
+
+The actor has no map, so on a general site it could not perceive that boundary.
+On one fixed site it can learn it from landmarks, which is what this is; if that
+proves too slow, `ChaseEnvCfg.geofence` appends the signed distance to the zone
+to the proprio vector — the geofence receiver a real airframe carries.
+
+**The policy** (`vesper.lab.vision`, `recurrent_ppo.py`). RGB + depth at 96 px
+and the 11 proprio values, four stride-2 convolutions, a 256-unit GRU, actor
+and belief heads; an asymmetric critic that sees the privileged vector.
+**1.44M parameters on the airframe, 17.9M multiply-adds per frame** — an order
+of magnitude under a Jetson Orin Nano at 25 Hz. The GRU is what holds a
+tank through the seconds it is out of frame, turns frame-to-frame growth
+into range, and remembers which way the drone has already looked. The belief
+head regresses the true relative vector whenever a tank is in frame, which
+is what teaches the encoder to see tanks long before the sparse hit
+reward could.
+
+**Depth** is a stereo-class sensor, not the renderer's truth: clipped at 20 m,
+error growing with range squared, holes on far and thin returns
+(`vesper.sensors.depth`). Trees are solid and shaped like trees — every species
+mesh carries a convex-decomposition collider, so a gap the depth camera shows
+is a gap the drone can fly through.
+
+**Inspect:** `check_chase.py --camera` passes on the box and reports
+env-steps/s and VRAM; `runs/<id>/fpv.mp4` from `fly_chase.py` shows the forward
+view with the policy's own RGB and depth tensors inset and its belief head's
+cross on the tank; `track.png` shows the launch zone, the safe zones, the tank
+paths and each hit/miss detonation. The capture inserts an 18-frame explosion
+sequence at the pre-reset blast pose. Before using the GPU box,
+`.venv/bin/python scripts/smoke_strike.py` checks tree contact, the blast-radius
+boundary, the animation compositor, and tank obstacle avoidance on CPU and
+writes an inspectable trace plus JSON report.
 
 ---
 

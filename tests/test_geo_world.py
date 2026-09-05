@@ -94,3 +94,70 @@ def test_build_site(tmp_path):
     from vesper.scenario.spec import imported_scenario
     spec = imported_scenario(rep.usd, tuple(rep.spawn_xy), rep.spawn_ground_z)
     assert spec.terrain["translation"][2] == -rep.spawn_ground_z
+
+
+def test_species_carry_colliders_and_the_map_sees_them(tmp_path):
+    data = tmp_path / "site"; data.mkdir(); _make_inputs(data)
+    site = GeoSite(LAT, LON, half_m=250.0, res_m=10.0, tex_px=512, seed=1)
+    rep = build_site(site, data, _veg_dir(tmp_path), data / "site.usd")
+    for name, *_ in geo.SPECIES:
+        sp = Usd.Stage.Open(str(data / "species" / f"{name}.usd"))
+        trunk = sp.GetPrimAtPath("/Tree/trunk_col")
+        assert trunk and trunk.HasAPI(UsdPhysics.CollisionAPI), f"{name}: trunk capsule missing"
+        assert UsdGeom.Imageable(trunk).GetPurposeAttr().Get() == UsdGeom.Tokens.guide
+        meshes = [pr for pr in Usd.PrimRange(sp.GetPrimAtPath("/Tree")) if pr.IsA(UsdGeom.Mesh)]
+        assert meshes, f"{name}: no meshes under /Tree"
+        for m in meshes:
+            if not UsdGeom.Mesh(m).GetPointsAttr().Get():
+                # A few source assets use empty Mesh prims as grouping
+                # nodes. PhysX rejects collision schemas on these.
+                assert not m.HasAPI(UsdPhysics.CollisionAPI)
+                continue
+            # leaves are solid, and shaped like leaves: a convex decomposition of the mesh itself
+            assert m.HasAPI(UsdPhysics.CollisionAPI) and m.HasAPI(UsdPhysics.MeshCollisionAPI)
+            assert UsdPhysics.MeshCollisionAPI(m).GetApproximationAttr().Get() == UsdPhysics.Tokens.convexDecomposition
+            assert m.GetAttribute("physxConvexDecompositionCollision:maxConvexHulls").Get() == geo.TREE_MAX_HULLS
+    # and a visual-only build has none
+    site2 = GeoSite(LAT, LON, half_m=250.0, res_m=10.0, tex_px=512, seed=1, tree_colliders=False)
+    build_site(site2, data, _veg_dir(tmp_path), data / "site2.usd")
+    sp2 = Usd.Stage.Open(str(data / "species" / "Hawthorn.usd"))
+    assert not sp2.GetPrimAtPath("/Tree/trunk_col")
+    assert not any(pr.HasAPI(UsdPhysics.CollisionAPI) for pr in Usd.PrimRange(sp2.GetPrimAtPath("/Tree")))
+
+
+def test_build_manifest_and_variant(tmp_path):
+    data = tmp_path / "site"; data.mkdir(); _make_inputs(data)
+    a = build_site(GeoSite(LAT, LON, half_m=250.0, res_m=10.0, tex_px=512, seed=3), data,
+                   _veg_dir(tmp_path), data / "a.usd")
+    m = json.loads(Path(a.manifest).read_text())
+    assert m["site"]["seed"] == 3 and m["site"]["variant"] == 0
+    assert set(m["inputs"]) >= {"dem.npy", "dem_meta.json", "osm.json"}
+    assert all(len(v["sha256"]) == 64 for v in m["inputs"].values())
+
+    def tree_xy(usd):
+        st = Usd.Stage.Open(str(usd))
+        return [tuple(UsdGeom.Xformable(t).GetOrderedXformOps()[0].Get())
+                for t in st.GetPrimAtPath("/World/trees").GetChildren()]
+
+    # same seed and inputs -> the same scatter; a variant moves the trees
+    b = build_site(GeoSite(LAT, LON, half_m=250.0, res_m=10.0, tex_px=512, seed=3), data,
+                   _veg_dir(tmp_path), data / "b.usd")
+    assert tree_xy(a.usd) == tree_xy(b.usd)
+    c = build_site(GeoSite(LAT, LON, half_m=250.0, res_m=10.0, tex_px=512, seed=3, variant=1), data,
+                   _veg_dir(tmp_path), data / "c.usd")
+    assert tree_xy(a.usd) != tree_xy(c.usd)
+    assert c.spawn_xy == a.spawn_xy, "the variant reseeds the scatter, not the site"
+
+
+def test_obstacle_map_uses_the_heights_that_were_built(tmp_path):
+    data = tmp_path / "site"; data.mkdir(); _make_inputs(data)
+    site = GeoSite(LAT, LON, half_m=250.0, res_m=10.0, tex_px=512, seed=5)
+    osm = geo.parse_osm(site, json.loads((data / "osm.json").read_text()))
+    dem = np.load(data / "dem.npy"); meta = json.loads((data / "dem_meta.json").read_text())
+    terrain = geo.Terrain(site, dem, meta)
+    xs, top = geo.obstacle_height_map(site, terrain, osm, building_h={0: 30.0, 1: 3.0})
+    cell = xs[1] - xs[0]
+    def at(x, y):
+        return top[int((y + 250) / cell), int((x + 250) / cell)] - terrain.height(np.array([x]), np.array([y]))[0]
+    assert abs(at(-55, 46) - 31.0) < 1.5      # the house, at the height we said
+    assert abs(at(-100, -105) - 4.0) < 1.5    # the industrial block likewise

@@ -100,6 +100,10 @@ Noise, bias drift, latency, dropout, and visibility clipping are ours, written o
 
 **[open]** RTX cameras are the one thing that sharply caps env count. Likely outcome: range/depth sensors at scale, RGB in the fidelity lane and at small env counts. Measured early (see `STEPS.md`).
 
+**The chase task's policy (Step 12).** The actor is **1.44M parameters, 17.9M MACs per frame**: conv encoder over RGB+depth at 96 px, a 32-wide proprio branch, a 256-unit GRU, and a small actor head. That is the whole thing that would fly on the airframe — the critic (which sees the privileged vector) and the belief head are training-only. Recurrent PPO (`vesper.lab.recurrent_ppo`) minibatches over *environments* and replays each window in order, because a GRU's hidden state is meaningless in a shuffled batch. Depth is modelled as a stereo module, not the renderer's truth: 20 m clip, error growing with range squared, holes on far and thin returns.
+
+**The search task's camera (Step 11).** A body-fixed `TiledCamera` per drone, pitched 40° forward-down, 110° square lens, RGB + instance segmentation at 128 px. Its pose and intrinsics come from one config (`SearchCfg.cam_pitch_deg`, `fov_half_deg`) shared with the geometric cone, the render camera in the flight scripts, and the coverage footprint, so every consumer looks at the same patch of ground. Because the world is one global prim, every camera sees every vehicle: vehicle sets are shared by groups of environments (`SearchEnvCfg.n_groups`), which is the honest way to keep hundreds of cameras in one scene. The actor is GPS-denied -- pixels plus proprio only -- and the privileged vector (world pose, belief, coverage) is reserved for the critic and for a state-based teacher.
+
 ---
 
 ## 5. Cloud & inspection **[confident on shape, open on sizing]**
