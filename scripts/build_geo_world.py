@@ -47,8 +47,63 @@ ap.add_argument("--spawn", type=float, nargs=2, default=None, metavar=("X", "Y")
                 help="local ENU metres from the lat/lon origin; default picks open ground automatically")
 ap.add_argument("--tex-px", type=int, default=4096,
                 help="ground albedo resolution; 8192 halves texel size at the cost of memory")
+ap.add_argument("--ms-buildings", action="store_true",
+                help="supplement OSM with Microsoft Global ML Building Footprints "
+                     "(free, covers Ukraine where OSM is thin); merged into osm.json")
 ap.add_argument("--refetch", action="store_true")
 a = ap.parse_args()
+
+
+def _quadkey(lat, lon, z=9):
+    import math as _m
+    sin = _m.sin(_m.radians(lat))
+    x = min((1 << z) - 1, max(0, int((lon + 180) / 360 * (1 << z))))
+    y = min((1 << z) - 1, max(0, int((0.5 - _m.log((1 + sin) / (1 - sin)) / (4 * _m.pi)) * (1 << z))))
+    qk = ""
+    for i in range(z, 0, -1):
+        d, mask = 0, 1 << (i - 1)
+        if x & mask: d += 1
+        if y & mask: d += 2
+        qk += str(d)
+    return qk
+
+
+def fetch_ms_buildings(bbox, cache_dir):
+    """MS Global ML Building Footprints intersecting bbox (S,W,N,E) as Overpass-
+    style way elements. Free (ODbL), global; fills in where OSM buildings are sparse."""
+    import csv as _csv, gzip as _gzip, io as _io, requests as _rq
+    S, W, N, E = bbox
+    qks = {_quadkey(la, lo) for la in (S, N, (S + N) / 2) for lo in (W, E, (W + E) / 2)}
+    links = cache_dir / ".ms_dataset_links.csv"
+    if not links.exists():
+        r = _rq.get("https://minedbuildings.z5.web.core.windows.net/global-buildings/dataset-links.csv", timeout=120)
+        r.raise_for_status(); links.write_bytes(r.content)
+    urls = [row["Url"] for row in _csv.DictReader(links.read_text().splitlines())
+            if row["QuadKey"] in qks]
+    ways, wid = [], -10_000_000
+    for url in urls:
+        try:
+            raw = _gzip.decompress(_rq.get(url, timeout=180).content).decode()
+        except Exception:                                  # noqa: BLE001
+            continue
+        for line in raw.splitlines():
+            if not line.strip():
+                continue
+            try:
+                feat = json.loads(line)
+                ring = feat["geometry"]["coordinates"][0]
+            except (json.JSONDecodeError, KeyError, IndexError):
+                continue
+            if not any(W <= p[0] <= E and S <= p[1] <= N for p in ring):
+                continue
+            h = (feat.get("properties") or {}).get("height")
+            tags = {"building": "yes"}
+            if isinstance(h, (int, float)) and h > 0:
+                tags["height"] = str(round(float(h), 1))
+            ways.append({"type": "way", "id": wid, "tags": tags,
+                         "geometry": [{"lat": p[1], "lon": p[0]} for p in ring]})
+            wid -= 1
+    return ways
 
 root = Path(__file__).resolve().parents[1]
 data = root / "assets" / a.site; data.mkdir(parents=True, exist_ok=True)
@@ -307,6 +362,18 @@ if a.refetch or not (data / "osm.json").exists():
         raise SystemExit("all Overpass endpoints failed")
     (data / "osm.json").write_bytes(r.content)
     print(f"OSM: {len(r.json()['elements'])} elements")
+
+if a.ms_buildings and not a.surface_model:
+    osm = json.loads((data / "osm.json").read_text())
+    if not osm.get("vesper_ms_merged"):
+        try:
+            ms = fetch_ms_buildings(bbox, root)
+            osm["elements"].extend(ms)
+            osm["vesper_ms_merged"] = True
+            (data / "osm.json").write_text(json.dumps(osm))
+            print(f"MS footprints: +{len(ms)} buildings merged into OSM")
+        except Exception as exc:                           # never let this fail the build
+            print(f"MS footprints skipped: {exc}")
 
 t0 = time.time()
 site = GeoSite(a.lat, a.lon, half_m, res_m=a.res, seed=a.seed, leg_m=a.leg_m, tex_px=a.tex_px)
