@@ -391,7 +391,7 @@ JOB_KINDS = {
     "fly": "scripts/fly_search.py --policy {policy} --seconds 90 --headless --enable_cameras",
     "eval": "scripts/eval_search.py --policy {policy} --num_envs 256 --episodes 400 --headless",
     "mission": "scripts/fly_mission.py {scenario}",
-    "live": "scripts/live_world.py assets/cornell/cornell.usd",
+    "live": "scripts/live_world.py {world}",
     # persistent sim: world stays loaded, feeds + /state stay up, deploy/reset
     # are instant commands instead of a fresh Isaac boot
     "warm": "scripts/warm_session.py --num_envs 8 --cameras --policy runs/friend-checkpoints/search.pt",
@@ -445,18 +445,26 @@ def start_job(req: JobReq):
         if not req.policy or not POLICY_PATH.match(req.policy):
             raise HTTPException(400, "policy must look like runs/<id>/<name>.pt")
         tmpl = tmpl.format(policy=req.policy)
+    # jobs default to the active environment when world/scenario aren't given,
+    # so selecting a world in the UI makes everything run there.
+    active = get_active() or {}
     if "{scenario}" in tmpl:
-        if not req.scenario or not SCENARIO_FILE.match(req.scenario) \
-                or not (ROOT / req.scenario).is_file():
-            raise HTTPException(400, "unknown scenario file")
-        tmpl = tmpl.format(scenario=req.scenario)
-    # train/eval in a chosen world: append --world/--map (search task needs the map)
-    if req.kind in ("train", "eval") and req.world:
-        if not WORLD_USD.match(req.world):
-            raise HTTPException(400, "world must be assets/<name>/<name>.usd")
-        tmpl += f" --world {req.world}"
-        if req.map and WORLD_MAP.match(req.map):
-            tmpl += f" --map {req.map}"
+        scen = req.scenario or active.get("scenario")
+        if not scen or not SCENARIO_FILE.match(scen) or not (ROOT / scen).is_file():
+            raise HTTPException(400, "no scenario (and no active world scenario)")
+        tmpl = tmpl.format(scenario=scen)
+    if "{world}" in tmpl:                                   # live viewport
+        world = req.world or active.get("usd")
+        if not world or not WORLD_USD.match(world):
+            raise HTTPException(400, "no world — select an active environment")
+        tmpl = tmpl.format(world=world)
+    if req.kind in ("train", "eval", "warm"):              # search task wants world + map
+        world = req.world or active.get("usd")
+        mp = req.map or active.get("map")
+        if world and WORLD_USD.match(world):
+            tmpl += f" --world {world}"
+            if mp and WORLD_MAP.match(mp):
+                tmpl += f" --map {mp}"
     if req.kind == "live":
         # one live session at a time -- reuse it instead of stacking GPU copies
         for j in _load_jobs():
