@@ -9,6 +9,7 @@ import { fetchJSON, postJSON } from "@/lib/vesper";
 // builds it (Copernicus terrain + Esri imagery + OSM, no keys) and syncs it to
 // the GPU box. Built worlds are listed here and launch straight into Isaac.
 
+type DemoMedia = { file: string; url: string; kind: "image" | "video" };
 type Environment = {
   name: string;
   usd: string | null;
@@ -17,6 +18,7 @@ type Environment = {
   mb?: number;
   build_status?: string;
   log?: string;
+  demo?: DemoMedia[];
 };
 
 const POLL_MS = 4000;
@@ -253,6 +255,20 @@ function EnvCard({ e, active, onActivate }: {
           </span>
         )}
       </h3>
+      {e.demo && e.demo.length > 0 && (
+        <div className="grid grid-cols-2 gap-px bg-border">
+          {e.demo.slice(0, 4).map((m) =>
+            m.kind === "video" ? (
+              <video key={m.file} src={m.url} muted loop autoPlay playsInline
+                className="aspect-video w-full bg-black object-cover" />
+            ) : (
+              // eslint-disable-next-line @next/next/no-img-element
+              <img key={m.file} src={m.url} alt={m.file}
+                className="aspect-video w-full bg-black object-cover" />
+            ),
+          )}
+        </div>
+      )}
       <div className="p-3">
         {building ? (
           <div className="text-xs text-muted-foreground">

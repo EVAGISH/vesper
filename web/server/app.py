@@ -308,6 +308,7 @@ def environments():
             "map": f"assets/{d.name}/{d.name}_map.npz" if (d / f"{d.name}_map.npz").exists() else None,
             "mb": round(usd.stat().st_size / 1e6, 1),
             "build_status": b.get("status", "done"),
+            "demo": _demo_media(d.name),
         })
     seen = {o["name"] for o in out}
     for name, b in ENV_BUILDS.items():                      # builds not yet on disk
@@ -619,6 +620,18 @@ def _world_half_m(world: str):
     return None
 
 
+def _demo_media(world: str) -> list[dict]:
+    """Cached demo pack for a world: pre-rendered stills/flyovers under
+    assets/<world>/demo/. Instant + reliable — no box needed to show them."""
+    dd = ASSETS / world / "demo"
+    if not dd.is_dir():
+        return []
+    return [{"file": p.name, "url": f"/demo/{world}/{p.name}",
+             "kind": "video" if p.suffix == ".mp4" else "image"}
+            for p in sorted(dd.iterdir())
+            if p.suffix in (".png", ".jpg", ".mp4")]
+
+
 def _site_entry(world: str) -> dict:
     d = ASSETS / world
     half = _world_half_m(world)
@@ -670,6 +683,17 @@ def site():
             out.append({"world": world, "half_m": meta.get("half_m"),
                         "ground": f"/site/{world}/ground"})
     return out
+
+
+@app.get("/demo/{world}/{name}")
+def demo_media(world: str, name: str):
+    """Serve a cached demo-pack file (assets/<world>/demo/<name>)."""
+    if not RUN_ID.match(world) or not RUN_ID.match(name):
+        raise HTTPException(400, "bad path")
+    f = ASSETS / world / "demo" / name
+    if not f.is_file() or f.suffix not in MEDIA_TYPES:
+        raise HTTPException(404, "no such demo file")
+    return FileResponse(f, media_type=MEDIA_TYPES[f.suffix])
 
 
 @app.get("/site/{world}/ground")
