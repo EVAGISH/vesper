@@ -34,6 +34,7 @@ export type Model = {
   bytes: number;
   mtime: number;
   metrics: Record<string, number>;
+  onnx: string | null;
 };
 
 export const fmtBytes = (b: number) =>

@@ -3,8 +3,53 @@
 import Link from "next/link";
 import { useEffect, useState } from "react";
 import { JobButton, JobsPanel } from "@/components/job-controls";
-import { fetchJSON, fmtBytes, fmtTime, modelLabel, type Model } from "@/lib/vesper";
+import { Button } from "@/components/ui/button";
+import { fetchJSON, fmtBytes, fmtTime, modelLabel, postJSON, type Model } from "@/lib/vesper";
 import { cn } from "@/lib/utils";
+
+function ExportToHardware({ model }: { model: Model }) {
+  const [state, setState] = useState<"idle" | "busy" | "done" | "error">(
+    model.onnx ? "done" : "idle",
+  );
+  const [url, setUrl] = useState<string | null>(
+    model.onnx ? `/download/${model.run}/${model.onnx.split("/").pop()}` : null,
+  );
+  const [note, setNote] = useState<string | null>(null);
+
+  const run = async () => {
+    setState("busy"); setNote(null);
+    try {
+      const r = await postJSON<{ url: string; bytes: number }>(
+        "/api/models/export", { policy: model.path });
+      setUrl(r.url); setState("done");
+      setNote(`${Math.round(r.bytes / 1024)} KB ONNX — runs on a Jetson via TensorRT`);
+    } catch (e) {
+      setState("error"); setNote(e instanceof Error ? e.message : "export failed");
+    }
+  };
+
+  return (
+    <div>
+      <div className="flex flex-wrap items-center gap-2">
+        <Button
+          size="sm" variant="secondary" disabled={state === "busy"} onClick={run}
+          className="h-7 cursor-pointer px-3 font-mono text-[11px] tracking-[0.08em]"
+        >
+          {state === "busy" ? "EXPORTING…" : "⬇ EXPORT TO HARDWARE (ONNX)"}
+        </Button>
+        {url && state === "done" && (
+          <a href={url} download
+            className="font-mono text-[11px] text-[#3987e5] underline-offset-2 hover:underline">
+            download .onnx
+          </a>
+        )}
+      </div>
+      <div className="mt-1 text-[11px] text-muted-foreground">
+        {note ?? "Folds in the normalizer and exports the policy to ONNX — the sim→drone step."}
+      </div>
+    </div>
+  );
+}
 
 // The train → deploy loop, point and click. Checkpoints are what training
 // writes into runs/<id>/ (*.pt); deploying one flies or scores it on the box.
@@ -133,6 +178,9 @@ export default function Models() {
                     Full funnel over 400 episodes — swept, found, reached, and how
                     each episode ended.
                   </div>
+                </div>
+                <div className="border-t border-border/60 pt-3">
+                  <ExportToHardware key={active.path} model={active} />
                 </div>
               </div>
             ) : (

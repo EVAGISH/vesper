@@ -350,8 +350,37 @@ def models():
                 "bytes": st.st_size,
                 "mtime": st.st_mtime,
                 "metrics": metrics,
+                "onnx": f"runs/{d.name}/{f.stem}.onnx" if (d / f"{f.stem}.onnx").exists() else None,
             })
     return out
+
+
+class ExportReq(BaseModel):
+    policy: str
+
+
+@app.post("/api/models/export")
+def export_model(req: ExportReq):
+    """Export a checkpoint to ONNX for onboard hardware (the deploy step)."""
+    if not POLICY_PATH.match(req.policy) or not (ROOT / req.policy).is_file():
+        raise HTTPException(400, "policy must be runs/<id>/<name>.pt")
+    onnx = Path(req.policy).with_suffix(".onnx")
+    r = subprocess.run([sys.executable, "scripts/export_policy.py", req.policy],
+                       cwd=ROOT, capture_output=True, text=True, timeout=180)
+    if r.returncode != 0 or not (ROOT / onnx).exists():
+        raise HTTPException(500, f"export failed: {(r.stderr or r.stdout)[-300:]}")
+    return {"onnx": str(onnx), "bytes": (ROOT / onnx).stat().st_size,
+            "url": f"/download/{onnx.parts[1]}/{onnx.name}"}
+
+
+@app.get("/download/{run_id}/{name}")
+def download(run_id: str, name: str):
+    if not RUN_ID.match(run_id) or not RUN_ID.match(name):
+        raise HTTPException(400, "bad path")
+    f = RUNS / run_id / name
+    if not f.is_file() or f.suffix not in (".onnx", ".pt"):
+        raise HTTPException(404, "no such artifact")
+    return FileResponse(f, media_type="application/octet-stream", filename=name)
 
 
 _live_cache = {"t": 0.0, "ip": None}
