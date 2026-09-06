@@ -40,12 +40,25 @@ parser.add_argument("--groups", type=int, default=0,
                     help="vehicle sets shared by groups of envs (0 = one per env); needed once cameras render")
 parser.add_argument("--camera", action="store_true",
                     help="render the body-fixed camera and decide sightings from its pixels (implies --enable_cameras)")
+parser.add_argument("--cam_res", type=int, default=128,
+                    help="square camera tile in pixels; a detector wants 320-384, "
+                         "the width RF-DETR was trained at")
+parser.add_argument("--detector", default=None,
+                    help="URL of a running scripts/detect_server.py (e.g. http://127.0.0.1:8181). "
+                         "Set, the RL agent's sightings come from that network's boxes instead "
+                         "of the simulator's own sensor; implies --camera")
+parser.add_argument("--detector_thresh", type=float, default=0.5,
+                    help="detection score that counts as a sighting")
 parser.add_argument("--obs", choices=["privileged", "policy"], default="privileged",
                     help="which observation PPO trains on: the state-based teacher's, or the honest proprio vector")
 parser.add_argument("--tag", default="search-train")
 AppLauncher.add_app_launcher_args(parser)
 args = parser.parse_args()
 args.headless = True
+if args.detector:
+    # the detector reads rendered pixels: there is nothing for it to look at
+    # without the camera, so asking for one turns the other on
+    args.camera = True
 if args.camera:
     args.enable_cameras = True
 app = AppLauncher(args).app
@@ -83,6 +96,9 @@ cfg.search = {"arena_half": args.arena}
 cfg.vehicle_model = args.vehicle
 cfg.n_groups = args.groups
 cfg.camera = args.camera
+cfg.cam_res = args.cam_res
+cfg.detector = args.detector
+cfg.detector_thresh = args.detector_thresh
 cfg.ppo_key = args.obs
 if args.world:
     cfg.world_usd = args.world
@@ -93,6 +109,10 @@ env = SearchEnv(cfg, seed=args.seed)
 adapter = Adapter(env)
 
 track = ("found", "cleared", "coverage", "oob", "flip", "crash")
+if args.detector:
+    # what share of the targets the renderer put in frame the network actually
+    # called -- the honest read on whether the policy is learning from a sensor
+    track = track + ("det_recall",)
 hidden = tuple(int(h) for h in args.hidden.split(","))
 ppo = PPO(adapter, PPOCfg(horizon=args.horizon, lr=args.lr, gamma=args.gamma, track=track),
           hidden=hidden, device=env.device, seed=args.seed)
@@ -105,7 +125,9 @@ if args.resume:
 cap = RunCapture(args.tag)
 cap.note(num_envs=args.num_envs, iters=args.iters, targets=args.targets, arena=args.arena,
          episode_s=args.episode_s, gamma=args.gamma, world=cfg.world_usd, seed=args.seed,
-         hidden=list(hidden), groups=env.G, camera=args.camera, obs=args.obs)
+         hidden=list(hidden), groups=env.G, camera=args.camera, obs=args.obs,
+         cam_res=args.cam_res, detector=args.detector,
+         detector_thresh=args.detector_thresh if args.detector else None)
 curve = open(cap.dir / "curve.jsonl", "w")
 print(f"train: {args.num_envs} envs x {args.iters} iters, {args.targets} targets in a "
       f"{2*args.arena:.0f} m box, obs {env.num_obs} -> {cap.dir}", flush=True)
@@ -119,7 +141,8 @@ def log(row):
     curve.write(json.dumps(row) + "\n"); curve.flush()
     steps = (row["iter"] + 1) * args.horizon * args.num_envs
     sps = steps / (time.time() - t0 + 1e-9)
-    print(f"it {row['iter']:5d} | ret {row['ep_return']:8.1f} | found {row['found']:.2f} "
+    det = f"| det {row['det_recall']:.2f} " if "det_recall" in row else ""
+    print(f"it {row['iter']:5d} | ret {row['ep_return']:8.1f} | found {row['found']:.2f} " + det +
           f"| cleared {row['cleared']:.2f} | swept {row['coverage']:.2f} "
           f"| all {row['intercept_rate']:.2f} | t {row['time_to_intercept']:5.1f}s "
           f"| box {2*env.tcfg.arena_half:.0f}m "
@@ -164,6 +187,7 @@ summary = {"iters": args.iters, "wall_s": round(wall), "envs": args.num_envs,
            "coverage": avg("coverage"), "all_cleared_rate": avg("intercept_rate"),
            "time_to_clear_s": avg("time_to_intercept"), "best_cleared": round(best, 3),
            "oob": avg("oob"), "flip": avg("flip"), "crash": avg("crash"),
+           "detector": args.detector, "det_recall": avg("det_recall") if args.detector else None,
            "policy": str(cap.dir / "search.pt")}
 print("DONE " + json.dumps(summary), flush=True)
 (cap.dir / "summary.json").write_text(json.dumps(summary, indent=1))

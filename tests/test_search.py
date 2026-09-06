@@ -316,3 +316,43 @@ def test_sensor_pose_looks_where_the_geometric_cone_does():
     assert torch.allclose(fwd, camera_axis(quat, math.radians(40.0)), atol=1e-5)
     # and it sits just ahead of and below the airframe origin, in the body frame
     assert torch.allclose(cam_pos - pos, quat_to_rot(quat) @ torch.tensor([0.12, 0.0, -0.04]), atol=1e-6)
+
+
+# --- dormant parking --------------------------------------------------------
+
+def test_dormant_vehicles_get_a_cell_each_and_stay_clear_of_the_arena():
+    """Parking every dormant hull on one spot exhausts PhysX's broadphase pair
+    capacity for the whole scene, so the solver starts missing real contacts.
+    Each dormant env gets its own cell, and no cell reaches the arena or the
+    world boundary."""
+    import torch
+
+    from vesper.lab.ground import DORMANT_CELL_X, dormant_lattice, dormant_park
+
+    half_m, arena_half, oob_margin = 600.0, 300.0, 40.0
+    for n in (1, 56, 200, 1016):
+        cols, cell_y, anchor = dormant_lattice(n, half_m, arena_half)
+        x, y = dormant_park(torch.arange(n), cols, cell_y, anchor)
+        spots = {(round(float(a), 3), round(float(b), 3)) for a, b in zip(x, y)}
+        assert len(spots) == n                            # no two hulls share a spot
+        # the k slots laid out inside a cell cannot spill into the next one
+        assert DORMANT_CELL_X > 3 * 6.0
+        # every cell sits in the margin: outside the arena, inside the world
+        assert float(y.min()) > arena_half + oob_margin
+        assert float(y.max()) < half_m
+        assert float(x.min()) > -half_m
+        assert float(x.max()) + 2 * 6.0 < half_m
+
+
+def test_dormant_rows_pack_tighter_rather_than_reaching_the_arena():
+    """More dormant environments than rows squeezes the pitch; it never walks
+    the lattice into the flight box."""
+    import torch
+
+    from vesper.lab.ground import dormant_lattice, dormant_park
+
+    half_m, arena_half = 600.0, 300.0
+    cols, cell_y, anchor = dormant_lattice(4000, half_m, arena_half)
+    x, y = dormant_park(torch.arange(4000), cols, cell_y, anchor)
+    assert float(y.min()) > arena_half
+    assert cell_y > 0.0

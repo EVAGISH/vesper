@@ -3,8 +3,11 @@
 import Link from "next/link";
 import { useEffect, useState } from "react";
 import { JobButton, JobsPanel } from "@/components/job-controls";
+import { PerceptionPanel, useDetectors } from "@/components/perception-panel";
 import { Button } from "@/components/ui/button";
-import { fetchJSON, fmtBytes, fmtTime, modelLabel, postJSON, type Model } from "@/lib/vesper";
+import {
+  fetchJSON, fmtBytes, fmtTime, GEOMETRIC, modelLabel, postJSON, type Model,
+} from "@/lib/vesper";
 import { cn } from "@/lib/utils";
 
 function ExportToHardware({ model }: { model: Model }) {
@@ -59,6 +62,16 @@ const POLL_MS = 15000;
 export default function Models() {
   const [models, setModels] = useState<Model[] | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
+  // Perception is an opt-in panel: the built-in sensor is the default and the
+  // page looks exactly as it did until someone opens this.
+  const [showPerception, setShowPerception] = useState(false);
+  const [detector, setDetector] = useState<string>(GEOMETRIC);
+  const { detectors, status, refresh } = useDetectors();
+
+  const detectorName =
+    detectors?.find((d) => d.id === detector)?.name ?? "Geometric sighting model";
+  const usingDetector = detector !== GEOMETRIC;
+  const detectorReady = !usingDetector || (status?.id === detector && status.ready);
 
   useEffect(() => {
     let alive = true;
@@ -193,13 +206,50 @@ export default function Models() {
               <span className="mr-1.5 text-muted-foreground">▮</span>Train a new model
             </h3>
             <div className="p-3">
-              <JobButton label="▲ START TRAINING" body={{ kind: "train" }} />
+              <JobButton
+                label="▲ START TRAINING"
+                body={{ kind: "train", ...(usingDetector ? { detector } : {}) }}
+                className={detectorReady ? undefined : "pointer-events-none opacity-50"}
+              />
               <div className="mt-1 text-[11px] text-muted-foreground">
-                Search-and-reach on the Cornell world, 1500 iterations. Progress
-                appears in Runs as a training curve; the model lands here.
+                {usingDetector
+                  ? "Search-and-reach on the Cornell world with the detector in the loop: 64 environments rendering a 384 px camera, 600 iterations. Slower per step than the sensor model, and the only run whose sightings a real detector produced."
+                  : "Search-and-reach on the Cornell world, 1500 iterations. Progress appears in Runs as a training curve; the model lands here."}
               </div>
+              <div className="mt-2 flex flex-wrap items-center gap-2 border-t border-border/60 pt-2 text-[11px]">
+                <span className="font-mono uppercase tracking-[0.08em] text-muted-foreground">
+                  perception
+                </span>
+                <span className="truncate font-mono text-secondary-foreground">
+                  {detectorName}
+                </span>
+                <Button
+                  size="sm" variant="secondary"
+                  onClick={() => setShowPerception((v) => !v)}
+                  className="ml-auto h-6 cursor-pointer px-2 font-mono text-[10px] tracking-[0.08em]"
+                >
+                  {showPerception ? "▾ HIDE" : "▸ CHANGE"}
+                </Button>
+              </div>
+              {usingDetector && !detectorReady && (
+                <div className="mt-1 text-[11px] text-[#c98500]">
+                  {status?.id === detector
+                    ? "waiting for the detector to finish loading on the box…"
+                    : "deploy this detector to the box before training against it"}
+                </div>
+              )}
             </div>
           </section>
+
+          {showPerception && (
+            <PerceptionPanel
+              detectors={detectors}
+              status={status}
+              selected={detector}
+              onSelect={setDetector}
+              onRefresh={refresh}
+            />
+          )}
 
           <JobsPanel />
         </div>

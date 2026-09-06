@@ -31,6 +31,46 @@ ROLES = [
     ("concealed", 1.2, 0.90, "concealed", False),
     ("parked", 0.0, 0.75, "parking", False),
 ]
+# Parking for dormant vehicle sets (envs beyond the group count). They are
+# nobody's target and are never driven, but PhysX still owns every hull: the GPU
+# broadphase counts overlapping pairs scene-wide, so parking fifty-odd of them on
+# the same spot exhausts foundLostPairsCapacity and the solver starts missing
+# real contacts everywhere else. One cell each instead, laid out in the margin
+# BETWEEN the arena and the world edge -- a lattice that ran the full width of
+# the world would park invisible hulls in the middle of the flight box.
+DORMANT_CELL_X = 30.0            # metres per env along the strip; holds a few slots at 6 m
+DORMANT_CELL_Y_MAX = 12.0        # row pitch, squeezed if there are more envs than rows
+DORMANT_EDGE_M = 15.0            # keep clear of the world boundary
+DORMANT_ARENA_CLEAR_M = 60.0     # keep clear of the arena (past oob_margin)
+
+
+def dormant_lattice(n: int, world_half_m: float, arena_half: float):
+    """(cols, cell_y, anchor_xy) for parking `n` dormant vehicle sets.
+
+    The strip runs the width of the world along its far +y edge, between the
+    arena and the boundary. Rows are pitched to fit whatever is asked for, so a
+    run with far more dormant environments than usual packs tighter rather than
+    spilling into the arena.
+    """
+    x0 = world_half_m - DORMANT_EDGE_M
+    y0 = world_half_m - DORMANT_EDGE_M
+    width = 2.0 * world_half_m - 2.0 * DORMANT_EDGE_M
+    depth = max(0.0, y0 - (arena_half + DORMANT_ARENA_CLEAR_M))
+    cols = max(1, int(width // DORMANT_CELL_X))
+    rows = max(1, -(-max(1, n) // cols))                      # ceil division
+    cell_y = min(DORMANT_CELL_Y_MAX, depth / rows) if depth > 0 else 0.0
+    return cols, cell_y, (x0, y0)
+
+
+def dormant_park(idx, cols: int, cell_y: float, anchor_xy):
+    """Parking spot (x, y) for dormant envs, keyed on their index among the
+    dormant set so a hull keeps the same space across resets."""
+    i = idx.float()
+    x = anchor_xy[0] - DORMANT_CELL_X * torch.remainder(i, cols)
+    y = anchor_xy[1] - cell_y * torch.div(i, cols, rounding_mode="floor")
+    return x, y
+
+
 VEHICLE_SEMANTIC = "vehicle"
 VEHICLE_PATH_RX = r"env_(\d+)/Vehicle_(\d+)"
 

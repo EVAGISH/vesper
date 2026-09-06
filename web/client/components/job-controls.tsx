@@ -12,7 +12,14 @@ export function JobButton({
   label, body, variant = "default", onLaunched, className,
 }: {
   label: string;
-  body: { kind: Job["kind"]; policy?: string; scenario?: string; world?: string; map?: string };
+  body: {
+    kind: Job["kind"];
+    policy?: string;
+    scenario?: string;
+    world?: string;
+    map?: string;
+    detector?: string;
+  };
   variant?: "default" | "secondary";
   onLaunched?: (id: string) => void;
   className?: string;
@@ -147,6 +154,14 @@ export function JobsPanel({ pollMs = 6000, className }: { pollMs?: number; class
                 {j.policy && (
                   <span className="truncate font-mono text-[10px] text-muted-foreground">
                     {j.policy.replace(/^runs\//, "").replace(/\.pt$/, "").replace("/", " · ")}
+                  </span>
+                )}
+                {j.detector && (
+                  <span
+                    title={j.detector}
+                    className="shrink-0 rounded-sm border border-border px-1 font-mono text-[9px] uppercase tracking-[0.08em] text-[#d95926]"
+                  >
+                    detector
                   </span>
                 )}
                 <span className="ml-auto shrink-0 font-mono text-[10px] tabular-nums text-muted-foreground">

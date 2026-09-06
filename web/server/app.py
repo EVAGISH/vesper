@@ -720,6 +720,230 @@ def download(run_id: str, name: str):
     return FileResponse(f, media_type="application/octet-stream", filename=name)
 
 
+# ---------------------------------------------------------------- detectors
+# What decides that the drone has SEEN a vehicle. Two answers ship:
+#
+#   geometric   the built-in sensor model -- a cone, a range, a line-of-sight
+#               trace and a dropout probability, evaluated against the truth.
+#               Free, runs at a thousand environments, and is what every policy
+#               in the library so far was trained against. Still the default.
+#   rfdetr      a trained detector reading the rendered camera. Sightings become
+#               whatever the network actually finds, which is the only honest
+#               way to learn a search policy that will fly behind one.
+#
+# The detector cannot run inside the Isaac container (rfdetr lives in the venv
+# under scratch/, the container forgets pip installs), so it runs as its own
+# process on the droplet and the sim posts frames to it over the loopback.
+# Deploying one is: start that process on the box with a chosen checkpoint.
+DETECT_DIR = RUNS / "detect"                 # local mirror of the box's scratch/
+DETECTOR_FILE = ROOT / ".vesper_detector.json"
+DETECTOR_PORT = 8181
+DETECTOR_URL = f"http://127.0.0.1:{DETECTOR_PORT}"
+DETECTOR_ID = re.compile(r"^runs/[\w.-]+/[\w.-]+\.pth$")
+GEOMETRIC = "geometric"
+
+
+def _detector_state() -> dict:
+    try:
+        return json.loads(DETECTOR_FILE.read_text())
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def _detector_metrics(d: Path) -> dict:
+    """Whatever the detector's own artefacts recorded about it: the training
+    summary beside the checkpoint, and the precision/recall of the last review
+    pass over the held-out split."""
+    out = {}
+    summ = d / "vesper_train_summary.json"
+    if summ.exists():
+        try:
+            j = json.loads(summ.read_text())
+            counts = j.get("counts") or {}
+            out["images"] = sum(c[0] for c in counts.values() if isinstance(c, list))
+            out["epochs"] = j.get("epochs")
+            out["minutes"] = j.get("minutes")
+            out["arch"] = j.get("model")
+        except (json.JSONDecodeError, OSError, TypeError):
+            pass
+    review = DETECT_DIR / "review" / "preds" / "prediction_summary.json"
+    if review.exists():
+        try:
+            j = json.loads(review.read_text())
+            out["precision"] = j.get("precision")
+            out["recall"] = j.get("recall")
+            out["split"] = j.get("split")
+        except (json.JSONDecodeError, OSError):
+            pass
+    return out
+
+
+_box_ckpt_cache = {"t": 0.0, "data": []}
+
+
+def _box_checkpoints() -> list[str]:
+    """Checkpoint ids the GPU box holds under scratch/runs/.
+
+    Deploying only ever needs the box's copy, so the box is the authority on
+    what can be served: a detector trained since the last scripts/detect_pull.sh
+    is deployable even though nothing was mirrored home. Cached a minute -- this
+    is on a polled endpoint and the answer changes about once a day.
+    """
+    now = time.time()
+    if now - _box_ckpt_cache["t"] < 60:
+        return _box_ckpt_cache["data"]
+    try:
+        rc, out, _ = _ssh("ls -1 /root/vesper/scratch/runs/*/*.pth 2>/dev/null || true", timeout=15)
+    except (HTTPException, subprocess.SubprocessError):
+        rc, out = 1, ""
+    ids = []
+    if rc == 0:
+        for line in out.splitlines():
+            rel = line.strip().replace("/root/vesper/scratch/", "")
+            if DETECTOR_ID.match(rel):
+                ids.append(rel)
+    _box_ckpt_cache.update(t=now, data=ids)
+    return ids
+
+
+@app.get("/api/detectors")
+def detectors():
+    """The perception library: the built-in sensor first, then every RF-DETR
+    checkpoint that can be served -- the local mirror scripts/detect_pull.sh
+    writes, plus anything the box has trained since."""
+    state = _detector_state()
+    out = [{
+        "id": GEOMETRIC,
+        "kind": "builtin",
+        "name": "Geometric sighting model",
+        "detail": "cone, range, line of sight and foliage, evaluated against the "
+                  "simulator's truth -- no camera, no network, a thousand environments",
+        "bytes": 0, "mtime": None, "metrics": {}, "deployable": False,
+    }]
+    seen = set()
+    for d in sorted(DETECT_DIR.glob("runs/*"), reverse=True) if DETECT_DIR.is_dir() else []:
+        if not d.is_dir():
+            continue
+        metrics = _detector_metrics(d)
+        for f in sorted(d.glob("*.pth")):
+            st = f.stat()
+            rel = f"runs/{d.name}/{f.name}"
+            seen.add(rel)
+            out.append({
+                "id": rel,
+                "kind": "rfdetr",
+                "name": f"{d.name} · {f.stem.replace('checkpoint_', '')}",
+                "detail": "reads the rendered camera; runs on the box beside the sim",
+                "bytes": st.st_size,
+                "mtime": st.st_mtime,
+                "metrics": metrics,
+                "deployable": True,
+            })
+    for rel in _box_checkpoints():
+        if rel in seen:
+            continue
+        family, name = Path(rel).parts[1], Path(rel).stem
+        out.append({
+            "id": rel,
+            "kind": "rfdetr",
+            "name": f"{family} · {name.replace('checkpoint_', '')}",
+            "detail": "on the GPU box only -- pull artifacts to see its numbers here",
+            "bytes": 0, "mtime": None, "metrics": {}, "deployable": True,
+        })
+    live = state.get("id")
+    for e in out:
+        e["deployed"] = e["id"] == live
+    return out
+
+
+_detector_cache = {"t": 0.0, "data": None}
+
+
+@app.get("/api/detectors/status")
+def detector_status():
+    """Is a detector actually answering on the box, and which one."""
+    now = time.time()
+    if _detector_cache["data"] is not None and now - _detector_cache["t"] < 4:
+        return _detector_cache["data"]
+    state = _detector_state()
+    data = {"id": state.get("id"), "name": state.get("name"), "url": DETECTOR_URL,
+            "ready": False, "status": "not deployed", "since": state.get("started")}
+    if state.get("id"):
+        try:
+            rc, out, _ = _ssh(f"curl -s --max-time 4 {DETECTOR_URL}/health || true")
+            health = json.loads(out.strip()) if rc == 0 and out.strip() else {}
+        except (HTTPException, json.JSONDecodeError):
+            health = {}
+        if health:
+            data["ready"] = bool(health.get("ready"))
+            data["status"] = health.get("status") or "?"
+            data["error"] = health.get("error")
+            data["device"] = health.get("device")
+            data["images"] = health.get("images")
+        else:
+            data["status"] = "unreachable"
+    _detector_cache.update(t=now, data=data)
+    return data
+
+
+class DetectorReq(BaseModel):
+    id: str
+
+
+@app.post("/api/detectors/deploy")
+def deploy_detector(req: DetectorReq):
+    """Start the chosen detector on the GPU box, replacing whatever was serving.
+
+    Returns as soon as the process is launched: loading torch and the weights
+    takes tens of seconds, and the UI polls /api/detectors/status for `ready`
+    rather than holding an HTTP request open through it.
+    """
+    if req.id == GEOMETRIC:
+        return stop_detector()
+    if not DETECTOR_ID.match(req.id) or not (DETECT_DIR / req.id).is_file():
+        raise HTTPException(400, "detector must be a checkpoint under runs/detect/runs/")
+    # scripts/detect_pull.sh mirrors the box's scratch/ into runs/detect/, so the
+    # local path maps straight back to where the weights live on the box
+    remote_ckpt = f"scratch/{req.id}"
+    family = Path(req.id).parts[1]                      # "rfdetr-nano" -> nano
+    size = family.split("-")[-1] if "-" in family else "nano"
+    if size not in ("nano", "small", "medium", "base", "large"):
+        size = "nano"
+    script = f"""#!/usr/bin/env bash
+set -u
+cd /root/{REMOTE_DIR}
+pkill -f 'scripts/detect_server.py' 2>/dev/null || true
+sleep 1
+[ -x scratch/venv-rfdetr/bin/python ] || {{
+  echo "no rfdetr venv on the box -- run scripts/rfdetr_setup.sh" > scratch/detect_server.log
+  exit 1
+}}
+exec scratch/venv-rfdetr/bin/python scripts/detect_server.py \
+  --checkpoint {remote_ckpt} --model {size} --port {DETECTOR_PORT} \
+  > scratch/detect_server.log 2>&1
+"""
+    rc, out, err = _ssh_script(script, "/root/detect_serve.sh")
+    if rc != 0 or "launched" not in out:
+        raise HTTPException(502, f"deploy failed: {err.strip() or out.strip()}")
+    DETECTOR_FILE.write_text(json.dumps({
+        "id": req.id, "name": f"{family} · {Path(req.id).stem}", "model": size,
+        "url": DETECTOR_URL, "started": time.time()}, indent=1))
+    _detector_cache["t"] = 0.0
+    return {"ok": True, "id": req.id, "url": DETECTOR_URL, "status": "loading"}
+
+
+@app.post("/api/detectors/stop")
+def stop_detector():
+    """Stop the served detector. Training falls back to the built-in sensor."""
+    try:
+        _ssh("pkill -f 'scripts/detect_server.py' >/dev/null 2>&1; true")
+    except HTTPException:
+        pass                                    # box already gone: nothing to stop
+    DETECTOR_FILE.unlink(missing_ok=True)
+    _detector_cache["t"] = 0.0
+    return {"ok": True, "id": GEOMETRIC}
+
+
 _live_cache = {"t": 0.0, "ip": None}
 
 
@@ -932,6 +1156,14 @@ JOB_KINDS = {
     # are instant commands instead of a fresh Isaac boot
     "warm": "scripts/warm_session.py --num_envs 8 --cameras --policy runs/friend-checkpoints/search.pt",
 }
+
+# Training with a detector in the loop is a different shape of run, not a flag on
+# the same one: every environment has to render a camera every step and every
+# frame goes through the network, so it is dozens of environments at a tile the
+# detector can actually read, not a thousand state vectors. Groups keep the site
+# from being carpeted with tanks now that every drone sees the whole world.
+TRAIN_DETECTOR = ("scripts/train_search.py --num_envs 64 --iters 600 --headless "
+                  "--camera --cam_res 384 --groups 8 --detector {url}")
 SCENARIO_FILE = re.compile(r"^[\w.-]+\.json$")
 
 
@@ -989,6 +1221,9 @@ class JobReq(BaseModel):
     scenario: str | None = None
     world: str | None = None
     map: str | None = None
+    # perception for a training run: "geometric" (or unset) keeps the built-in
+    # sensor; a checkpoint id trains against the detector deployed on the box
+    detector: str | None = None
 
 
 @app.post("/api/jobs")
@@ -996,6 +1231,15 @@ def start_job(req: JobReq):
     if req.kind not in JOB_KINDS:
         raise HTTPException(400, "unknown job kind")
     tmpl = JOB_KINDS[req.kind]
+    if req.detector and req.detector != GEOMETRIC:
+        if req.kind != "train":
+            raise HTTPException(400, "a detector can only be selected for a training run")
+        state = _detector_state()
+        if state.get("id") != req.detector:
+            raise HTTPException(400, "that detector is not deployed -- deploy it first")
+        if not detector_status().get("ready"):
+            raise HTTPException(400, "the detector is not answering yet -- wait for it to load")
+        tmpl = TRAIN_DETECTOR.format(url=DETECTOR_URL)
     if "{policy}" in tmpl:
         if not req.policy or not POLICY_PATH.match(req.policy):
             raise HTTPException(400, "policy must look like runs/<id>/<name>.pt")
@@ -1039,6 +1283,7 @@ def start_job(req: JobReq):
         raise HTTPException(502, f"launch failed: {err.strip() or out.strip()}")
     jobs = _load_jobs()
     jobs.append({"id": jid, "kind": req.kind, "policy": req.policy,
+                 "detector": req.detector if req.detector != GEOMETRIC else None,
                  "started": time.time(), "status": "running", "finished": None,
                  "log": ""})
     _save_jobs(jobs)

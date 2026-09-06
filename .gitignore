@@ -22,3 +22,6 @@ scratch/
 .vesper_envbuilds.json
 .vesper_api.log
 .envbuild_*.log
+
+# detector serving state (which RF-DETR is up on the box)
+.vesper_detector.json

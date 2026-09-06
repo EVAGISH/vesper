@@ -35,6 +35,7 @@ the drone is going.
 """
 import math
 import os
+from pathlib import Path
 
 import torch
 
@@ -57,8 +58,9 @@ CORNELL_MAP = os.path.join(REPO, "assets", "cornell", "cornell_map.npz")
 # Role table and hull limits are shared with the native env (vesper.native),
 # which cannot import this module (isaaclab above); they live in ground.py and
 # are re-exported here so existing imports keep working.
-from vesper.lab.ground import (ROLES, VEH_ACCEL, VEH_LAT_ACCEL, VEH_STUCK_S,  # noqa: F401,E402
-                               VEH_TURN_MAX, VEHICLE_PATH_RX, VEHICLE_SEMANTIC)
+from vesper.lab.ground import (ROLES, VEH_ACCEL, VEH_LAT_ACCEL,  # noqa: F401,E402
+                               VEH_STUCK_S, VEH_TURN_MAX, VEHICLE_PATH_RX,
+                               VEHICLE_SEMANTIC, dormant_lattice, dormant_park)
 
 
 @configclass
@@ -86,6 +88,14 @@ class SearchEnvCfg(VesperQuadEnvCfg):
     camera: bool = False                # render the body-fixed camera (needs --enable_cameras)
     cam_res: int = 128                  # square tiles
     cam_offset: tuple = (0.12, 0.0, -0.04)   # camera position in the body frame (m)
+    # --- detector in the loop ---
+    # URL of a running scripts/detect_server.py. Set, sightings come from that
+    # network's boxes instead of from the simulator's own truth (see
+    # vesper.lab.detector); the camera is rendered and the segmentation is kept
+    # only to audit the detector against it. None = the geometric sensor.
+    detector: str | None = None
+    detector_thresh: float = 0.5        # detection score that counts as a sighting
+    detector_pad_px: float = 4.0        # slack when matching a box to a target's pixel
     # which key ppo_step() returns as the observation: "privileged" trains the
     # state-based teacher, "policy" is the honest proprio vector (+ "pixels")
     ppo_key: str = "privileged"
@@ -137,11 +147,27 @@ class SearchEnv(VesperQuadEnv):
         self._evaluated = False
         self._seg_table = None
         self._seg_labels_n = -1
+        self._sight = self._make_detector()
+        # running audit of the detector against the renderer's own segmentation:
+        # of the targets the simulator says are in frame, what fraction did the
+        # network find. Per env so PPO can track it like any other episode stat.
+        self._det_hits = torch.zeros(N, device=dev)
+        self._det_truth = torch.zeros(N, device=dev)
         # probe fan used to steer vehicles away from ground they cannot drive on
         self._probe = torch.tensor([0.0, 0.5, -0.5, 1.0, -1.0, 1.8, -1.8, 3.14159], device=dev)
-        # a dormant vehicle set (envs beyond the first G) is parked out of the
-        # arena, invisible, and never driven
-        self._dormant_xy = torch.tensor([self.world.half_m - 15.0, self.world.half_m - 15.0], device=dev)
+        # A dormant vehicle set (envs beyond the first G) is parked out of the
+        # arena, invisible, and never driven -- but PhysX still owns every hull.
+        # They must not be parked on top of each other: the GPU broadphase counts
+        # overlapping pairs scene-wide, and fifty-odd co-located hulls exhaust
+        # foundLostPairsCapacity, at which point the solver starts missing real
+        # contacts everywhere else (drones on terrain included). So each dormant
+        # env gets its own cell in a lattice laid along the far edge of the world,
+        # rows running inward and always well outside the arena.
+        # arena_half here is the full box: the curriculum only ever shrinks it,
+        # so a spot clear of this one is clear of every stage of the run
+        self._dormant_cols, self._dormant_cell_y, anchor = dormant_lattice(
+            max(0, self.num_envs - self.G), self.world.half_m, self.tcfg.arena_half)
+        self._dormant_xy = torch.tensor(anchor, device=dev)
 
     # ---------------------------------------------------------------- scene
     def _setup_scene(self):
@@ -369,6 +395,50 @@ class SearchEnv(VesperQuadEnv):
             return None
         return self._cam.data.output.get("rgb")
 
+    def _make_detector(self):
+        """Connect to the detector server, or None for the built-in sensor.
+
+        Blocks until the server reports a loaded model: a training run that
+        started before the weights were up would spend its first minutes
+        learning from a sensor that sees nothing, and that is indistinguishable
+        in the curve from a policy that cannot search.
+        """
+        if not self.cfg.detector:
+            return None
+        if not self.cfg.camera:
+            raise ValueError("cfg.detector needs cfg.camera: the detector reads "
+                             "rendered pixels, so the camera has to be on")
+        from vesper.lab.detector import DetectorSight, RemoteDetector
+        client = RemoteDetector(self.cfg.detector, threshold=self.cfg.detector_thresh)
+        h = client.wait_ready()
+        print(f"detector: {h.get('model')} {Path(h.get('checkpoint', '')).name} on "
+              f"{h.get('device')} at {self.cfg.detector}, threshold "
+              f"{self.cfg.detector_thresh}, tiles {self.cfg.cam_res}px", flush=True)
+        return DetectorSight(client, self.tcfg.cam_pitch_deg, self.tcfg.fov_half_deg,
+                             self.cfg.cam_res, self.cfg.cam_offset, self.cfg.detector_pad_px)
+
+    def _sightings(self):
+        """What decides a sighting this step -- see vesper.lab.detector.
+
+        None hands the task its geometric cone. Segmentation counts hand it the
+        renderer's truth. With a detector, the counts are box areas from the
+        network, and the segmentation is spent on auditing it rather than on
+        answering the question.
+        """
+        truth = self._seen_px()
+        if self._sight is None:
+            return truth
+        rgb = self.pixels()
+        if rgb is None:
+            return truth
+        d = self._robot.data
+        det = self._sight.seen_px(rgb, d.root_pos_w, d.root_quat_w, self.target_pos)
+        if truth is not None:
+            in_frame = truth >= self.tcfg.sight_px
+            self._det_truth += in_frame.float().sum(dim=1)
+            self._det_hits += (in_frame & (det >= self.tcfg.sight_px)).float().sum(dim=1)
+        return det
+
     # ---------------------------------------------------------------- task
     def _evaluate(self):
         if self._evaluated:
@@ -376,7 +446,12 @@ class SearchEnv(VesperQuadEnv):
         d = self._robot.data
         _, self._reward, self._term, info = self.task.step(
             d.root_pos_w, d.root_lin_vel_w, d.root_quat_w, d.root_ang_vel_b,
-            self.target_pos, self.episode_length_buf, seen_px=self._seen_px())
+            self.target_pos, self.episode_length_buf, seen_px=self._sightings())
+        if self._sight is not None:
+            # of the target-in-frame opportunities this episode, the share the
+            # network actually called: the one number that says whether the
+            # policy is learning from a sensor or from a black frame
+            info["det_recall"] = self._det_hits / self._det_truth.clamp(min=1.0)
         self.extras.update(info)
         self._evaluated = True
 
@@ -421,6 +496,9 @@ class SearchEnv(VesperQuadEnv):
         n = len(env_ids)
         g, dev, c = self.gen, self.device, self.tcfg
         env_ids = torch.as_tensor(env_ids, device=dev)
+        if self._sight is not None:                           # detector audit is per episode
+            self._det_hits[env_ids] = 0.0
+            self._det_truth[env_ids] = 0.0
         rep = env_ids[env_ids < self.G]                       # envs whose vehicle set is live
         dormant = env_ids[env_ids >= self.G]
 
@@ -489,11 +567,15 @@ class SearchEnv(VesperQuadEnv):
             self.veh_speed[dormant] = 0.0
             self.veh_speed_cmd[dormant] = 0.0
             self.veh_on_road[dormant] = False
-            gz = self.world.ground_at(self._dormant_xy[0].expand(m), self._dormant_xy[1].expand(m))
+            # one lattice cell per dormant env, keyed on the env id so a hull
+            # keeps its parking space across resets (see ground.dormant_lattice)
+            base_x, base_y = dormant_park(dormant - self.G, self._dormant_cols,
+                                          self._dormant_cell_y, self._dormant_xy)
+            gz = self.world.ground_at(base_x, base_y)
             for i, v in enumerate(self._vehicles):
                 root = torch.zeros(m, 13, device=dev)
-                root[:, 0] = self._dormant_xy[0] + 6.0 * i
-                root[:, 1] = self._dormant_xy[1]
+                root[:, 0] = base_x + 6.0 * i
+                root[:, 1] = base_y
                 root[:, 2] = gz + 1.0
                 root[:, 3] = 1.0
                 v.write_root_pose_to_sim(root[:, :7], dormant)

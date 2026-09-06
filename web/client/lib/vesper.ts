@@ -44,6 +44,43 @@ export type Model = {
   onnx: string | null;
 };
 
+/** An answer to "has the drone seen that vehicle" — the built-in sensor model,
+ *  or a trained detector reading the rendered camera on the GPU box. */
+export type Detector = {
+  id: string;
+  kind: "builtin" | "rfdetr";
+  name: string;
+  detail: string;
+  bytes: number;
+  mtime: number | null;
+  metrics: {
+    precision?: number;
+    recall?: number;
+    split?: string;
+    epochs?: number;
+    images?: number;
+    minutes?: number;
+    arch?: string;
+  };
+  deployable: boolean;
+  deployed: boolean;
+};
+
+/** Whether a deployed detector is actually answering on the box. */
+export type DetectorStatus = {
+  id: string | null;
+  name?: string | null;
+  url: string;
+  ready: boolean;
+  status: string;
+  since?: number | null;
+  error?: string | null;
+  device?: string | null;
+  images?: number | null;
+};
+
+export const GEOMETRIC = "geometric";
+
 export const fmtBytes = (b: number) =>
   b >= 1 << 20 ? `${(b / (1 << 20)).toFixed(1)} MB` : `${Math.round(b / 1024)} KB`;
 
@@ -51,6 +88,7 @@ export type Job = {
   id: string;
   kind: "train" | "fly" | "eval" | "mission" | "live" | "warm";
   policy?: string | null;
+  detector?: string | null;
   started: number;
   finished?: number | null;
   status: "running" | "done" | "stopped" | "failed";
