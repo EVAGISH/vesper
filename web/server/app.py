@@ -148,6 +148,19 @@ def scenarios():
 
 SITE_NAME = re.compile(r"^[a-z][a-z0-9_]{1,31}$")
 ENV_BUILDS: dict[str, dict] = {}
+ENV_BUILDS_FILE = ROOT / ".vesper_envbuilds.json"   # survives server restarts (uvicorn --reload)
+
+
+def _save_env_builds() -> None:
+    try:
+        ENV_BUILDS_FILE.write_text(json.dumps(ENV_BUILDS, indent=1))
+    except OSError:
+        pass
+
+
+def _env_update(name: str, **kw) -> None:
+    ENV_BUILDS.setdefault(name, {}).update(kw)
+    _save_env_builds()
 
 
 class EnvBuildReq(BaseModel):
@@ -155,6 +168,77 @@ class EnvBuildReq(BaseModel):
     lat: float
     lon: float
     half_km: float = 1.0
+    launch: list[float] | None = None            # [lat, lon] of the launch pin (5 m pad)
+    safe: list[list[list[float]]] = []           # friendly zones: [[[lat, lon], ...], ...]
+
+
+# ---- site frame <-> geo. Site metres are ENU about the world centre (lat0, lon0),
+# the same frame the builder, the map rasters and the zones file use.
+LAUNCH_R_M = 5.0                                 # launch pad radius
+LAUNCH_TREE_CLEAR_M = 5.0                        # no trunk closer than this to the pin
+
+
+def _site_xy(lat: float, lon: float, lat0: float, lon0: float) -> list[float]:
+    return [round((lon - lon0) * 111320.0 * math.cos(math.radians(lat0)), 2),
+            round((lat - lat0) * 110574.0, 2)]
+
+
+def _geo(x: float, y: float, lat0: float, lon0: float) -> list[float]:
+    return [round(lat0 + y / 110574.0, 7),
+            round(lon0 + x / (111320.0 * math.cos(math.radians(lat0))), 7)]
+
+
+def _launch_polygon(x: float, y: float, r: float = LAUNCH_R_M, n: int = 24) -> list[list[float]]:
+    return [[round(x + r * math.cos(2 * math.pi * i / n), 2),
+             round(y + r * math.sin(2 * math.pi * i / n), 2)] for i in range(n)]
+
+
+def _zones_doc(lat0: float, lon0: float, launch_geo: list[float] | None,
+               safe_geo: list[list[list[float]]], launch_xy: list[float] | None = None) -> dict:
+    """The zones.json body: `launch` / `safe` polygons in site metres (what
+    vesper.worlds.zones.Zones loads), plus the raw pin and the lat/lon originals
+    so the map UI can redraw them without the site frame."""
+    if launch_xy is None and launch_geo is not None:
+        launch_xy = _site_xy(launch_geo[0], launch_geo[1], lat0, lon0)
+    if launch_xy is not None and launch_geo is None:
+        launch_geo = _geo(launch_xy[0], launch_xy[1], lat0, lon0)
+    safe_xy = [[_site_xy(la, lo, lat0, lon0) for la, lo in poly] for poly in safe_geo]
+    return {
+        "launch": _launch_polygon(*launch_xy) if launch_xy else None,
+        "safe": safe_xy,
+        "launch_point": ({"x": launch_xy[0], "y": launch_xy[1], "r_m": LAUNCH_R_M,
+                          "lat": launch_geo[0], "lon": launch_geo[1]} if launch_xy else None),
+        "safe_geo": safe_geo,
+        "center": [lat0, lon0],
+    }
+
+
+def _tree_clearance(world: str, x: float, y: float) -> float | None:
+    """Distance (m) from (x, y) to the nearest trunk in the world's map, or None
+    when the world has no map yet (pre-build: the builder clears trees itself)."""
+    npz = ASSETS / world / f"{world}_map.npz"
+    if not npz.exists():
+        return None
+    try:
+        import numpy as np
+        trees = np.load(npz)["trees"]                 # [(x, y, height, crown_r)]
+    except Exception:                                 # noqa: BLE001
+        return None
+    if len(trees) == 0:
+        return float("inf")
+    return float(np.hypot(trees[:, 0] - x, trees[:, 1] - y).min())
+
+
+def _write_zones(world: str, doc: dict) -> Path:
+    d = ASSETS / world
+    d.mkdir(parents=True, exist_ok=True)
+    f = d / "zones.json"
+    f.write_text(json.dumps(doc, indent=1))
+    ip = _droplet_ip()
+    if ip:                                            # the box copy is what training reads
+        subprocess.run(["rsync", "-az", "-e", _ssh_opts(), str(f), f"root@{ip}:{REMOTE_DIR}/assets/{world}/"],
+                       timeout=60, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    return f
 
 
 def _env_log(name: str) -> Path:
@@ -171,29 +255,220 @@ def _export_map(name: str, logf: Path) -> None:
                        stdout=f, stderr=subprocess.STDOUT, timeout=900)
 
 
-def _run_env_build(name: str, lat: float, lon: float, half_km: float) -> None:
-    logf = _env_log(name)
+GEO_PY = "/root/geo-venv/bin/python"           # infra/do/geo_env.sh puts the build env here
+# what the Mac keeps of a world built on the box: everything except the big rasters and
+# the USD, which only Isaac (on the box) reads. ground.jpg is the web preview.
+MIRROR_EXCLUDES = ["imagery.png", "naip.png", "ground.png", "dem.npy", "*.usd", "*.glb", "src_images"]
+
+
+def _ssh_opts():
+    return f"ssh -i {KEY_FILE} -o BatchMode=yes -o StrictHostKeyChecking=accept-new"
+
+
+def _tex_px(size_km: float) -> int:
+    """Ground albedo resolution: ~0.5 m/px up to 4 km, then 8192 (memory + Esri's own limit)."""
+    return 4096 if size_km <= 2.5 else 8192
+
+
+def _build_cmd(name: str, lat: float, lon: float, size_km: float, py: str,
+               spawn_xy: list[float] | None = None) -> list[str]:
+    cmd = [py, "-u", "scripts/build_geo_world.py", name,
+           "--lat", str(lat), "--lon", str(lon), "--size-km", str(size_km),
+           "--tex-px", str(_tex_px(size_km)), "--source", "global", "--ms-buildings"]
+    if spawn_xy is not None:                        # the operator's launch pin (builder clears trees around it)
+        cmd += ["--spawn", str(spawn_xy[0]), str(spawn_xy[1])]
+    return cmd
+
+
+def _reconcile_launch(name: str, lat0: float, lon0: float, logf: Path) -> None:
+    """The builder may snap a pin off a rooftop/road; keep zones.json on the spawn
+    it actually used so the pad, the scenario and the map agree."""
+    zf = ASSETS / name / "zones.json"
+    mf = ASSETS / name / f"{name}_build.json"
+    if not zf.exists() or not mf.exists():
+        return
     try:
-        with open(logf, "w") as f:
-            p = subprocess.run(
-                [sys.executable, "scripts/build_geo_world.py", name,
-                 "--lat", str(lat), "--lon", str(lon), "--half-km", str(half_km),
-                 "--source", "global", "--ms-buildings"],
-                cwd=ROOT, stdout=f, stderr=subprocess.STDOUT, timeout=1800)
-        ok = p.returncode == 0 and (ROOT / "assets" / name / f"{name}.usd").exists()
+        doc = json.loads(zf.read_text()); rep = json.loads(mf.read_text()).get("report", {})
+        sx, sy = rep.get("spawn_xy") or (None, None)
+        lp = doc.get("launch_point")
+        if sx is None or not lp:
+            return
+        moved = math.hypot(sx - lp["x"], sy - lp["y"])
+        if moved > 0.5:
+            with open(logf, "a") as f:
+                f.write(f"launch pin moved {moved:.0f} m to open ground by the builder\n")
+            _write_zones(name, _zones_doc(lat0, lon0, None, doc.get("safe_geo") or [], launch_xy=[sx, sy]))
+        else:
+            _write_zones(name, doc)                   # push the local copy to the box
+    except (OSError, json.JSONDecodeError, KeyError, TypeError):
+        return
+
+
+def _run_env_build_local(name: str, lat: float, lon: float, size_km: float, logf: Path,
+                         spawn_xy: list[float] | None = None) -> bool:
+    """Fallback when the box is down: build here (the geo pipeline needs no GPU)."""
+    with open(logf, "a") as f:
+        f.write("box is down -- building locally (slower: home bandwidth)\n")
+        p = subprocess.run(_build_cmd(name, lat, lon, size_km, sys.executable, spawn_xy),
+                           cwd=ROOT, stdout=f, stderr=subprocess.STDOUT, timeout=3600)
+    ok = p.returncode == 0 and (ROOT / "assets" / name / f"{name}.usd").exists()
+    if ok:
+        _export_map(name, logf)                                 # make it trainable
+        subprocess.run([sys.executable, "scripts/ground_preview.py", f"assets/{name}"], cwd=ROOT,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=300)
+        ip = _droplet_ip()
+        if ip:                                                  # push the new world to the box
+            subprocess.run(["rsync", "-az", "-e", _ssh_opts(), str(ROOT / "assets" / name),
+                            f"root@{ip}:{REMOTE_DIR}/assets/"], timeout=1800)
+            subprocess.run(["rsync", "-az", "-e", _ssh_opts(), str(ROOT / f"{name}0.json"),
+                            f"root@{ip}:{REMOTE_DIR}/"], timeout=120)
+    return ok
+
+
+def _launch_box_build(name: str, lat: float, lon: float, size_km: float,
+                      spawn_xy: list[float] | None, logf: Path, ip: str) -> str | None:
+    """Start the geo build + map export + preview on the box as a detached job
+    with a unique log/exit marker; returns the job id (None if it did not start)."""
+    job = f"envbuild_{name}_{int(time.time())}"
+    rlog, rexit = f"/root/{job}.log", f"/root/{job}.exit"
+    cmd = " ".join(_build_cmd(name, lat, lon, size_km, GEO_PY, spawn_xy))
+    chain = (f"cd {REMOTE_DIR} && {cmd}"
+             f" && echo '== exporting world-map (needed for training)'"
+             f" && {GEO_PY} -u scripts/export_world_map.py assets/{name}/{name}.usd"
+             f" && {GEO_PY} scripts/ground_preview.py assets/{name}")
+    # the job script goes over stdin (no inline quoting games), then runs detached
+    script = f"#!/usr/bin/env bash\n( {chain} ) > {rlog} 2>&1\necho $? > {rexit}\n"   # subshell: redirect covers the whole chain
+    rc, out, err = _ssh_script(script, f"/root/{job}.sh", timeout=30)
+    with open(logf, "a") as f:
+        f.write(f"building on the box ({ip}) as {job}\n")
+        if rc != 0 or "launched" not in out:
+            f.write(f"could not launch: {(err or out).strip()[-300:]}\n")
+            return None
+    return job
+
+
+def _poll_box_job(name: str, job: str, ip: str, logf: Path, started: float) -> int | None:
+    """Copy the remote log into the local one every few seconds until the exit
+    marker appears. Returns the exit code, or None on timeout / never started."""
+    rlog, rexit = f"/root/{job}.log", f"/root/{job}.exit"
+    deadline = started + 3600
+    first_output_by = started + 90                              # the job prints within seconds
+    while time.time() < deadline:
+        time.sleep(3)
+        try:
+            rc, out, _ = _ssh(f"cat {rexit} 2>/dev/null; echo __SEP__; cat {rlog} 2>/dev/null", timeout=20)
+        except (HTTPException, subprocess.TimeoutExpired):
+            continue                                            # transient: box busy / ssh hiccup
+        head, _, tail = out.partition("__SEP__")
+        if not tail.strip() and time.time() > first_output_by:
+            with open(logf, "a") as f:
+                f.write("the job never started on the box (no log after 90 s)\n")
+            return None
+        body = "\n".join(ln for ln in tail.splitlines()
+                         if ln.strip() and not ln.startswith("#") and "Warning" not in ln
+                         and "oriented_envelope" not in ln and not ln.startswith("  return"))
+        logf.write_text(f"building on the box ({ip}) as {job}\n{body}\n")
+        if head.strip().lstrip("-").isdigit():
+            return int(head.strip())
+    with open(logf, "a") as f:
+        f.write("timed out waiting for the box\n")
+    return None
+
+
+def _mirror_box_world(name: str, ip: str, logf: Path) -> bool:
+    """Bring the light files back (metadata, map rasters, preview) -- not the big
+    rasters or the USD, which only Isaac on the box reads."""
+    with open(logf, "a") as f:
+        f.write("mirroring world metadata + map back to this machine...\n")
+    ex = sum((["--exclude", e] for e in MIRROR_EXCLUDES), [])
+    r1 = subprocess.run(["rsync", "-az", "-e", _ssh_opts(), *ex,
+                         f"root@{ip}:{REMOTE_DIR}/assets/{name}/", str(ROOT / "assets" / name) + "/"],
+                        capture_output=True, text=True, timeout=1800)
+    r2 = subprocess.run(["rsync", "-az", "-e", _ssh_opts(),
+                         f"root@{ip}:{REMOTE_DIR}/{name}0.json", str(ROOT / f"{name}0.json")],
+                        capture_output=True, text=True, timeout=120)
+    ok = r1.returncode == 0 and r2.returncode == 0 and (ROOT / "assets" / name / f"{name}_build.json").exists()
+    with open(logf, "a") as f:
+        f.write("done\n" if ok else f"mirror failed: {(r1.stderr or r2.stderr).strip()[-200:]}\n")
+    return ok
+
+
+def _run_env_build_box(name: str, lat: float, lon: float, size_km: float, ip: str, logf: Path,
+                       spawn_xy: list[float] | None = None) -> bool:
+    """Build on the GPU box: it has datacenter bandwidth to Esri/Copernicus/Overpass,
+    and the finished world lands where Isaac and training read it (no upload over the
+    home link, which measures ~1 MB/s). The Mac then mirrors the light files back.
+    The job id is persisted so a restarted server re-attaches instead of losing it."""
+    job = _launch_box_build(name, lat, lon, size_km, spawn_xy, logf, ip)
+    if not job:
+        return False
+    _env_update(name, job=job, ip=ip, lat=lat, lon=lon, size_km=size_km)
+    code = _poll_box_job(name, job, ip, logf, time.time())
+    if code != 0:
+        if code is not None:
+            with open(logf, "a") as f:
+                f.write("build failed on the box\n")
+        return False
+    return _mirror_box_world(name, ip, logf)
+
+
+def _resume_box_builds() -> None:
+    """After a server restart: re-attach to box jobs that were still running."""
+    try:
+        saved = json.loads(ENV_BUILDS_FILE.read_text()) if ENV_BUILDS_FILE.exists() else {}
+    except (OSError, json.JSONDecodeError):
+        saved = {}
+    ENV_BUILDS.update(saved)
+    for name, b in list(saved.items()):
+        if b.get("status") != "running":
+            continue
+        if not b.get("job"):                                     # local build: the process died with us
+            _env_update(name, status="failed", finished=time.time(), error="server restarted mid-build")
+            continue
+
+        def _resume(name=name, b=b):
+            logf = _env_log(name)
+            with open(logf, "a") as f:
+                f.write("server restarted; re-attached to the running box job\n")
+            ok = False
+            try:
+                code = _poll_box_job(name, b["job"], b["ip"], logf, b.get("started", time.time()))
+                ok = code == 0 and _mirror_box_world(name, b["ip"], logf)
+                if ok:
+                    _reconcile_launch(name, b["lat"], b["lon"], logf)
+            except Exception as e:                              # noqa: BLE001
+                with open(logf, "a") as f:
+                    f.write(f"error: {e}\n")
+            _env_update(name, status="done" if ok else "failed", finished=time.time())
+
+        threading.Thread(target=_resume, daemon=True).start()
+
+
+def _run_env_build(name: str, lat: float, lon: float, size_km: float,
+                   launch: list[float] | None = None, safe: list | None = None) -> None:
+    logf = _env_log(name)
+    logf.write_text("")
+    try:
+        spawn_xy = None
+        if launch or safe:                          # operator zones, saved before the build starts
+            doc = _zones_doc(lat, lon, launch, safe or [])
+            (ASSETS / name).mkdir(parents=True, exist_ok=True)
+            (ASSETS / name / "zones.json").write_text(json.dumps(doc, indent=1))
+            if doc["launch_point"]:
+                spawn_xy = [doc["launch_point"]["x"], doc["launch_point"]["y"]]
+        ip = _droplet_ip()
+        ok = (_run_env_build_box(name, lat, lon, size_km, ip, logf, spawn_xy) if ip
+              else _run_env_build_local(name, lat, lon, size_km, logf, spawn_xy))
         if ok:
-            _export_map(name, logf)                         # make it trainable
-        if ok:                                              # push the new world to the box
-            ip = _droplet_ip()
-            if ip:
-                ssh = f"ssh -i {KEY_FILE} -o StrictHostKeyChecking=accept-new"
-                subprocess.run(["rsync", "-az", "-e", ssh, str(ROOT / "assets" / name),
-                                f"root@{ip}:{REMOTE_DIR}/assets/"], timeout=900)
-                subprocess.run(["rsync", "-az", "-e", ssh, str(ROOT / f"{name}0.json"),
-                                f"root@{ip}:{REMOTE_DIR}/"], timeout=120)
-        ENV_BUILDS[name].update(status="done" if ok else "failed", finished=time.time())
+            _reconcile_launch(name, lat, lon, logf)
+        _env_update(name, status="done" if ok else "failed", finished=time.time())
     except Exception as e:                                  # noqa: BLE001
-        ENV_BUILDS[name].update(status="failed", finished=time.time(), error=str(e))
+        with open(logf, "a") as f:
+            f.write(f"error: {e}\n")
+        _env_update(name, status="failed", finished=time.time(), error=str(e))
+
+
+_resume_box_builds()
 
 
 @app.get("/api/geocode")
@@ -235,15 +510,26 @@ def build_environment(req: EnvBuildReq):
         raise HTTPException(400, "name: lowercase letter then letters/digits/underscore")
     if not (-90 < req.lat < 90 and -180 < req.lon < 180):
         raise HTTPException(400, "bad lat/lon")
-    if not (0.1 <= req.half_km <= 3.0):
-        raise HTTPException(400, "half_km must be 0.1-3.0")
+    if not (0.5 <= req.half_km <= 4.0):
+        raise HTTPException(400, "half_km must be 0.5-4.0 (1-8 km wide)")
     cur = ENV_BUILDS.get(req.name)
     if cur and cur["status"] == "running":
         raise HTTPException(409, "already building")
-    ENV_BUILDS[req.name] = {"status": "running", "started": time.time(), "finished": None}
+    # a scenario file with this name that is NOT a built world (e.g. the repo's site0.json)
+    # would be overwritten by the build's own scenario
+    if (ROOT / f"{req.name}0.json").exists() and not (ASSETS / req.name).is_dir():
+        raise HTTPException(409, f"'{req.name}' is taken by an existing scenario file; pick another name")
+    ENV_BUILDS[req.name] = {"status": "running", "started": time.time(), "finished": None,
+                            "where": "box" if _droplet_ip() else "local"}
+    _save_env_builds()
+    if req.launch is not None:
+        lx, ly = _site_xy(req.launch[0], req.launch[1], req.lat, req.lon)
+        if max(abs(lx), abs(ly)) > req.half_km * 1000 - LAUNCH_R_M:
+            raise HTTPException(400, "launch pin must sit inside the area")
     threading.Thread(target=_run_env_build,
-                     args=(req.name, req.lat, req.lon, req.half_km), daemon=True).start()
-    return {"name": req.name, "status": "running"}
+                     args=(req.name, req.lat, req.lon, 2 * req.half_km, req.launch, req.safe),
+                     daemon=True).start()
+    return {"name": req.name, "status": "running", "where": ENV_BUILDS[req.name]["where"]}
 
 
 def _run_reconstruct(name: str, half_km: float) -> None:
@@ -327,36 +613,48 @@ async def reconstruct_environment(name: str = Form(...), half_km: float = Form(0
     _env_log(name).write_text(f"received {len(imgs)} photos\n")
     ENV_BUILDS[name] = {"status": "running", "started": time.time(), "finished": None,
                         "mode": "photogrammetry"}
+    _save_env_builds()
     threading.Thread(target=_run_reconstruct, args=(name, half_km), daemon=True).start()
     return {"name": name, "status": "running", "photos": len(imgs)}
 
 
+def _world_built(name: str) -> bool:
+    """A world exists when its USD is here or its build manifest is (a box build
+    mirrors the manifest + map back and leaves the USD on the box for Isaac)."""
+    d = ASSETS / name
+    return d.is_dir() and ((d / f"{name}.usd").exists() or (d / f"{name}_build.json").exists())
+
+
 @app.get("/api/environments")
 def environments():
-    """Built worlds (assets/<name>/<name>.usd) plus any in-flight builds."""
+    """Built worlds (assets/<name>/, here or mirrored from the box) plus in-flight builds."""
     out = []
     adir = ROOT / "assets"
     for d in sorted(adir.iterdir()) if adir.is_dir() else []:
-        usd = d / f"{d.name}.usd"
-        if not d.is_dir() or not usd.exists():
+        if not d.is_dir() or not _world_built(d.name):
             continue
+        usd = d / f"{d.name}.usd"
         b = ENV_BUILDS.get(d.name, {})
+        log = _env_log(d.name)
         out.append({
             "name": d.name,
-            "usd": f"assets/{d.name}/{d.name}.usd",
+            "center": _world_center(d.name),                # [lat, lon] or None
+            "half_m": _world_half_m(d.name),
+            "usd": f"assets/{d.name}/{d.name}.usd",         # valid on the box even if not mirrored
             "scenario": f"{d.name}0.json" if (ROOT / f"{d.name}0.json").exists() else None,
             "map": f"assets/{d.name}/{d.name}_map.npz" if (d / f"{d.name}_map.npz").exists() else None,
-            "mb": round(usd.stat().st_size / 1e6, 1),
+            "mb": round(usd.stat().st_size / 1e6, 1) if usd.exists() else None,
             "build_status": b.get("status", "done"),
+            "log": log.read_text()[-600:] if b and log.exists() else None,
             "demo": _demo_media(d.name),
         })
     seen = {o["name"] for o in out}
     for name, b in ENV_BUILDS.items():                      # builds not yet on disk
         if name not in seen:
             log = _env_log(name)
-            tail = log.read_text()[-400:] if log.exists() else ""
+            tail = log.read_text()[-600:] if log.exists() else ""
             out.append({"name": name, "usd": None, "scenario": None, "map": None,
-                        "build_status": b["status"], "log": tail})
+                        "build_status": b["status"], "where": b.get("where"), "log": tail})
     return out
 
 
@@ -651,6 +949,25 @@ def _ssh(cmd: str, timeout: int = 25):
     return r.returncode, r.stdout, r.stderr
 
 
+def _ssh_script(script: str, remote_path: str, timeout: int = 30):
+    """Write `script` to remote_path over stdin and start it detached (nohup); returns
+    (rc, stdout, stderr). Avoids quoting a whole command line through ssh + bash -c."""
+    if not os.path.exists(KEY_FILE):
+        raise HTTPException(503, f"ssh key not found: {KEY_FILE}")
+    ip = _droplet_ip()
+    if not ip:
+        raise HTTPException(503, "gpu box is offline")
+    r = subprocess.run(
+        ["ssh", "-i", KEY_FILE, "-o", "BatchMode=yes", "-o", "ConnectTimeout=8",
+         "-o", "StrictHostKeyChecking=accept-new", f"root@{ip}",
+         # only the job goes to the background; `cat` must keep ssh's stdin
+         f"cat > {remote_path} && chmod +x {remote_path} && "
+         f"{{ nohup {remote_path} >/dev/null 2>&1 </dev/null & }} && echo launched"],
+        input=script, capture_output=True, text=True, timeout=timeout,
+    )
+    return r.returncode, r.stdout, r.stderr
+
+
 def _load_jobs():
     try:
         return json.loads(JOBS_FILE.read_text())
@@ -819,6 +1136,17 @@ class ActiveReq(BaseModel):
     name: str
 
 
+def _world_center(world: str):
+    """[lat, lon] of a built world, from the DEM bbox the builder wrote
+    (dem_meta.json bbox = [S, W, N, E] around the requested centre)."""
+    mj = ASSETS / world / "dem_meta.json"
+    try:
+        s, w, n, e = json.loads(mj.read_text())["bbox"]
+        return [round((s + n) / 2, 6), round((w + e) / 2, 6)]
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+
+
 def _world_half_m(world: str):
     """Exact site half-extent (m). The world builder stamps it into the USD's
     customLayerData; the map needs it to scale the ground and place live drones."""
@@ -861,9 +1189,9 @@ def _site_entry(world: str) -> dict:
     half = _world_half_m(world)
     return {
         "name": world, "world": world, "half_m": half,
-        "ground": f"/site/{world}/ground" if (d / "ground.png").exists() else None,
+        "ground": f"/site/{world}/ground" if ((d / "ground.png").exists() or (d / "ground.jpg").exists()) else None,
         "scenario": f"{world}0.json" if (ROOT / f"{world}0.json").exists() else None,
-        "usd": f"assets/{world}/{world}.usd" if (d / f"{world}.usd").exists() else None,
+        "usd": f"assets/{world}/{world}.usd" if _world_built(world) else None,
         "map": f"assets/{world}/{world}_map.npz" if (d / f"{world}_map.npz").exists() else None,
     }
 
@@ -878,9 +1206,9 @@ def get_active():
             name = json.loads(ACTIVE_FILE.read_text()).get("name")
         except (OSError, json.JSONDecodeError):
             pass
-    if not name or not (ASSETS / name / f"{name}.usd").exists():
+    if not name or not _world_built(name):
         cands = [d.name for d in sorted(ASSETS.iterdir())
-                 if d.is_dir() and (d / f"{d.name}.usd").exists()] if ASSETS.is_dir() else []
+                 if d.is_dir() and _world_built(d.name)] if ASSETS.is_dir() else []
         name = cands[0] if cands else None
     return _site_entry(name) if name else None
 
@@ -903,7 +1231,7 @@ def site():
         except (OSError, json.JSONDecodeError):
             continue
         world = mj.parent.name
-        if (mj.parent / "ground.png").exists():
+        if (mj.parent / "ground.png").exists() or (mj.parent / "ground.jpg").exists():
             out.append({"world": world, "half_m": meta.get("half_m"),
                         "ground": f"/site/{world}/ground"})
     return out
@@ -917,15 +1245,56 @@ def zones(world: str):
     root is the fallback default (vesper.worlds.zones.find_zones)."""
     if not RUN_ID.match(world):
         raise HTTPException(400, "bad world")
+    center = _world_center(world)
     for cand in (ASSETS / world / "zones.json", ROOT / f"{world}_zones.json"):
         if cand.is_file():
             try:
                 d = json.loads(cand.read_text())
             except (OSError, json.JSONDecodeError):
                 raise HTTPException(500, f"{cand.name} is not valid JSON")
-            return {"world": world, "launch": d.get("launch"), "safe": list(d.get("safe") or []),
-                    "source": cand.name}
-    return {"world": world, "launch": None, "safe": [], "source": None}
+            out = {"world": world, "launch": d.get("launch"), "safe": list(d.get("safe") or []),
+                   "source": cand.name, "launch_point": d.get("launch_point"),
+                   "safe_geo": d.get("safe_geo"), "center": d.get("center") or center}
+            # older files (site metres only): derive the geo versions from the world centre
+            if center and out["launch_point"] is None and out["launch"]:
+                xs = [p[0] for p in out["launch"]]; ys = [p[1] for p in out["launch"]]
+                cx, cy = sum(xs) / len(xs), sum(ys) / len(ys)
+                la, lo = _geo(cx, cy, *center)
+                out["launch_point"] = {"x": round(cx, 2), "y": round(cy, 2), "r_m": LAUNCH_R_M, "lat": la, "lon": lo}
+            if center and out["safe_geo"] is None:
+                out["safe_geo"] = [[_geo(x, y, *center) for x, y in poly] for poly in out["safe"]]
+            return out
+    return {"world": world, "launch": None, "safe": [], "source": None,
+            "launch_point": None, "safe_geo": [], "center": center}
+
+
+class ZonesReq(BaseModel):
+    launch: list[float] | None = None            # [lat, lon]
+    safe: list[list[list[float]]] = []           # [[[lat, lon], ...], ...]
+
+
+@app.put("/api/zones/{world}")
+def put_zones(world: str, req: ZonesReq):
+    """Set/replace a built world's launch pad + friendly zones. The pad must be
+    inside the world and at least LAUNCH_TREE_CLEAR_M from every trunk in its map."""
+    if not RUN_ID.match(world) or not _world_built(world):
+        raise HTTPException(404, "no such world")
+    center = _world_center(world)
+    half = _world_half_m(world)
+    if not center:
+        raise HTTPException(409, "world has no centre metadata (dem_meta.json)")
+    if req.launch is not None:
+        x, y = _site_xy(req.launch[0], req.launch[1], *center)
+        if half and max(abs(x), abs(y)) > half - LAUNCH_R_M:
+            raise HTTPException(400, "launch pin must sit inside the world")
+        clear = _tree_clearance(world, x, y)
+        if clear is not None and clear < LAUNCH_TREE_CLEAR_M:
+            raise HTTPException(400, f"launch pin is {clear:.1f} m from a tree; needs > {LAUNCH_TREE_CLEAR_M:.0f} m")
+    for poly in req.safe:
+        if len(poly) < 3:
+            raise HTTPException(400, "a friendly zone needs at least 3 points")
+    _write_zones(world, _zones_doc(center[0], center[1], req.launch, req.safe))
+    return zones(world)
 
 
 @app.get("/demo/{world}/{name}")
@@ -1017,7 +1386,7 @@ def world3d(world: str):
         trees = [trees[i] for i in sorted(idx.tolist())]
 
     out = {"world": world, "half_m": half,
-           "ground": f"/site/{world}/ground" if (d / "ground.png").exists() else None,
+           "ground": f"/site/{world}/ground" if ((d / "ground.png").exists() or (d / "ground.jpg").exists()) else None,
            "terrain": {"n": int(zg.shape[0]), "step": cell * stride,
                        "z": [round(float(v), 1) for v in zg.reshape(-1)]},
            "buildings": buildings, "trees": trees}
@@ -1047,6 +1416,9 @@ def site_ground(world: str):
         raise HTTPException(400, "bad world")
     src = ASSETS / world / "ground.png"
     if not src.is_file():
+        pre = ASSETS / world / "ground.jpg"                 # mirrored preview of a box build
+        if pre.is_file():
+            return FileResponse(pre, media_type="image/jpeg")
         raise HTTPException(404, "no ground texture")
     cache = Path(tempfile.gettempdir()) / f"vesper_{world}_ground.jpg"
     if not cache.exists() or cache.stat().st_mtime < src.stat().st_mtime:

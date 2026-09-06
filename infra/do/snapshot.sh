@@ -6,6 +6,17 @@ source "$(dirname "$0")/env.sh"
 ID=$(droplet_json | jq -r .id)
 [ -n "$ID" ] && [ "$ID" != null ] || { echo "no $DROPLET_NAME droplet"; exit 0; }
 
+# scratch/ holds the synthetic datasets, the RF-DETR venv and its checkpoints:
+# tens of GB of regenerable working files. Snapshot storage is billed per GB per
+# month, so they are cleared before the disk is imaged. Pull anything worth
+# keeping first -- scripts/detect_pull.sh does the small artefacts.
+IP=$(droplet_ip)
+if [ -n "$IP" ]; then
+  echo "clearing scratch/ so it stays out of the snapshot"
+  ssh -i "$KEY_FILE" -o StrictHostKeyChecking=accept-new root@"$IP" \
+    'du -sh vesper/scratch 2>/dev/null; rm -rf vesper/scratch' || true
+fi
+
 api POST "/droplets/$ID/actions" '{"type":"power_off"}' >/dev/null
 echo -n "powering off"
 until [ "$(api GET /droplets/$ID | jq -r .droplet.status)" = off ]; do echo -n .; sleep 5; done; echo

@@ -10,3 +10,15 @@ assets/
 .vesper_jobs.json
 .vesper_session.json
 .vesper_session.log
+
+# PBR scan sets are fetched by scripts/fetch_pbr.py (CC0 ambientCG), not committed
+textures/pbr/
+.ms_dataset_links.csv
+
+# GPU-box working space: datasets, checkpoints, venvs. Never snapshotted.
+scratch/
+
+# web server runtime state / logs
+.vesper_envbuilds.json
+.vesper_api.log
+.envbuild_*.log

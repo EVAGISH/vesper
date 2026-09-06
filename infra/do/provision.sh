@@ -7,7 +7,7 @@ IP=$(droplet_ip)
 [ -n "$IP" ] || { echo "no droplet; run launch.sh"; exit 1; }
 
 rsync -az -e "ssh -i $KEY_FILE -o StrictHostKeyChecking=accept-new" \
-  --exclude .git --exclude runs --exclude assets --exclude .env \
+  --exclude .git --exclude runs --exclude assets --exclude .env --exclude node_modules --exclude .next --exclude scratch --exclude .venv \
   "$REPO_ROOT/" root@"$IP":vesper/
 
 ssh -i "$KEY_FILE" root@"$IP" "
@@ -21,5 +21,9 @@ ssh -i "$KEY_FILE" root@"$IP" "
   echo '$NGC_API_KEY' | docker login nvcr.io -u '\$oauthtoken' --password-stdin
   cd vesper/docker && docker compose build
 "
+# environments are built on the box (web/server/app.py -> scripts/build_geo_world.py)
+bash "$(dirname "$0")/geo_env.sh"
+echo "syncing tree assets + textures (the world build needs them)"
+rsync -az -e "ssh -i $KEY_FILE" "$REPO_ROOT/assets/vegetation" root@"$IP":vesper/assets/
 echo "provisioned. Next: infra/do/ssh.sh then"
 echo "  cd vesper/docker && docker compose run --rm sim /isaac-sim/python.sh scripts/smoke_render.py"

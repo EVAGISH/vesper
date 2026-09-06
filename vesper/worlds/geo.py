@@ -14,8 +14,8 @@ Output: <site>.usd with
   /World/trees      instanceable references: woodland polygons, tree rows, scrub, gardens
   /World/sun, /World/sky
   static triangle-mesh colliders on terrain and buildings; per tree species a
-  convex-decomposition collider on every mesh plus a trunk capsule (authored
-  once, shared by every instance) -- leaves are solid, and shaped like leaves.
+  trunk cylinder plus a crown cone (authored
+  once, shared by every instance) -- crowns are solid, a drone cannot fly through one.
 Local frame: ENU meters, origin at (lat0, lon0), z = DEM height minus DEM height at the origin.
 
 Repeatability: the same cached inputs, seed and variant give the same USD.
@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import time
 import math
 import os
 from dataclasses import dataclass, field
@@ -38,9 +39,9 @@ import numpy as np
 from PIL import Image, ImageDraw
 from pxr import Gf, Sdf, Usd, UsdGeom, UsdLux, UsdPhysics, UsdShade, Vt
 
-from vesper.worlds.rasters import TRUNK_R, TRUNK_TOP
+from vesper.worlds.rasters import DEFAULT_CROWN, SPECIES_CROWN, TRUNK_R, TRUNK_TOP
 
-TREE_MAX_HULLS = 24     # convex chunks per species mesh: enough for the crown outline, cheap to cook
+TREE_CROWN_BASE = 0.20  # crown cone starts this fraction up the tree (trunk cylinder reaches TRUNK_TOP)
 from shapely.geometry import LineString, Point, Polygon
 from shapely.strtree import STRtree
 
@@ -344,7 +345,7 @@ def _preview_material(stage, path: str, texture: Path | None, rel_dir: Path, rgb
         st.CreateInput("varname", Sdf.ValueTypeNames.Token).Set("st")
         tex = UsdShade.Shader.Define(stage, path + "/tex")
         tex.CreateIdAttr("UsdUVTexture")
-        tex.CreateInput("file", Sdf.ValueTypeNames.Asset).Set(str(Path(texture).relative_to(rel_dir)))
+        tex.CreateInput("file", Sdf.ValueTypeNames.Asset).Set(os.path.relpath(texture, rel_dir))
         tex.CreateInput("wrapS", Sdf.ValueTypeNames.Token).Set("repeat")
         tex.CreateInput("wrapT", Sdf.ValueTypeNames.Token).Set("repeat")
         if uv_scale != 1.0:
@@ -377,6 +378,42 @@ def _mesh(stage, path, pts, counts, indices, st=None, collide=True):
         UsdPhysics.CollisionAPI.Apply(m.GetPrim())
         UsdPhysics.MeshCollisionAPI.Apply(m.GetPrim()).CreateApproximationAttr().Set(UsdPhysics.Tokens.none)
     return m
+
+
+def _terrain_colliders(stage, terrain: "Terrain", tile_cells: int = 128) -> int:
+    """Ground collision as a grid of small mesh tiles under /World/terrain_col
+    (invisible guides; PhysX cooks them, renderers skip them).
+
+    One 1-2M-vertex triangle mesh cooks as a single PhysX job -- minutes on every
+    cold load of a big site. Split into ~128x128-cell tiles the same geometry is
+    tens of jobs that omni.physx cooks concurrently, and each small mesh's BVH
+    builds faster than one huge one. Tiles share their edge vertices so there are
+    no gaps. The visual /World/terrain mesh is untouched (export_world_map,
+    fly_mission and the map views keep reading it); only the CollisionAPI moved.
+    """
+    n = terrain.n
+    xs = terrain.xs
+    Z = terrain.Z
+    UsdGeom.Scope.Define(stage, "/World/terrain_col")
+    count = 0
+    for r0 in range(0, n - 1, tile_cells):
+        r1 = min(n - 1, r0 + tile_cells)                 # inclusive last vertex row
+        for c0 in range(0, n - 1, tile_cells):
+            c1 = min(n - 1, c0 + tile_cells)
+            X, Y = np.meshgrid(xs[c0:c1 + 1], xs[r0:r1 + 1])
+            pts = np.column_stack([X.ravel(), Y.ravel(), Z[r0:r1 + 1, c0:c1 + 1].ravel()])
+            w = c1 - c0 + 1
+            i = np.arange(r1 - r0); j = np.arange(c1 - c0)
+            J, I = np.meshgrid(j, i)
+            v00 = (I * w + J).ravel(); v01 = v00 + 1; v10 = v00 + w; v11 = v10 + 1
+            faces = np.column_stack([v00, v01, v11, v10]).ravel()
+            m = _mesh(stage, f"/World/terrain_col/t{r0 // tile_cells}_{c0 // tile_cells}",
+                      pts, np.full(len(faces) // 4, 4), faces, collide=True)
+            img = UsdGeom.Imageable(m.GetPrim())
+            img.CreatePurposeAttr(UsdGeom.Tokens.guide)   # renderers skip guides; PhysX does not
+            img.CreateVisibilityAttr(UsdGeom.Tokens.invisible)
+            count += 1
+    return count
 
 
 # ---------------------------------------------------------------- buildings
@@ -442,13 +479,13 @@ def build_buildings(stage, terrain: Terrain, osm, rng, facades, roofs, rel_dir):
     for i, p in enumerate(facades):
         if not wall_faces[i]:
             continue
-        sub = UsdGeom.Subset.CreateGeomSubset(mesh, f"walls_{i}", UsdGeom.Tokens.face, Vt.IntArray(wall_faces[i]))
+        sub = UsdGeom.Subset.CreateGeomSubset(mesh, f"walls_{i}", UsdGeom.Tokens.face, Vt.IntArray(wall_faces[i]), UsdShade.Tokens.materialBind)
         mat = _preview_material(stage, f"/World/Looks/facade_{i}", p, rel_dir, roughness=0.85)
         UsdShade.MaterialBindingAPI.Apply(sub.GetPrim()).Bind(mat)
     for i, p in enumerate(roofs):
         if not roof_faces[i]:
             continue
-        sub = UsdGeom.Subset.CreateGeomSubset(mesh, f"roofs_{i}", UsdGeom.Tokens.face, Vt.IntArray(roof_faces[i]))
+        sub = UsdGeom.Subset.CreateGeomSubset(mesh, f"roofs_{i}", UsdGeom.Tokens.face, Vt.IntArray(roof_faces[i]), UsdShade.Tokens.materialBind)
         mat = _preview_material(stage, f"/World/Looks/roof_{i}", p, rel_dir, roughness=0.8)
         UsdShade.MaterialBindingAPI.Apply(sub.GetPrim()).Bind(mat)
     UsdGeom.Subset.SetFamilyType(mesh, "materialBind", UsdGeom.Tokens.partition)
@@ -547,13 +584,13 @@ def _prepare_species_usd(src_usd: Path, out_dir: Path, name: str, target_h: floa
     every copy (an instanceable prim cannot carry overs on its own descendants,
     which is why this needs its own layer).
 
-    With `colliders` the layer also carries the tree's physics: a capsule for
-    the trunk and a sphere for the crown, invisible, static. Every instance of
-    the species shares them, so 16k trees cost six colliders' worth of authoring
-    and PhysX gets primitives rather than 800k-point leaf meshes. The same
-    fractions (vesper.worlds.rasters TRUNK_R / TRUNK_TOP / CROWN_Z / crown
-    ratio) build the map's tree_z layer, so what the task calls a crash is what
-    PhysX actually stops.
+    With `colliders` the layer also carries the tree's physics: a cylinder for
+    the trunk and a cone for the crown, invisible, static. Every instance of
+    the species shares them, so 57k trees cost six colliders' worth of authoring
+    and PhysX gets analytic primitives rather than 800k-point leaf meshes. The same
+    fractions (vesper.worlds.rasters TRUNK_R / TRUNK_TOP / SPECIES_CROWN)
+    build the map's tree_z layer, so what the task calls a crash is what PhysX
+    actually stops.
 
     It deliberately does NOT author a scale op. A referencing prim that needs its
     own translate/rotate has to author an xformOpOrder, and that order replaces
@@ -623,46 +660,38 @@ def _tree_native_bounds(usd_path: Path):
 
 
 def _author_tree_colliders(stage, root, src_usd: Path, name: str):
-    """Colliders shaped by the tree itself, shared by every instance.
+    """Two primitive colliders per species, shared by every instance: a cylinder
+    for the trunk and a cone for the crown.
 
-    Leaves are solid: a drone cannot fly through a crown. But the depth camera
-    renders the real foliage with its dents and gaps, so the physics has to
-    follow that outline or the policy learns an invisible ball instead of the
-    tree. Every mesh under the species root gets a convex-decomposition
-    collider (PhysX cooks a few dozen convex chunks per species, once, and
-    caches them). The trunk additionally gets an exact capsule so the map's
-    hard-tree layer and the trunk count have a primitive to agree with.
+    Primitives, not the leaf meshes: PhysX takes a cylinder/cone as an analytic
+    shape, so nothing is cooked at load (the previous convex decomposition of
+    ~180 meshes per species cost minutes of cooking on every cold start) and
+    the ~57k instances share six pairs of shapes. Sizes come from the asset's
+    own bounds and the fractions in vesper.worlds.rasters (TRUNK_R / TRUNK_TOP
+    / SPECIES_CROWN), so the map's tree layer and the physics agree. Both are
+    authored in the asset's native units; the instance xform scales them with
+    the tree. Purpose=guide keeps them out of every render.
     """
     zmin, zmax = _tree_native_bounds(src_usd)
     H = max(zmax - zmin, 1e-3)
-    for prim in Usd.PrimRange(root.GetPrim()):
-        if not prim.IsA(UsdGeom.Mesh):
-            continue
-        # Some NVIDIA assets use empty Mesh prims as transform/group nodes.
-        # Marking those as collision meshes makes PhysX emit an error for every
-        # instance and produces no shape, so only cook meshes with geometry.
-        if not UsdGeom.Mesh(prim).GetPointsAttr().Get():
-            continue
-        UsdPhysics.CollisionAPI.Apply(prim)
-        mca = UsdPhysics.MeshCollisionAPI.Apply(prim)
-        mca.CreateApproximationAttr().Set(UsdPhysics.Tokens.convexDecomposition)
-        # PhysX decomposition knobs, authored as the schema attributes so the
-        # cooker sees them without the PhysX python module on the build machine
-        prim.CreateAttribute("physxConvexDecompositionCollision:maxConvexHulls",
-                             Sdf.ValueTypeNames.Int).Set(TREE_MAX_HULLS)
-        prim.CreateAttribute("physxConvexDecompositionCollision:hullVertexLimit",
-                             Sdf.ValueTypeNames.Int).Set(32)
-        prim.CreateAttribute("physxConvexDecompositionCollision:voxelResolution",
-                             Sdf.ValueTypeNames.Int).Set(200000)
-    r_t = TRUNK_R * H
-    trunk_len = max(TRUNK_TOP * H - 2 * r_t, r_t)
-    cap = UsdGeom.Capsule.Define(stage, root.GetPath().AppendChild("trunk_col"))
-    cap.CreateAxisAttr("Z"); cap.CreateRadiusAttr(r_t); cap.CreateHeightAttr(trunk_len)
-    UsdGeom.Xformable(cap).AddTranslateOp().Set(Gf.Vec3d(0.0, 0.0, zmin + r_t + trunk_len / 2))
-    UsdPhysics.CollisionAPI.Apply(cap.GetPrim())
-    img = UsdGeom.Imageable(cap.GetPrim())
-    img.CreatePurposeAttr(UsdGeom.Tokens.guide)          # renderers skip guides; PhysX does not
-    img.CreateVisibilityAttr(UsdGeom.Tokens.invisible)
+    crown_r = SPECIES_CROWN.get(name, DEFAULT_CROWN) * H
+    trunk_h = TRUNK_TOP * H
+    cyl = UsdGeom.Cylinder.Define(stage, root.GetPath().AppendChild("trunk_col"))
+    cyl.CreateAxisAttr("Z"); cyl.CreateRadiusAttr(TRUNK_R * H); cyl.CreateHeightAttr(trunk_h)
+    UsdGeom.Xformable(cyl).AddTranslateOp().Set(Gf.Vec3d(0.0, 0.0, zmin + trunk_h / 2))
+    crown_z0 = zmin + TREE_CROWN_BASE * H
+    crown_h = max(zmax - crown_z0, 1e-3)
+    cone = UsdGeom.Cone.Define(stage, root.GetPath().AppendChild("crown_col"))
+    cone.CreateAxisAttr("Z"); cone.CreateRadiusAttr(crown_r); cone.CreateHeightAttr(crown_h)
+    UsdGeom.Xformable(cone).AddTranslateOp().Set(Gf.Vec3d(0.0, 0.0, crown_z0 + crown_h / 2))
+    for gp in (cyl, cone):
+        r = crown_r if gp is cone else TRUNK_R * H
+        h = crown_h if gp is cone else trunk_h
+        gp.CreateExtentAttr(Vt.Vec3fArray([Gf.Vec3f(-r, -r, -h / 2), Gf.Vec3f(r, r, h / 2)]))
+        UsdPhysics.CollisionAPI.Apply(gp.GetPrim())
+        img = UsdGeom.Imageable(gp.GetPrim())
+        img.CreatePurposeAttr(UsdGeom.Tokens.guide)      # renderers skip guides; PhysX does not
+        img.CreateVisibilityAttr(UsdGeom.Tokens.invisible)
 
 
 def _has_nested_instancer(usd_path: Path) -> bool:
@@ -815,18 +844,31 @@ def build_trees(stage, site: GeoSite, terrain: Terrain, osm, rng, veg_dir: Path,
     prepared = {name: _prepare_species_usd(veg_dir / "Trees" / f"{name}.usd", rel_dir, name, target_h,
                                            colliders=site.tree_colliders)
                 for name, target_h, _, _ in SPECIES}          # name -> (usd, scale_to_metres)
-    UsdGeom.Scope.Define(stage, "/World/trees")
-    for i in range(n):
-        name = SPECIES[int(proto_idx[i])][0]
-        species_usd, species_scale = prepared[name]
-        xf = UsdGeom.Xform.Define(stage, f"/World/trees/t{i:05d}")
-        xf.AddTranslateOp().Set(Gf.Vec3d(float(P[i, 0]), float(P[i, 1]), float(z[i])))
-        xf.AddRotateZOp().Set(float(np.degrees(yaw[i])))
-        s = float(scale[i]) * species_scale        # per-tree variation x cm->m and target height
-        xf.AddScaleOp().Set(Gf.Vec3f(s, s, s))
-        prim = xf.GetPrim()
-        prim.GetReferences().AddReference(os.path.relpath(species_usd, rel_dir))
-        prim.SetInstanceable(True)
+    # Authored straight into the root layer as Sdf specs, inside one change block.
+    # The Usd API (Define + AddReference per tree) recomposes the stage on every
+    # call, which made this loop ~5 ms per tree -- 3 minutes for a 2 km town. The
+    # specs below are exactly what UsdGeom.Xform.Define + AddTranslateOp /
+    # AddRotateZOp / AddScaleOp + AddReference + SetInstanceable would write.
+    layer = stage.GetRootLayer()
+    world_spec = layer.GetPrimAtPath("/World")
+    refs = {name: Sdf.Reference(os.path.relpath(prepared[name][0], rel_dir)) for name in prepared}
+    order = Vt.TokenArray(["xformOp:translate", "xformOp:rotateZ", "xformOp:scale"])
+    with Sdf.ChangeBlock():
+        scope = Sdf.PrimSpec(world_spec, "trees", Sdf.SpecifierDef, "Scope")
+        for i in range(n):
+            name = SPECIES[int(proto_idx[i])][0]
+            s = float(scale[i]) * prepared[name][1]     # per-tree variation x cm->m and target height
+            ps = Sdf.PrimSpec(scope, f"t{i:05d}", Sdf.SpecifierDef, "Xform")
+            ps.instanceable = True
+            ps.referenceList.Prepend(refs[name])
+            a = Sdf.AttributeSpec(ps, "xformOp:translate", Sdf.ValueTypeNames.Double3)
+            a.default = Gf.Vec3d(float(P[i, 0]), float(P[i, 1]), float(z[i]))
+            a = Sdf.AttributeSpec(ps, "xformOp:rotateZ", Sdf.ValueTypeNames.Float)
+            a.default = float(np.degrees(yaw[i]))
+            a = Sdf.AttributeSpec(ps, "xformOp:scale", Sdf.ValueTypeNames.Float3)
+            a.default = Gf.Vec3f(s, s, s)
+            a = Sdf.AttributeSpec(ps, "xformOpOrder", Sdf.ValueTypeNames.TokenArray)
+            a.default = order
 
     heights = np.array([SPECIES[i][1] for i in proto_idx]) * scale
     return n, P, heights
@@ -977,11 +1019,17 @@ def build_site(site: GeoSite, data_dir: Path, veg_dir: Path, out_usd: Path,
     rng = np.random.default_rng(site.seed)                     # textures, spawn
     vrng = np.random.default_rng([site.seed, site.variant])    # the scatter: heights, trees
     data_dir, veg_dir, out_usd = Path(data_dir), Path(veg_dir).resolve(), Path(out_usd).resolve()
+    _t = [time.time()]
+
+    def lap(label):                                            # stage timing -> build log
+        now = time.time(); print(f"  [build] {label}: {now - _t[0]:.1f}s", flush=True); _t[0] = now
+
     out_dir = out_usd.parent; out_dir.mkdir(parents=True, exist_ok=True)
     dem = np.load(data_dir / "dem.npy"); meta = json.loads((data_dir / "dem_meta.json").read_text())
     osm = parse_osm(site, json.loads((data_dir / "osm.json").read_text()))
     terrain = Terrain(site, dem, meta)
     rep = BuildReport()
+    lap("load inputs + parse OSM")
 
     stage = Usd.Stage.CreateNew(str(out_usd))
     UsdGeom.SetStageUpAxis(stage, UsdGeom.Tokens.z); UsdGeom.SetStageMetersPerUnit(stage, 1.0)
@@ -995,18 +1043,24 @@ def build_site(site: GeoSite, data_dir: Path, veg_dir: Path, out_usd: Path,
     # one, when present, is draped as the ground albedo instead of painted cover.
     ortho_src = next((data_dir / f for f in ("naip.png", "imagery.png") if (data_dir / f).exists()), None)
     bake_ground_texture(site, osm, tex, rng, ortho=ortho_src)
-    tmesh = _mesh(stage, "/World/terrain", pts, np.full(len(faces) // 4, 4), faces, st=st, collide=True)
+    lap("ground texture")
+    tmesh = _mesh(stage, "/World/terrain", pts, np.full(len(faces) // 4, 4), faces, st=st, collide=False)
     mat = _preview_material(stage, "/World/Looks/ground", tex, out_dir, roughness=0.95)
     UsdShade.MaterialBindingAPI.Apply(tmesh.GetPrim()).Bind(mat)
     rep.terrain_verts = len(pts); rep.z_range = [round(float(pts[:, 2].min()), 1), round(float(pts[:, 2].max()), 1)]
+    n_tiles = _terrain_colliders(stage, terrain)
+    lap(f"terrain mesh ({len(pts)} verts, {n_tiles} collision tiles)")
 
     if surface_model:
         rep.buildings = 0                       # the DSM already carries the buildings
         building_h = None
     else:
-        facades, roofs = bake_facade_textures(out_dir, rng)
-        rep.buildings, building_h = build_buildings(stage, terrain, osm, vrng, facades, roofs, out_dir)
+        from vesper.worlds.buildings import build_buildings as _build_buildings, building_materials
+        mats = building_materials(out_dir, rng)
+        rep.buildings, building_h = _build_buildings(stage, terrain, osm, vrng, mats, out_dir)
+    lap(f"buildings ({rep.buildings})")
     rep.water = build_water(stage, terrain, osm, out_dir)
+    lap("water")
 
     if spawn_override is not None:
         spawn = _snap_to_open_ground(tuple(spawn_override), osm)
@@ -1014,10 +1068,13 @@ def build_site(site: GeoSite, data_dir: Path, veg_dir: Path, out_usd: Path,
         spawn = choose_spawn(site, terrain, osm, rng)
     ortho = next((data_dir / f for f in ("naip.png", "imagery.png") if (data_dir / f).exists()), None)
     # a DSM already has tree crowns baked into the surface; don't stamp models on top
+    lap("spawn")
     canopy_xy = (canopy_from_imagery(ortho, site, vrng)
                  if (ortho and site.imagery_canopy and not surface_model) else None)
+    lap("canopy from imagery")
     rep.trees, tree_xy, tree_h = build_trees(stage, site, terrain, osm, vrng, veg_dir, out_dir, spawn,
                                              canopy_xy=canopy_xy)
+    lap(f"trees ({rep.trees})")
 
     sun = UsdLux.DistantLight.Define(stage, "/World/sun")
     sun.CreateIntensityAttr(1700.0); sun.CreateAngleAttr(0.53); sun.CreateColorAttr(Gf.Vec3f(1.0, 0.97, 0.92))
@@ -1028,8 +1085,10 @@ def build_site(site: GeoSite, data_dir: Path, veg_dir: Path, out_usd: Path,
     wps, tk, gz = plan_loop(site, terrain, osm, spawn, leg_m=site.leg_m, tree_xy=tree_xy, tree_h=tree_h,
                             building_h=building_h)
     rep.spawn_xy = list(spawn); rep.spawn_ground_z = round(gz, 3); rep.waypoints = wps; rep.takeoff_alt_m = tk
+    lap("mission plan")
     stage.GetRootLayer().customLayerData = {"vesper_site": json.dumps({"lat0": site.lat0, "lon0": site.lon0, "half_m": site.half_m})}
     stage.GetRootLayer().Save()
+    lap("write USD")
     rep.usd = str(out_usd)
     manifest = out_usd.with_name(out_usd.stem + "_build.json")
     manifest.write_text(json.dumps(build_manifest(site, data_dir, rep), indent=1))

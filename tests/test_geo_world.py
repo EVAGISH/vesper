@@ -46,9 +46,12 @@ def _veg_dir(tmp_path: Path) -> Path:
     real = Path(__file__).resolve().parents[1] / "assets" / "vegetation"
     if (real / "Trees" / "Yellow_Pine.usd").exists():
         return real
-    veg = tmp_path / "vegetation"; (veg / "Trees").mkdir(parents=True)
+    veg = tmp_path / "vegetation"; (veg / "Trees").mkdir(parents=True, exist_ok=True)
     for name, _, _, _ in geo.SPECIES:
-        st = Usd.Stage.CreateNew(str(veg / "Trees" / f"{name}.usd"))
+        usd = veg / "Trees" / f"{name}.usd"
+        if usd.exists():                       # _veg_dir is called more than once per tmp_path
+            continue
+        st = Usd.Stage.CreateNew(str(usd))
         UsdGeom.SetStageMetersPerUnit(st, 0.01); UsdGeom.SetStageUpAxis(st, UsdGeom.Tokens.z)
         root = UsdGeom.Xform.Define(st, "/Root"); st.SetDefaultPrim(root.GetPrim())
         m = UsdGeom.Mesh.Define(st, "/Root/trunk")
@@ -65,7 +68,18 @@ def test_build_site(tmp_path):
     assert rep.terrain_verts == 51 * 51 and rep.buildings == 2 and rep.water == 1 and rep.trees > 100
     st = Usd.Stage.Open(rep.usd)
     terr = st.GetPrimAtPath("/World/terrain"); bld = st.GetPrimAtPath("/World/buildings")
-    assert terr.HasAPI(UsdPhysics.CollisionAPI) and bld.HasAPI(UsdPhysics.CollisionAPI)
+    assert bld.HasAPI(UsdPhysics.CollisionAPI)
+    # the visual ground mesh carries no collider; collision is a grid of invisible
+    # tiles under /World/terrain_col that together cover every ground quad
+    assert not terr.HasAPI(UsdPhysics.CollisionAPI)
+    tiles = [pr for pr in Usd.PrimRange(st.GetPrimAtPath("/World/terrain_col")) if pr.IsA(UsdGeom.Mesh)]
+    assert tiles, "no terrain collision tiles"
+    quads = 0
+    for pr in tiles:
+        assert pr.HasAPI(UsdPhysics.CollisionAPI)
+        assert UsdGeom.Imageable(pr).GetPurposeAttr().Get() == UsdGeom.Tokens.guide
+        quads += len(UsdGeom.Mesh(pr).GetFaceVertexCountsAttr().Get())
+    assert quads == 50 * 50, quads                       # 51x51 grid -> 50x50 quads, no gaps, no overlap
     # Trees are native USD instances, never a PointInstancer: Isaac additionally draws
     # PointInstancer prototype prims as ordinary geometry, ignoring the prototype's own
     # transform AND its ancestors', which put a ~1.7 km tree at the world origin.
@@ -102,26 +116,25 @@ def test_species_carry_colliders_and_the_map_sees_them(tmp_path):
     rep = build_site(site, data, _veg_dir(tmp_path), data / "site.usd")
     for name, *_ in geo.SPECIES:
         sp = Usd.Stage.Open(str(data / "species" / f"{name}.usd"))
-        trunk = sp.GetPrimAtPath("/Tree/trunk_col")
-        assert trunk and trunk.HasAPI(UsdPhysics.CollisionAPI), f"{name}: trunk capsule missing"
-        assert UsdGeom.Imageable(trunk).GetPurposeAttr().Get() == UsdGeom.Tokens.guide
+        trunk = sp.GetPrimAtPath("/Tree/trunk_col"); crown = sp.GetPrimAtPath("/Tree/crown_col")
+        assert trunk and trunk.IsA(UsdGeom.Cylinder) and trunk.HasAPI(UsdPhysics.CollisionAPI), f"{name}: trunk cylinder missing"
+        assert crown and crown.IsA(UsdGeom.Cone) and crown.HasAPI(UsdPhysics.CollisionAPI), f"{name}: crown cone missing"
+        for c in (trunk, crown):
+            assert UsdGeom.Imageable(c).GetPurposeAttr().Get() == UsdGeom.Tokens.guide
+        # the cone reaches the top of the tree and is wider than the trunk
+        zmin, zmax = geo._tree_native_bounds(_veg_dir(tmp_path) / "Trees" / f"{name}.usd")
+        top = UsdGeom.Cone(crown).GetHeightAttr().Get() / 2 + UsdGeom.Xformable(crown).GetOrderedXformOps()[0].Get()[2]
+        assert abs(top - zmax) < 1e-3 * max(zmax - zmin, 1.0)
+        assert UsdGeom.Cone(crown).GetRadiusAttr().Get() > UsdGeom.Cylinder(trunk).GetRadiusAttr().Get()
+        # the leaf meshes themselves carry no physics: nothing to cook at load
         meshes = [pr for pr in Usd.PrimRange(sp.GetPrimAtPath("/Tree")) if pr.IsA(UsdGeom.Mesh)]
         assert meshes, f"{name}: no meshes under /Tree"
-        for m in meshes:
-            if not UsdGeom.Mesh(m).GetPointsAttr().Get():
-                # A few source assets use empty Mesh prims as grouping
-                # nodes. PhysX rejects collision schemas on these.
-                assert not m.HasAPI(UsdPhysics.CollisionAPI)
-                continue
-            # leaves are solid, and shaped like leaves: a convex decomposition of the mesh itself
-            assert m.HasAPI(UsdPhysics.CollisionAPI) and m.HasAPI(UsdPhysics.MeshCollisionAPI)
-            assert UsdPhysics.MeshCollisionAPI(m).GetApproximationAttr().Get() == UsdPhysics.Tokens.convexDecomposition
-            assert m.GetAttribute("physxConvexDecompositionCollision:maxConvexHulls").Get() == geo.TREE_MAX_HULLS
+        assert not any(m.HasAPI(UsdPhysics.CollisionAPI) for m in meshes)
     # and a visual-only build has none
     site2 = GeoSite(LAT, LON, half_m=250.0, res_m=10.0, tex_px=512, seed=1, tree_colliders=False)
     build_site(site2, data, _veg_dir(tmp_path), data / "site2.usd")
     sp2 = Usd.Stage.Open(str(data / "species" / "Hawthorn.usd"))
-    assert not sp2.GetPrimAtPath("/Tree/trunk_col")
+    assert not sp2.GetPrimAtPath("/Tree/trunk_col") and not sp2.GetPrimAtPath("/Tree/crown_col")
     assert not any(pr.HasAPI(UsdPhysics.CollisionAPI) for pr in Usd.PrimRange(sp2.GetPrimAtPath("/Tree")))
 
 
