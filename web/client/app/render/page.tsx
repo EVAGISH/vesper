@@ -108,8 +108,8 @@ export default function RenderPage() {
       const run = qs.get("run") ?? "";
       const cam = (qs.get("cam") ?? "world") as "world" | "fpv";
       const fps = Number(qs.get("fps") ?? 24);
-      const W = Number(qs.get("w") ?? 1280);
-      const H = Number(qs.get("h") ?? 720);
+      const W = Number(qs.get("w") ?? 1920);
+      const H = Number(qs.get("h") ?? 1080);
       const full = qs.get("full") === "1";
 
       const rep = await fetchFirst<Replay>([
@@ -124,6 +124,8 @@ export default function RenderPage() {
       renderer = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: true });
       renderer.shadowMap.enabled = true;
       renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+      renderer.toneMapping = THREE.ACESFilmicToneMapping;   // same grade as the live view
+      renderer.toneMappingExposure = 1.15;
       renderer.setPixelRatio(1);
       renderer.setSize(W, H);
       el.appendChild(renderer.domElement);

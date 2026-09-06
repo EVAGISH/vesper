@@ -830,10 +830,14 @@ SESSION_FILE = ROOT / ".vesper_session.json"
 SESSION_LOG = ROOT / ".vesper_session.log"
 # demo defaults: the kramatorsk AO with its best converged policy; reach_radius 40
 # registers the policy's close passes as strikes, episode_s 240 gives a full
-# search→detect→neutralize mission before any rollover.
+# search→detect→neutralize mission before any rollover. The policy is the
+# frontier/loitering-munition retrain (search-lm-full): searches without the
+# scan-orbit, expends the striking drone on impact, and pairs with the live
+# session's shared-fleet-coverage so the swarm self-spreads. The prior
+# demo-kram-lean checkpoint was the circler this replaced.
 SESSION_DEFAULTS = {
     "map": "assets/kramatorsk/kramatorsk_map.npz",
-    "policy": "runs/20260905-134502-demo-kram-lean/search.pt",
+    "policy": "runs/20260905-230222-search-lm-full/search.pt",
     "reach_radius": 40.0,
     "episode_s": 240.0,
 }
