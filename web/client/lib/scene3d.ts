@@ -134,7 +134,7 @@ export function buildTerrain(scene: THREE.Scene, d: World3D) {
   if (d.ground) {
     const tex = new THREE.TextureLoader().load(d.ground);
     tex.colorSpace = THREE.SRGBColorSpace;
-    tex.anisotropy = 8;
+    tex.anisotropy = 16;
     mat.map = tex;
   } else {
     mat.color = new THREE.Color(0x6b7a5e);
@@ -143,73 +143,222 @@ export function buildTerrain(scene: THREE.Scene, d: World3D) {
   terrain.receiveShadow = true;
   scene.add(terrain);
 
-  const parts: THREE.BufferGeometry[] = [];
-  for (const b of d.buildings) {
+  buildBuildings(scene, d.buildings);
+}
+
+// ── buildings ─────────────────────────────────────────────────────────────
+// Extrusions split into walls + roofs: walls carry a repeating window-facade
+// texture (UVs from ExtrudeGeometry's side walls are in world metres, so one
+// tile ≈ one 3 m window bay on every building) and a per-building plaster
+// tint; roofs get their own muted per-building color. Reads as a town instead
+// of beige boxes, still two draw calls.
+
+const FACADE_M = 3.0;            // metres per window bay, both axes
+
+/** Grayscale-ish facade tile (plaster + one window) — tinted by vertex color. */
+function facadeTexture(): THREE.CanvasTexture {
+  const S = 128;
+  const c = document.createElement("canvas");
+  c.width = c.height = S;
+  const g = c.getContext("2d")!;
+  g.fillStyle = "#cfcbc2";
+  g.fillRect(0, 0, S, S);
+  // plaster speckle (deterministic)
+  let seed = 7;
+  const rnd = () => (seed = (seed * 16807) % 2147483647) / 2147483647;
+  for (let i = 0; i < 350; i++) {
+    g.fillStyle = rnd() < 0.5 ? "rgba(0,0,0,0.045)" : "rgba(255,255,255,0.05)";
+    g.fillRect(rnd() * S, rnd() * S, 1 + rnd() * 2, 1 + rnd() * 2);
+  }
+  // window bay: frame, glazing with a sky-ish gradient, sill shadow
+  const wx = S * 0.28, wy = S * 0.22, ww = S * 0.44, wh = S * 0.5;
+  g.fillStyle = "#8e8a80";
+  g.fillRect(wx - 3, wy - 3, ww + 6, wh + 6);
+  const glaze = g.createLinearGradient(0, wy, 0, wy + wh);
+  glaze.addColorStop(0, "#3a4550");
+  glaze.addColorStop(1, "#232a31");
+  g.fillStyle = glaze;
+  g.fillRect(wx, wy, ww, wh);
+  g.fillStyle = "#8e8a80";                       // mullions
+  g.fillRect(wx + ww / 2 - 1, wy, 2, wh);
+  g.fillRect(wx, wy + wh / 2 - 1, ww, 2);
+  g.fillStyle = "rgba(0,0,0,0.18)";              // sill shadow
+  g.fillRect(wx - 3, wy + wh + 3, ww + 6, 3);
+  const tex = new THREE.CanvasTexture(c);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+  tex.repeat.set(1 / FACADE_M, 1 / FACADE_M);    // side-wall UVs are in metres
+  tex.anisotropy = 8;
+  return tex;
+}
+
+/** Split an ExtrudeGeometry into its cap (roof) and side-wall triangles. */
+function splitExtrude(g: THREE.BufferGeometry) {
+  const out: { caps?: THREE.BufferGeometry; walls?: THREE.BufferGeometry } = {};
+  const src = g.index ? g.toNonIndexed() : g;
+  for (const grp of src.groups) {
+    const ng = new THREE.BufferGeometry();
+    for (const name of ["position", "normal", "uv"] as const) {
+      const attr = src.getAttribute(name) as THREE.BufferAttribute;
+      if (!attr) continue;
+      const arr = (attr.array as Float32Array)
+        .slice(grp.start * attr.itemSize, (grp.start + grp.count) * attr.itemSize);
+      ng.setAttribute(name, new THREE.BufferAttribute(arr, attr.itemSize));
+    }
+    if (grp.materialIndex === 0) out.caps = ng;
+    else out.walls = ng;
+  }
+  return out;
+}
+
+const WALL_TINTS = [0xd6cfc2, 0xcbc6bd, 0xd9d2c4, 0xc2bcae, 0xd0c4b0, 0xbfb9b0];
+const ROOF_TINTS = [0x6e5f52, 0x5a5750, 0x7a5646, 0x615c54, 0x54514a, 0x6b6257];
+
+function tintAttr(g: THREE.BufferGeometry, hex: number) {
+  const n = (g.getAttribute("position") as THREE.BufferAttribute).count;
+  const c = new THREE.Color(hex);
+  const arr = new Float32Array(n * 3);
+  for (let i = 0; i < n; i++) { arr[i * 3] = c.r; arr[i * 3 + 1] = c.g; arr[i * 3 + 2] = c.b; }
+  g.setAttribute("color", new THREE.BufferAttribute(arr, 3));
+}
+
+function buildBuildings(scene: THREE.Scene, buildings: World3D["buildings"]) {
+  const wallParts: THREE.BufferGeometry[] = [];
+  const roofParts: THREE.BufferGeometry[] = [];
+  buildings.forEach((b, i) => {
     const shape = new THREE.Shape(b.p.map(([x, y]) => new THREE.Vector2(x, y)));
     const g = new THREE.ExtrudeGeometry(shape, { depth: b.h, bevelEnabled: false });
     g.rotateX(-Math.PI / 2);                   // (x,y,ext) -> (x, ext up, -y)
     g.translate(0, b.z, 0);
-    parts.push(g);
-  }
-  if (parts.length) {
-    const merged = mergeGeometries(parts, false)!;
-    merged.computeVertexNormals();
-    const bm = new THREE.Mesh(merged, new THREE.MeshStandardMaterial({
-      color: 0xb8b2a8, roughness: 0.95, flatShading: true,
+    const { caps, walls } = splitExtrude(g);
+    if (walls) { tintAttr(walls, WALL_TINTS[i % WALL_TINTS.length]); wallParts.push(walls); }
+    if (caps) { tintAttr(caps, ROOF_TINTS[(i * 7 + 3) % ROOF_TINTS.length]); roofParts.push(caps); }
+    g.dispose();
+  });
+  if (wallParts.length) {
+    const wallGeo = mergeGeometries(wallParts, false)!;
+    wallGeo.computeVertexNormals();
+    const wallsMesh = new THREE.Mesh(wallGeo, new THREE.MeshStandardMaterial({
+      map: facadeTexture(), vertexColors: true, roughness: 0.9, flatShading: true,
     }));
-    bm.castShadow = true;
-    bm.receiveShadow = true;
-    scene.add(bm);
-    parts.forEach((p) => p.dispose());
+    wallsMesh.castShadow = true;
+    wallsMesh.receiveShadow = true;
+    scene.add(wallsMesh);
+    wallParts.forEach((p) => p.dispose());
+  }
+  if (roofParts.length) {
+    const roofGeo = mergeGeometries(roofParts, false)!;
+    roofGeo.computeVertexNormals();
+    const roofMesh = new THREE.Mesh(roofGeo, new THREE.MeshStandardMaterial({
+      vertexColors: true, roughness: 1.0, flatShading: true,
+    }));
+    roofMesh.castShadow = true;
+    roofMesh.receiveShadow = true;
+    scene.add(roofMesh);
+    roofParts.forEach((p) => p.dispose());
   }
 }
 
 // ── trees ─────────────────────────────────────────────────────────────────
-// Low-poly species from Kenney's Nature Kit (CC0), committed in
-// public/models/trees/ (see LICENSE.md there). Each GLB is two primitives
-// (bark + leaves); we bake them into normalized unit-height geometries and
-// draw every tree of a species as two InstancedMeshes — thousands of trees,
-// six draw calls. Canopy color varies per instance; broadleaf species get
-// green-hued canopies, the pine a darker blue-green.
+// Stylized species from Quaternius' Ultimate Stylized Nature pack (CC0),
+// committed in public/models/trees/ (see LICENSE.md there): textured bark and
+// alpha-cutout leaf cards, decimated to ~1.2k tris per tree. Each GLB's
+// primitives are baked into normalized unit-height geometries and every tree
+// of a species is drawn as one InstancedMesh per primitive — thousands of
+// trees, a handful of draw calls. Foliage keeps the pack's textures, tinted
+// per instance and shaded by a baked canopy AO gradient.
 
-type TreeSpecies = {
-  bark: THREE.BufferGeometry;
-  leaf: THREE.BufferGeometry;
-  pine: boolean;
-};
+type TreePart = { geo: THREE.BufferGeometry; mat: THREE.MeshStandardMaterial; leaf: boolean };
+type TreeSpecies = { parts: TreePart[]; pine: boolean; accent?: boolean };
 
-const TREE_FILES = [
-  { file: "tree_default.glb", pine: false },
-  { file: "tree_oak.glb", pine: false },
-  { file: "tree_pineTallA.glb", pine: true },
+// kind: the green broadleaf + pine stands that make up the forest, plus the
+// red-leaved maple kept as a rare accent (a few percent) — never the default
+const TREE_FILES: { file: string; pine: boolean; accent?: boolean }[] = [
+  { file: "NormalTree_1.glb", pine: false },
+  { file: "NormalTree_4.glb", pine: false },
+  { file: "BirchTree_1.glb", pine: false },
+  { file: "PineTree_1.glb", pine: true },
+  { file: "PineTree_3.glb", pine: true },
+  { file: "MapleTree_1.glb", pine: false, accent: true },
 ];
 
 function bakeSpecies(root: THREE.Object3D, pine: boolean): TreeSpecies | null {
   root.updateMatrixWorld(true);
-  const barks: THREE.BufferGeometry[] = [];
-  const leafs: THREE.BufferGeometry[] = [];
+  const raw: { geo: THREE.BufferGeometry; mat: THREE.Material; leaf: boolean }[] = [];
   root.traverse((o) => {
     if (!(o as THREE.Mesh).isMesh) return;
     const m = o as THREE.Mesh;
-    const g = m.geometry.clone().applyMatrix4(m.matrixWorld);
-    const name = (Array.isArray(m.material) ? m.material[0] : m.material)?.name ?? "";
-    (/leaf/i.test(name) ? leafs : barks).push(g);
+    const mat = Array.isArray(m.material) ? m.material[0] : m.material;
+    raw.push({
+      geo: m.geometry.clone().applyMatrix4(m.matrixWorld),
+      mat,
+      leaf: /leaf|leaves/i.test(mat?.name ?? ""),
+    });
   });
-  if (!leafs.length || !barks.length) return null;
-  const leaf = leafs.length > 1 ? mergeGeometries(leafs, false)! : leafs[0];
-  const bark = barks.length > 1 ? mergeGeometries(barks, false)! : barks[0];
+  if (!raw.length || !raw.some((r) => r.leaf)) return null;
+  // source packs disagree on the up axis (even per file): detect the growth
+  // axis from the union bounds, rotate it onto +Y, and make sure the canopy
+  // ends up above the trunk — never trust the file's orientation
+  const union = (leafOnly?: boolean) => {
+    const b = new THREE.Box3();
+    for (const r of raw) {
+      if (leafOnly !== undefined && r.leaf !== leafOnly) continue;
+      b.union(new THREE.Box3().setFromBufferAttribute(
+        r.geo.attributes.position as THREE.BufferAttribute));
+    }
+    return b;
+  };
+  let box = union();
+  const ext = box.getSize(new THREE.Vector3());
+  if (ext.z >= ext.x && ext.z >= ext.y) raw.forEach((r) => r.geo.rotateX(-Math.PI / 2));
+  else if (ext.x >= ext.y && ext.x >= ext.z) raw.forEach((r) => r.geo.rotateZ(Math.PI / 2));
+  const midY = (b: THREE.Box3) => (b.min.y + b.max.y) / 2;
+  if (midY(union(true)) < midY(union(false))) raw.forEach((r) => r.geo.rotateX(Math.PI));
+  box = union();
   // normalize: base at y=0, height exactly 1 (instances scale by tree height)
-  const box = new THREE.Box3().setFromBufferAttribute(
-    leaf.attributes.position as THREE.BufferAttribute);
-  box.union(new THREE.Box3().setFromBufferAttribute(
-    bark.attributes.position as THREE.BufferAttribute));
   const h = Math.max(box.max.y - box.min.y, 1e-3);
-  for (const g of [leaf, bark]) {
-    g.translate(0, -box.min.y, 0);
-    g.scale(1 / h, 1 / h, 1 / h);
-    g.computeVertexNormals();
+  const parts = raw.map((r) => {
+    r.geo.translate(0, -box.min.y, 0);
+    r.geo.scale(1 / h, 1 / h, 1 / h);
+    if (r.leaf) bakeCanopyAO(r.geo);
+    // keep the GLB's textured material (bark map / leaf alpha map), tuned for
+    // instanced foliage: alpha-cutout cards visible from both sides, no
+    // transparency sorting, canopy AO via vertex colors
+    const mat = (r.mat as THREE.MeshStandardMaterial).clone();
+    mat.roughness = 1.0;
+    mat.metalness = 0.0;
+    if (r.leaf) {
+      mat.alphaTest = 0.45;
+      mat.transparent = false;
+      mat.depthWrite = true;
+      mat.side = THREE.DoubleSide;
+      mat.vertexColors = true;
+      mat.color.set(0xffffff);
+    }
+    return { geo: r.geo, mat, leaf: r.leaf };
+  });
+  return { parts, pine };
+}
+
+/** Vertical ambient-occlusion gradient baked into the canopy's vertex colors:
+ *  shaded underside, sunlit crown. Multiplies with the per-instance hue, so
+ *  the foliage reads as volume instead of a flat-lit blob. */
+function bakeCanopyAO(leaf: THREE.BufferGeometry) {
+  const pos = leaf.getAttribute("position") as THREE.BufferAttribute;
+  let lo = Infinity, hi = -Infinity;
+  for (let i = 0; i < pos.count; i++) {
+    const y = pos.getY(i);
+    if (y < lo) lo = y;
+    if (y > hi) hi = y;
   }
-  return { bark, leaf, pine };
+  const span = Math.max(hi - lo, 1e-4);
+  const arr = new Float32Array(pos.count * 3);
+  for (let i = 0; i < pos.count; i++) {
+    const t = (pos.getY(i) - lo) / span;
+    const v = 0.62 + 0.38 * Math.pow(t, 0.9);     // shaded underside -> lit crown
+    arr[i * 3] = arr[i * 3 + 1] = arr[i * 3 + 2] = v;
+  }
+  leaf.setAttribute("color", new THREE.BufferAttribute(arr, 3));
 }
 
 /** Procedural stand-in species so a broken model fetch still grows a forest. */
@@ -235,7 +384,16 @@ function fallbackSpecies(pine: boolean): TreeSpecies {
     }
     leaf = mergeGeometries(blobs, false)!;
   }
-  return { bark, leaf, pine };
+  bakeCanopyAO(leaf);
+  return {
+    pine,
+    parts: [
+      { geo: bark, leaf: false, mat: new THREE.MeshStandardMaterial({
+        color: 0x4a3b2c, roughness: 1.0, flatShading: true }) },
+      { geo: leaf, leaf: true, mat: new THREE.MeshStandardMaterial({
+        color: 0x5a6b3f, roughness: 1.0, flatShading: true, vertexColors: true }) },
+    ],
+  };
 }
 
 let treeCache: Promise<TreeSpecies[]> | null = null;
@@ -249,18 +407,12 @@ export function loadTreeSpecies(base = "/models/trees"): Promise<TreeSpecies[]> 
       loader
         .loadAsync(`${base}/${t.file}`)
         .then((gltf) => bakeSpecies(gltf.scene, t.pine) ?? fallbackSpecies(t.pine))
-        .catch(() => fallbackSpecies(t.pine)),
+        .catch(() => fallbackSpecies(t.pine))
+        .then((s) => { s.accent = !!t.accent; return s; }),
     ),
   );
   return treeCache;
 }
-
-const BARK_MAT = () => new THREE.MeshStandardMaterial({
-  color: 0x5c4832, roughness: 1.0, flatShading: true,
-});
-const LEAF_MAT = () => new THREE.MeshStandardMaterial({
-  color: 0xffffff, roughness: 1.0, flatShading: true,
-});
 
 /** Instance every tree from the world3d `trees` array onto the scene. */
 export function buildTrees(scene: THREE.Scene, trees: number[][], species: TreeSpecies[]) {
@@ -272,11 +424,20 @@ export function buildTrees(scene: THREE.Scene, trees: number[][], species: TreeS
     x = ((x >>> 16) ^ x) >>> 0;
     return (x % 10000) / 10000;
   };
+  const broad = species.map((s, i) => (!s.pine && !s.accent ? i : -1)).filter((i) => i >= 0);
+  const pines = species.map((s, i) => (s.pine && !s.accent ? i : -1)).filter((i) => i >= 0);
+  const accents = species.map((s, i) => (s.accent ? i : -1)).filter((i) => i >= 0);
   const pick = (i: number, h: number) => {
-    // tall stands lean pine, low scrub leans broadleaf; always mixed
+    // a few percent accent trees (the red maple); tall stands lean pine,
+    // low scrub leans broadleaf; always mixed
+    if (accents.length && hash(i, 6) < 0.05) {
+      return accents[Math.floor(hash(i, 7) * accents.length) % accents.length];
+    }
     const r = hash(i, 1);
-    if (h >= 13) return r < 0.55 ? 2 : r < 0.8 ? 0 : 1;
-    return r < 0.42 ? 0 : r < 0.8 ? 1 : 2;
+    const pool = h >= 13 ? (r < 0.55 ? pines : broad) : (r < 0.22 ? pines : broad);
+    return pool.length
+      ? pool[Math.floor(hash(i, 7) * pool.length) % pool.length]
+      : 0;
   };
   const counts = species.map(() => 0);
   const assign = trees.map((t, i) => {
@@ -290,8 +451,8 @@ export function buildTrees(scene: THREE.Scene, trees: number[][], species: TreeS
   const col = new THREE.Color();
   species.forEach((sp, si) => {
     if (!counts[si]) return;
-    const barks = new THREE.InstancedMesh(sp.bark, BARK_MAT(), counts[si]);
-    const leafs = new THREE.InstancedMesh(sp.leaf, LEAF_MAT(), counts[si]);
+    const meshes = sp.parts.map((p) =>
+      new THREE.InstancedMesh(p.geo, p.mat, counts[si]));
     let j = 0;
     for (let i = 0; i < trees.length; i++) {
       if (assign[i] !== si) continue;
@@ -299,16 +460,20 @@ export function buildTrees(scene: THREE.Scene, trees: number[][], species: TreeS
       q.setFromAxisAngle(up, hash(i, 2) * Math.PI * 2);
       const wj = 0.8 + hash(i, 3) * 0.45;               // width jitter
       m.compose(w2t(x, y, gz), q, new THREE.Vector3(h * wj, h, h * wj));
-      barks.setMatrixAt(j, m);
-      leafs.setMatrixAt(j, m);
-      if (sp.pine) col.setHSL(0.38 + hash(i, 4) * 0.06, 0.32, 0.16 + hash(i, 5) * 0.07);
-      else col.setHSL(0.24 + hash(i, 4) * 0.09, 0.42, 0.2 + hash(i, 5) * 0.1);
-      leafs.setColorAt(j, col);
+      // subtle per-tree tint over the leaf texture: mostly brightness variety
+      // with a whisper of hue drift — the textures carry the actual color
+      if (sp.pine) col.setHSL(0.35, 0.12, 0.5 + hash(i, 5) * 0.24);
+      else col.setHSL(0.22 + hash(i, 4) * 0.08, 0.15, 0.55 + hash(i, 5) * 0.3);
+      for (let pi = 0; pi < sp.parts.length; pi++) {
+        meshes[pi].setMatrixAt(j, m);
+        if (sp.parts[pi].leaf) meshes[pi].setColorAt(j, col);
+      }
       j++;
     }
-    barks.castShadow = true;
-    leafs.castShadow = true;
-    scene.add(barks, leafs);
+    for (const mesh of meshes) {
+      mesh.castShadow = true;
+      scene.add(mesh);
+    }
   });
 }
 

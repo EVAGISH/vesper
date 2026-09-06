@@ -32,8 +32,8 @@ def main():
     ap.add_argument("run_dir", help="run directory containing replay.json")
     ap.add_argument("--cam", choices=["world", "fpv", "both"], default="both")
     ap.add_argument("--fps", type=int, default=24)
-    ap.add_argument("--width", type=int, default=1280)
-    ap.add_argument("--height", type=int, default=720)
+    ap.add_argument("--width", type=int, default=1920)
+    ap.add_argument("--height", type=int, default=1080)
     ap.add_argument("--full", action="store_true",
                     help="render the whole log (default trims to ~4 s past the last strike)")
     args = ap.parse_args()

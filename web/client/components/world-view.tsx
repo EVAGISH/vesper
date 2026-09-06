@@ -39,6 +39,8 @@ export function WorldView({ ip }: { ip: string }) {
     const renderer = new THREE.WebGLRenderer({ antialias: true });
     renderer.shadowMap.enabled = true;
     renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+    renderer.toneMapping = THREE.ACESFilmicToneMapping;   // same grade as the export
+    renderer.toneMappingExposure = 1.15;
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
     el.appendChild(renderer.domElement);
 

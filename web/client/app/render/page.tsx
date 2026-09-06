@@ -42,6 +42,7 @@ declare global {
       error: string | null;
       meta: { frames: number; fps: number; hero: number; kills: Kill[]; duration: number };
       seek: (i: number) => string;
+      seekOnly: (i: number) => void;
     };
   }
 }
@@ -207,7 +208,7 @@ export default function RenderPage() {
       const fwd = new THREE.Vector3();
       const up = new THREE.Vector3();
 
-      function seek(i: number): string {
+      function renderFrame(i: number) {
         const t = i / fps;
         const { a, b, f } = sample(t);
         const deadSet = new Set(a.dead ?? []);
@@ -306,25 +307,31 @@ export default function RenderPage() {
             if (!camInit) { camera.position.copy(goal); camInit = true; }
             else camera.position.lerp(goal, 0.14);
             camera.up.set(0, 1, 0);
-            // a strike inside its linger window pulls the gaze to the impact
-            const lk = kills.find((kk) => t >= kk.t - 1.5 && t < kk.t + 3.5);
+            // the hero's own strike pulls the gaze to its target so the dive
+            // reads; other drones' kills don't yank the camera around
+            const lk = kills.find(
+              (kk) => kk.striker === hero && t >= kk.t - 1.5 && t < kk.t + 3.5);
             if (lk) camera.lookAt(tanks[lk.k].position.clone().lerp(hp, 0.15));
             else camera.lookAt(hp);
+            heldPos.copy(camera.position);
           } else {
-            // the hero died striking: slow orbit around the wreck
-            const w = t - heroDeathT;
-            const ang = 0.25 * w;
-            camera.position.set(
-              impact.x + Math.cos(ang) * 42,
-              impact.y + 20,
-              impact.z + Math.sin(ang) * 42);
+            // the hero flew into the target: NO cut — the chase cam simply
+            // stops where it was and watches the wreck burn from behind
+            camera.position.copy(heldPos);
             camera.up.set(0, 1, 0);
             camera.lookAt(impact);
           }
         }
 
         renderer!.render(scene, camera);
-        return renderer!.domElement.toDataURL("image/jpeg", 0.92);
+      }
+
+      // seek: render + in-page JPEG (browser-viewable / fallback capture).
+      // seekOnly: render only — the driver grabs the frame via a CDP
+      // screenshot instead, which is ~10x faster than canvas.toDataURL.
+      function seek(i: number): string {
+        renderFrame(i);
+        return renderer!.domElement.toDataURL("image/jpeg", 0.95);
       }
 
       window.__vesper = {
@@ -332,7 +339,11 @@ export default function RenderPage() {
         error: null,
         meta: { frames: total, fps, hero, kills, duration: tEnd },
         seek,
+        seekOnly: renderFrame,
       };
+      // perf-probe handle (headless diagnostics only; not part of the contract)
+      (window as unknown as { __vesperDebug?: object }).__vesperDebug =
+        { renderer, scene, camera };
       seek(0);
       setStatus("");
     })().catch((e) => {
@@ -342,6 +353,7 @@ export default function RenderPage() {
         ready: false, error: msg,
         meta: { frames: 0, fps: 0, hero: 0, kills: [], duration: 0 },
         seek: () => "",
+        seekOnly: () => {},
       };
     });
 

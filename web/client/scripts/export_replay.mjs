@@ -37,8 +37,8 @@ const outWorld = arg("out-world");
 const outFpv = arg("out-fpv");
 const cams = String(arg("cams", "world,fpv")).split(",").filter(Boolean);
 const fps = Number(arg("fps", 24));
-const width = Number(arg("width", 1280));
-const height = Number(arg("height", 720));
+const width = Number(arg("width", 1920));
+const height = Number(arg("height", 1080));
 const full = arg("full", false) === true;
 const baseUrl = arg("url");
 
@@ -90,7 +90,7 @@ async function ensureServer() {
 function ffmpegTo(outPath) {
   const p = spawn(FFMPEG, [
     "-y", "-f", "image2pipe", "-vcodec", "mjpeg", "-framerate", String(fps), "-i", "-",
-    "-c:v", "libx264", "-preset", "veryfast", "-crf", "19", "-pix_fmt", "yuv420p",
+    "-c:v", "libx264", "-preset", "veryfast", "-crf", "18", "-pix_fmt", "yuv420p",
     "-movflags", "+faststart", outPath,
   ], { stdio: ["pipe", "ignore", "pipe"] });
   let err = "";
@@ -152,13 +152,17 @@ try {
       + `(${meta.duration.toFixed(1)}s clip, hero drone ${meta.hero}, `
       + `${meta.kills.length} strike${meta.kills.length === 1 ? "" : "s"}) -> ${out}`);
 
+    // CDP screenshot of the canvas region — ~10x faster than canvas.toDataURL,
+    // which was the old capture path (the GPU render itself is ~1 ms/frame)
+    const canvas = await page.$("canvas");
+    const bb = await canvas.boundingBox();
+    const clip = { x: bb.x, y: bb.y, width, height };
     const { p: ff, errText } = ffmpegTo(out);
     for (let i = 0; i < meta.frames; i++) {
-      const dataUrl = await page.evaluate((n) => window.__vesper.seek(n), i);
-      if (!dataUrl || !dataUrl.startsWith("data:image/jpeg")) {
-        throw new Error(`frame ${i}: capture failed`);
-      }
-      const buf = Buffer.from(dataUrl.slice(dataUrl.indexOf(",") + 1), "base64");
+      await page.evaluate((n) => window.__vesper.seekOnly(n), i);
+      const buf = await page.screenshot({ type: "jpeg", quality: 90, clip,
+                                          optimizeForSpeed: true });
+      if (!buf || buf.length < 1000) throw new Error(`frame ${i}: capture failed`);
       if (!ff.stdin.write(buf)) await new Promise((r) => ff.stdin.once("drain", r));
       if (i > 0 && i % 200 === 0) {
         const rate = i / ((Date.now() - camT0) / 1000);

@@ -1378,8 +1378,8 @@ def site_ground(world: str):
             from PIL import Image
             Image.MAX_IMAGE_PIXELS = None
             img = Image.open(src).convert("RGB")
-            img.thumbnail((2048, 2048), Image.BILINEAR)
-            img.save(cache, "JPEG", quality=82)
+            img.thumbnail((4096, 4096), Image.BILINEAR)
+            img.save(cache, "JPEG", quality=85)
         except ImportError:
             return FileResponse(src, media_type="image/png")
     return FileResponse(cache, media_type="image/jpeg")

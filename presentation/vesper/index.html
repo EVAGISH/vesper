@@ -101,13 +101,14 @@
 
   /* slide 6 — twin / reconstruction pipeline */
   .s6t .pipe{display:flex;align-items:center;gap:12px;margin-top:30px;flex-wrap:wrap}
-  .s6t .pnode{flex:1;min-width:170px;background:rgba(8,11,9,.84);border:1px solid var(--line2)}
+  .s6t .pnode{flex:1;min-width:140px;background:rgba(8,11,9,.84);border:1px solid var(--line2)}
+  .s6t .pl{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
   .s6t .pnode.hot{border-color:var(--accent)}
   .s6t .pimg{position:relative;overflow:hidden;aspect-ratio:16/9;background:var(--panel)}
   .s6t .pimg>img{position:absolute;display:block;max-width:none}
   .s6t .pimg.coords{display:flex;align-items:center;justify-content:center;
-    font-family:var(--mono);color:var(--amber);font-size:clamp(13px,1.15vw,18px);letter-spacing:.06em}
-  .s6t .pl{padding:8px 10px;font-family:var(--mono);font-size:10.5px;letter-spacing:.14em;
+    font-family:var(--mono);color:var(--amber);font-size:clamp(9px,0.8vw,13px);letter-spacing:.04em}
+  .s6t .pl{padding:8px 9px;font-family:var(--mono);font-size:9.5px;letter-spacing:.07em;
     text-transform:uppercase;color:var(--muted);border-top:1px solid var(--line)}
   .s6t .pl b{color:var(--ink)}
   .s6t .pnode.hot .pl b{color:var(--accent)}
@@ -271,43 +272,57 @@
     <div class="bleed"><img src="assets/twin_view0.png" alt="Kramatorsk reconstructed in 3D: city, river and terrain, fully modeled"></div>
     <div class="pad flex"><div class="wrap bottomer">
       <div class="eyebrow">The Pipeline</div>
-      <h2>Coordinates in. <span class="accent">A hunting swarm out.</span></h2>
-      <p class="sub"><strong>This background is not a photo — it's our sim.</strong> We rebuild the real battlefield in 3D — satellite, lidar, OpenStreetMap — fly a million RL sorties inside it, and ship the weights to the drone.</p>
+      <h2>Coordinates in. <span class="accent">Hunters out.</span></h2>
+      <p class="sub"><strong>This background is not a photo — it's our sim.</strong> We rebuild the real battlefield in 3D — satellite, lidar, OpenStreetMap — model the jammers too, because <strong>comms is terrain</strong>, then fly a million RL sorties inside it and ship the weights to the drone.</p>
       <div class="pipe">
         <div class="pnode">
           <div class="pimg coords">48.7106°N&nbsp;37.5762°E</div>
-          <div class="pl"><b>01</b> · type coordinates</div>
+          <div class="pl"><b>01</b> · coordinates</div>
+        </div>
+        <div class="parr">▶</div>
+        <div class="pnode">
+          <div class="pimg"><!-- tac1 AO map crop x1112 y150 w448 h252 -->
+            <img src="assets/tac1.png" alt="Public satellite imagery of the AO" style="width:375%;height:416.7%;left:-248.2%;top:-59.5%">
+          </div>
+          <div class="pl"><b>02</b> · sat · lidar · OSM</div>
         </div>
         <div class="parr">▶</div>
         <div class="pnode hot">
           <div class="pimg"><!-- twin_view1 1280x720 full -->
             <img src="assets/twin_view1.png" alt="The real city reconstructed in 3D" style="width:100%;height:100%;left:0;top:0">
           </div>
-          <div class="pl"><b>02</b> · reconstruct in 3D</div>
+          <div class="pl"><b>03</b> · reconstruct 3D</div>
         </div>
         <div class="parr">▶</div>
         <div class="pnode">
-          <div class="pimg"><!-- prog_final 1280x720 full -->
-            <img src="assets/prog_final.png" alt="Reinforcement-learning training run in the twin" style="width:100%;height:100%;left:0;top:0">
+          <div class="pimg"><!-- live_tactical jam overlay crop x60 y300 w560 h315 -->
+            <img src="assets/live_tactical.png" alt="RF model: jammer shadows over the AO, reports held in the orange zone" style="width:300%;height:333.3%;left:-10.7%;top:-95.2%">
           </div>
-          <div class="pl"><b>03</b> · train — RL in the twin</div>
+          <div class="pl"><b>04</b> · model the RF</div>
+        </div>
+        <div class="parr">▶</div>
+        <div class="pnode">
+          <div class="pimg"><!-- train_curve 1600x900 full -->
+            <img src="assets/train_curve.png" alt="Training curve: targets neutralized per sortie rising from 1% to 26%" style="width:100%;height:100%;left:0;top:0">
+          </div>
+          <div class="pl"><b>05</b> · train — RL</div>
         </div>
         <div class="parr">▶</div>
         <div class="pnode">
           <div class="pimg"><!-- tac1 console crop x180 y120 w800 h450 -->
             <img src="assets/tac1.png" alt="The live console flying the trained policy" style="width:210%;height:233.3%;left:-22.5%;top:-26.7%">
           </div>
-          <div class="pl"><b>04</b> · deploy to the drone</div>
+          <div class="pl"><b>06</b> · deploy</div>
         </div>
       </div>
-      <p class="cap" style="margin-top:14px">Kramatorsk — reconstructed automatically. The swarm trains, flies, and dies in this world before it ever flies the real one.</p>
+      <p class="cap" style="margin-top:14px">Kramatorsk — reconstructed automatically. Our drones train, fly, and die in this world before they ever fly the real one.</p>
     </div></div>
   </section>
 
   <!-- 7 · THE REPS -->
   <section class="slide s6" data-title="trained">
     <div class="pad"><div class="wrap">
-      <div class="eyebrow">Inside Step 03 — Training</div>
+      <div class="eyebrow">Inside Step 05 — Training</div>
       <h2>A million sorties <span class="accent">before the first real one.</span></h2>
       <div class="row">
         <div>

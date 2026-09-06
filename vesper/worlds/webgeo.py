@@ -128,8 +128,8 @@ def ensure_ground_jpg(world: str, assets: Path) -> Path | None:
             from PIL import Image
             Image.MAX_IMAGE_PIXELS = None
             img = Image.open(src).convert("RGB")
-            img.thumbnail((2048, 2048), Image.BILINEAR)
-            img.save(cache, "JPEG", quality=82)
+            img.thumbnail((4096, 4096), Image.BILINEAR)
+            img.save(cache, "JPEG", quality=85)
         except ImportError:
             return src
     return cache

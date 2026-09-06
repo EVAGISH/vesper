@@ -510,13 +510,23 @@ def dump_recording(frames, frame_dt, auto=False, renderers=None):
         _prune_auto_runs()
 
 
+# the most recent COMPLETED mission (frames, frame_dt): a manual RECORD SORTIE
+# that lands right after an episode rollover would otherwise keep only the few
+# seconds buffered since the reset -- a 7-second clip of drones taking off --
+# so record falls back to this when the live buffer is still a stub
+last_mission = None
+
+
 def finish_mission():
     """The lead's episode just completed (all-cleared or the episode_s rollover).
     Auto-save the buffered mission when it is interesting -- >=1 neutralization
     relayed to the operator -- unless the operator already kept it by hand, then
     clear the buffer so the next mission records fresh."""
+    global last_mission
     frames = list(rec_buf)
     interesting = len(frames) >= 12 and any(t[3] for t in frames[-1]["tg"])
+    if len(frames) >= 12:
+        last_mission = (frames, dt * rec_every)
     if interesting and not manual_recorded:
         threading.Thread(target=dump_recording, args=(frames, dt * rec_every, True),
                          daemon=True).start()
@@ -688,6 +698,15 @@ def apply_commands():
                 print(f"[warm] deploy failed: {e}", flush=True)
         elif kind == "record":
             frames = list(rec_buf)                          # snapshot; buffer keeps rolling
+            fdt = dt * rec_every
+            # the mission just rolled over and the fresh buffer is a stub:
+            # the operator means "save what I just watched" -> the completed one
+            if last_mission and len(frames) * fdt < 20.0 \
+                    and len(last_mission[0]) * last_mission[1] > len(frames) * fdt:
+                print(f"[warm] record: only {len(frames) * fdt:.0f}s buffered since the "
+                      f"rollover -> saving the last completed mission "
+                      f"({len(last_mission[0]) * last_mission[1]:.0f}s) instead", flush=True)
+                frames, fdt = last_mission
             if len(frames) < 12:
                 print("[warm] record ignored: nothing buffered yet", flush=True)
             else:
@@ -701,7 +720,7 @@ def apply_commands():
                                    if r.strip() in ("tactical", "three", "isaac")) or None
                 manual_recorded = True                      # keeper exists; skip the auto-save
                 threading.Thread(target=dump_recording,
-                                 args=(frames, dt * rec_every, False, req),
+                                 args=(frames, fdt, False, req),
                                  daemon=True).start()
         elif kind in ("approve", "deny"):
             try:
