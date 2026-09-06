@@ -173,8 +173,10 @@ def species_have_colliders(usd: Path, species_assets: set) -> bool:
         root = st.GetPrimAtPath("/Tree")
         if not root or not st.GetPrimAtPath("/Tree/trunk_col"):
             return False
-        from pxr import UsdGeom, UsdPhysics
-        if not any(pr.IsA(UsdGeom.Mesh) and pr.HasAPI(UsdPhysics.CollisionAPI) for pr in Usd.PrimRange(root)):
+        from pxr import UsdPhysics
+        # trunk cylinder + crown cone (vesper.worlds.geo._author_tree_colliders); older
+        # builds put convex-decomposition colliders on the leaf meshes -- either counts
+        if not any(pr.HasAPI(UsdPhysics.CollisionAPI) for pr in Usd.PrimRange(root)):
             return False
     return True
 

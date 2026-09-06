@@ -180,6 +180,112 @@ def write_vehicle_usd(out_path, paint=(0.24, 0.31, 0.18)) -> Path:
     return write_tank_usd(out_path, paint=paint)
 
 
+# --------------------------------------------------------------------- mesh wrapper
+# Real BTR-80: 7.65 m long, 2.90 m wide, 2.41 m to the turret roof, 13.6 t.
+BTR80_LENGTH_M = 7.65
+BTR80_MASS_KG = 13_600.0
+BTR80_HULL = (7.40, 2.75, 2.20)     # collider box, inset inside the visible bodywork
+
+
+def _mesh_bounds(mesh_usd):
+    """World-space (min, max) of a converted mesh USD, as plain tuples."""
+    stage = Usd.Stage.Open(str(mesh_usd))
+    prim = stage.GetDefaultPrim() or stage.GetPseudoRoot()
+    cache = UsdGeom.BBoxCache(Usd.TimeCode.Default(), [UsdGeom.Tokens.default_])
+    rng = cache.ComputeWorldBound(prim).ComputeAlignedRange()
+    return tuple(rng.GetMin()), tuple(rng.GetMax())
+
+
+def _yaw_bounds(lo, hi, yaw_deg):
+    """(min, max) of the box after rotating it `yaw_deg` about Z."""
+    c, s = math.cos(math.radians(yaw_deg)), math.sin(math.radians(yaw_deg))
+    xs, ys = [], []
+    for x in (lo[0], hi[0]):
+        for y in (lo[1], hi[1]):
+            xs.append(x * c - y * s)
+            ys.append(x * s + y * c)
+    return (min(xs), min(ys), lo[2]), (max(xs), max(ys), hi[2])
+
+
+def write_mesh_vehicle_usd(mesh_usd, out_path, *, length_m, nose_yaw_deg=0.0,
+                           mass_kg=MASS_KG, hull=None, com_height=None,
+                           physics=True) -> Path:
+    """Wrap a converted mesh as the drivable vehicle rigid body.
+
+    The mesh supplies pixels and nothing else. Physics stays exactly what the
+    generated tank already used and the driver is already tuned against: one
+    rigid body, one invisible box collider, an authored mass. Downloaded art has
+    no reason to agree with a hand-tuned controller, and letting its own convex
+    hulls into the scene would change contacts, inertia and the meaning of a
+    "touch the vehicle" termination all at once -- so the referenced colliders
+    are switched off and the box is kept.
+
+    `nose_yaw_deg` and the fitted scale are baked into the wrapper's own frame,
+    which leaves the asset in the pose the rest of the stack assumes: nose on
+    +X, wheels on z=0, centred on the origin. That keeps the spec's yaw_offset
+    at zero rather than spreading the model's quirks through the env.
+
+    physics=False drops the rigid body and the collider and leaves pure
+    geometry. Synthetic-data rendering needs that: once PhysX owns a rigid
+    body it also owns its pose, so writing the prim's USD transform every frame
+    moves nothing and every camera photographs an empty field.
+    """
+    out = Path(out_path); out.parent.mkdir(parents=True, exist_ok=True)
+    if out.exists():
+        out.unlink()
+
+    lo, hi = _yaw_bounds(*_mesh_bounds(mesh_usd), nose_yaw_deg)
+    span_x = hi[0] - lo[0]
+    if span_x <= 0:
+        raise ValueError(f"{mesh_usd} has no extent along the vehicle's long axis")
+    scale = float(length_m) / span_x
+    # applied scale -> rotate -> translate, so the offset is in final metres
+    offset = (-(lo[0] + hi[0]) / 2 * scale, -(lo[1] + hi[1]) / 2 * scale, -lo[2] * scale)
+    fitted = tuple((hi[i] - lo[i]) * scale for i in range(3))
+    box = tuple(hull) if hull else fitted
+
+    stage = Usd.Stage.CreateNew(str(out))
+    UsdGeom.SetStageUpAxis(stage, UsdGeom.Tokens.z)
+    UsdGeom.SetStageMetersPerUnit(stage, 1.0)
+    root = UsdGeom.Xform.Define(stage, "/Vehicle")
+    stage.SetDefaultPrim(root.GetPrim())
+    if physics:
+        UsdPhysics.RigidBodyAPI.Apply(root.GetPrim())
+        mass = UsdPhysics.MassAPI.Apply(root.GetPrim())
+        mass.CreateMassAttr(float(mass_kg))
+        com_z = float(com_height) if com_height is not None else box[2] * 0.4
+        mass.CreateCenterOfMassAttr(Gf.Vec3f(0.0, 0.0, com_z))
+
+        # Implicit Cube, like the generated tank's: PhysX reads it as a box
+        # shape, which is what a *dynamic* body needs -- a mesh here becomes a
+        # triangle collider and is rejected for anything that moves.
+        col = UsdGeom.Cube.Define(stage, "/Vehicle/collision")
+        col.CreateSizeAttr(2.0)
+        col_x = UsdGeom.Xformable(col)
+        col_x.AddTranslateOp().Set(Gf.Vec3d(0.0, 0.0, box[2] / 2))
+        col_x.AddScaleOp().Set(Gf.Vec3f(box[0] / 2, box[1] / 2, box[2] / 2))
+        UsdPhysics.CollisionAPI.Apply(col.GetPrim())
+        UsdGeom.Imageable(col).CreateVisibilityAttr(UsdGeom.Tokens.invisible)
+
+    visual = UsdGeom.Xform.Define(stage, "/Vehicle/visual")
+    vx = UsdGeom.Xformable(visual)
+    vx.AddTranslateOp().Set(Gf.Vec3d(*offset))
+    vx.AddRotateZOp().Set(float(nose_yaw_deg))
+    vx.AddScaleOp().Set(Gf.Vec3f(scale, scale, scale))
+    visual.GetPrim().GetReferences().AddReference(str(Path(mesh_usd).resolve()))
+
+    # The converter authors a collider on every mesh it writes. Overriding them
+    # off in this layer is what keeps the box the only shape PhysX sees.
+    for prim in Usd.PrimRange(visual.GetPrim()):
+        if prim.IsA(UsdGeom.Mesh):
+            api = (UsdPhysics.CollisionAPI(prim) if prim.HasAPI(UsdPhysics.CollisionAPI)
+                   else UsdPhysics.CollisionAPI.Apply(prim))
+            api.CreateCollisionEnabledAttr(False)
+
+    stage.GetRootLayer().Save()
+    return out
+
+
 if __name__ == "__main__":
     import sys
     print(write_tank_usd(sys.argv[1] if len(sys.argv) > 1 else "assets/vehicles/tank.usd"))

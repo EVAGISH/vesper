@@ -28,7 +28,7 @@ DEFAULT_H, DEFAULT_CROWN = 10.0, 0.35
 # capsule in vesper.worlds.geo, so PhysX and the map agree on the trunk.
 TRUNK_R, TRUNK_TOP = 0.025, 0.60      # trunk radius, trunk collider top
 
-# Roads a tank can use, with a paved width in metres. Footways, steps and paths
+# Roads a ground vehicle can use, with a paved width in metres. Footways, steps and paths
 # are left out on purpose: a full-width tracked vehicle does not take the
 # stairs, and on a campus the footway graph is denser than the road graph.
 ROAD_WIDTH_M = {"motorway": 14.0, "trunk": 12.0, "primary": 11.0, "secondary": 10.0,
@@ -153,9 +153,9 @@ def splat_canopy(trees, ground, n, half, cell):
 def splat_tree_solids(trees, ground, n, half, cell):
     """(tree_z float32, trunks float32) -- what a tree with colliders stops.
 
-    The species colliders follow the leaf meshes, which the map cannot
-    reproduce; it keeps a conservative stand-in: over the crown disc the hard
-    top is the tree top, over the trunk cell it is at least the trunk top.
+    The species colliders are a trunk cylinder and a crown cone; the map keeps
+    a conservative stand-in: over the crown disc the hard top is the tree top,
+    over the trunk cell it is at least the trunk top.
     trunks counts trunks per cell, for keeping vehicles out of the thick of a
     wood. Used for the privileged teacher's clearance and the fallback crash
     test only -- the contact sensor is what actually decides a crash.

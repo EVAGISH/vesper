@@ -157,3 +157,17 @@
   border-bottom: 1px solid #6a6a60;
   border-right: 1px solid #6a6a60;
 }
+/* Leaflet (environments map) -- dark chrome to match the HUD */
+.leaflet-container { background: #0d0d0d !important; font: inherit; }
+.leaflet-bar { border: 1px solid #333 !important; box-shadow: none !important; }
+.leaflet-bar a { background: #1a1a19; color: #e5e5e5; border-bottom-color: #333 !important; }
+.leaflet-bar a:hover { background: #262625; color: #fff; }
+.leaflet-bar a.leaflet-disabled { background: #141414; color: #555; }
+.leaflet-control-scale-line {
+  background: rgba(0, 0, 0, 0.55); color: #ddd; border-color: #999;
+  font: 10px ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+.leaflet-control-attribution {
+  background: rgba(0, 0, 0, 0.55) !important; color: #888 !important; font-size: 10px;
+}
+.leaflet-control-attribution a { color: #aaa !important; }

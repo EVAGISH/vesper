@@ -30,18 +30,44 @@ from vesper.control.se3 import SE3Controller
 from vesper.lab.vesper_quad import VesperQuadEnv, VesperQuadEnvCfg
 from vesper.lab import pursuit_task as T
 
-_TANK_USD = os.path.abspath(
-    os.path.join(os.path.dirname(__file__), "..", "..", "assets", "vehicles", "tank.usd"))
+_VEHICLE_DIR = os.path.abspath(
+    os.path.join(os.path.dirname(__file__), "..", "..", "assets", "vehicles"))
+_TANK_USD = os.path.join(_VEHICLE_DIR, "tank.usd")
+_BTR80_MESH = os.path.join(_VEHICLE_DIR, "btr80", "btr80.usd")
+_BTR80_USD = os.path.join(_VEHICLE_DIR, "btr80", "btr80_rb.usd")
 
 # yaw_offset rotates the model so its nose points +X, which is the heading
-# convention the drive controller and the reset pose both use.
+# convention the drive controller and the reset pose both use. Both vehicles
+# below are authored nose-on-+X, so it stays zero: for the downloaded mesh the
+# rotation is baked into its wrapper instead of being carried through the env.
 VEHICLE_SPECS = {
     # Generated locally by vesper.worlds.vehicle: one cheap collider plus
     # project-owned tank geometry, with its own RigidBodyAPI and mass.
     "tank": {"usd": _TANK_USD, "yaw_offset": 0.0, "ground_clearance": 0.08,
              "target_height": 1.2},
+    # Real BTR-80A mesh (Objaverse/Sketchfab, CC-BY -- see the asset's
+    # ATTRIBUTION.md). Fetch and convert it with scripts/fetch_objaverse_vehicle.py;
+    # the wrapper that gives it physics is rebuilt from the mesh on every resolve.
+    "btr80": {"usd": _BTR80_USD, "mesh": _BTR80_MESH, "yaw_offset": 0.0,
+              "ground_clearance": 0.08, "target_height": 1.3},
 }
-DEFAULT_VEHICLE = os.environ.get("VESPER_VEHICLE", "tank")
+
+
+def _default_vehicle() -> str:
+    """VESPER_VEHICLE, else the real APC if it has been fetched, else the tank.
+
+    Falling back keeps a box with no assets/ (provision.sh excludes it) able to
+    run every script, and the resolve prints which model it took so a missing
+    download shows up as a line in the log rather than as art nobody notices is
+    the wrong shape.
+    """
+    env = os.environ.get("VESPER_VEHICLE")
+    if env:
+        return env
+    return "btr80" if os.path.exists(_BTR80_MESH) else "tank"
+
+
+DEFAULT_VEHICLE = _default_vehicle()
 
 
 def make_rigid_wrapper(src_usd: str, out_path: str, mass: float | None = None) -> str:
@@ -79,11 +105,24 @@ def resolve_vehicle(name_or_path: str = None) -> dict:
     key = name_or_path or DEFAULT_VEHICLE
     spec = dict(VEHICLE_SPECS.get(
         key, {"usd": os.path.abspath(key), "yaw_offset": 0.0, "ground_clearance": 1.4}))
+    # Always regenerate: assets/ is gitignored and excluded from the droplet
+    # rsync, so a cached copy silently masks edits to the generator.
     if key == "tank":
-        # Always regenerate: assets/ is gitignored and excluded from the droplet
-        # rsync, so a cached copy silently masks edits to the generator.
         from vesper.worlds.vehicle import write_tank_usd
         write_tank_usd(spec["usd"])
+    elif key == "btr80":
+        from vesper.worlds import vehicle as V
+        mesh = spec.pop("mesh")
+        if not os.path.exists(mesh):
+            raise FileNotFoundError(
+                f"{mesh} is missing. Fetch and convert the APC first:\n"
+                "  python3 scripts/fetch_objaverse_vehicle.py btr80\n"
+                "  /isaac-sim/python.sh scripts/convert_asset.py "
+                "assets/vehicles/btr80/btr80.glb --yup --collision convexHull --headless")
+        V.write_mesh_vehicle_usd(
+            mesh, spec["usd"], length_m=V.BTR80_LENGTH_M, nose_yaw_deg=90.0,
+            mass_kg=V.BTR80_MASS_KG, hull=V.BTR80_HULL)
+    print(f"[vesper] vehicle model: {key} -> {spec['usd']}", flush=True)
     if spec.pop("needs_rigid_wrapper", False):
         spec["usd"] = make_rigid_wrapper(
             spec["usd"], os.path.join(os.path.dirname(_TANK_USD), f"{key}_rb.usd"),
