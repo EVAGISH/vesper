@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { useEffect, useState } from "react";
 import { JobButton, JobsPanel } from "@/components/job-controls";
+import { TrainPanel, useTrainControl } from "@/components/train-panel";
 import { Button } from "@/components/ui/button";
 import { fetchJSON, fmtBytes, fmtTime, modelLabel, postJSON, type Model } from "@/lib/vesper";
 import { cn } from "@/lib/utils";
@@ -59,6 +60,7 @@ const POLL_MS = 15000;
 export default function Models() {
   const [models, setModels] = useState<Model[] | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
+  const train = useTrainControl();
 
   useEffect(() => {
     let alive = true;
@@ -92,8 +94,8 @@ export default function Models() {
             <div className="p-6 text-sm text-muted-foreground">loading…</div>
           ) : models.length === 0 ? (
             <div className="p-6 text-sm text-muted-foreground">
-              No models in the library yet — start a training job, then pull
-              artifacts (Jobs panel).
+              No models in the library yet — train one in the &ldquo;Train a new
+              model&rdquo; panel; it lands here when the run finishes.
             </div>
           ) : (
             <table className="w-full border-collapse text-xs">
@@ -188,18 +190,7 @@ export default function Models() {
             )}
           </section>
 
-          <section className="hud-corners rounded-lg border border-border bg-card">
-            <h3 className="flex items-center border-b border-border px-3 py-1.5 font-mono text-[10px] font-semibold uppercase tracking-[0.14em] text-secondary-foreground">
-              <span className="mr-1.5 text-muted-foreground">▮</span>Train a new model
-            </h3>
-            <div className="p-3">
-              <JobButton label="▲ START TRAINING" body={{ kind: "train" }} />
-              <div className="mt-1 text-[11px] text-muted-foreground">
-                Search-and-reach on the Cornell world, 1500 iterations. Progress
-                appears in Runs as a training curve; the model lands here.
-              </div>
-            </div>
-          </section>
+          <TrainPanel ctl={train} />
 
           <JobsPanel />
         </div>

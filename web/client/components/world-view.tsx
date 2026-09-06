@@ -4,7 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import * as THREE from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 import {
-  buildWorldScene, CAM_PITCH_RAD, type CamMode, droneModel, q2t, tankModel, w2t,
+  buildWorldScene, CAM_PITCH_RAD, type CamMode, droneModel, q2t, vehicleModel, w2t,
   type World3D,
 } from "@/lib/scene3d";
 
@@ -81,7 +81,7 @@ export function WorldView({ ip }: { ip: string }) {
         scene.add(g);
       }
       while (tanks.length < s.vehicles.length) {
-        const g = tankModel();
+        const g = vehicleModel();          // BTR-80 (box tank until it loads)
         tanks.push(g);
         scene.add(g);
       }

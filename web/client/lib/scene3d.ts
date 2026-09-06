@@ -57,6 +57,72 @@ export function droneModel(): THREE.Group {
   return g;
 }
 
+// ── target vehicle: BTR-80A ───────────────────────────────────────────────
+// Real textured APC (assets/vehicles/btr80, CC BY 4.0 — attribution ships in
+// public/models/vehicles/ATTRIBUTION.md), the same asset the Isaac lane
+// drives. Loaded once, normalized to the sim's vehicle frame (nose +X, wheels
+// on the ground, true 7.65 m length), then cloned per target with per-clone
+// materials so a wreck can char independently. Until the GLB arrives (or if
+// it can't), the procedural box tank stands in.
+const BTR_LENGTH_M = 7.65;
+let btrTemplate: THREE.Group | null = null;
+let btrLoading: Promise<THREE.Group | null> | null = null;
+
+function normalizeVehicle(root: THREE.Object3D): THREE.Group {
+  const align = new THREE.Group();
+  align.add(root);
+  let box = new THREE.Box3().setFromObject(root);
+  let size = box.getSize(new THREE.Vector3());
+  if (size.z > size.x) root.rotation.y = Math.PI / 2;   // long axis -> +X (nose)
+  box = new THREE.Box3().setFromObject(align);
+  size = box.getSize(new THREE.Vector3());
+  align.scale.setScalar(BTR_LENGTH_M / Math.max(size.x, 1e-3));
+  box = new THREE.Box3().setFromObject(align);
+  align.position.set(-(box.min.x + box.max.x) / 2, -box.min.y,
+                     -(box.min.z + box.max.z) / 2);
+  const tpl = new THREE.Group();
+  tpl.add(align);
+  tpl.traverse((o) => { o.castShadow = true; });
+  return tpl;
+}
+
+/** Kick off (once) the BTR load; resolves null when unavailable. */
+export function preloadVehicle(base = "/models/vehicles"): Promise<THREE.Group | null> {
+  if (!btrLoading) {
+    btrLoading = new GLTFLoader()
+      .loadAsync(`${base}/btr80.glb`)
+      .then((gltf) => { btrTemplate = normalizeVehicle(gltf.scene); return btrTemplate; })
+      .catch(() => null);
+  }
+  return btrLoading;
+}
+
+/** A target vehicle instance: the BTR when loaded (swapped in as it arrives),
+ *  else the box tank. Clones get their own materials (wreck tinting). */
+export function vehicleModel(): THREE.Group {
+  const wrap = new THREE.Group();
+  const fill = (tpl: THREE.Group) => {
+    const c = tpl.clone(true);
+    c.traverse((o) => {
+      const mesh = o as THREE.Mesh;
+      if (!mesh.isMesh) return;
+      mesh.material = Array.isArray(mesh.material)
+        ? mesh.material.map((m) => m.clone())
+        : mesh.material.clone();
+    });
+    wrap.add(c);
+  };
+  if (btrTemplate) fill(btrTemplate);
+  else {
+    const stub = tankModel();
+    wrap.add(stub);
+    preloadVehicle().then((tpl) => {
+      if (tpl) { wrap.remove(stub); fill(tpl); }
+    });
+  }
+  return wrap;
+}
+
 export function tankModel(): THREE.Group {
   const g = new THREE.Group();
   const hullM = new THREE.MeshStandardMaterial({ color: 0x4c5340, roughness: 0.9 });
@@ -271,15 +337,13 @@ function buildBuildings(scene: THREE.Scene, buildings: World3D["buildings"]) {
 type TreePart = { geo: THREE.BufferGeometry; mat: THREE.MeshStandardMaterial; leaf: boolean };
 type TreeSpecies = { parts: TreePart[]; pine: boolean; accent?: boolean };
 
-// kind: the green broadleaf + pine stands that make up the forest, plus the
-// red-leaved maple kept as a rare accent (a few percent) — never the default
+// green broadleaf + pine stands only — no autumn/red species (operator call)
 const TREE_FILES: { file: string; pine: boolean; accent?: boolean }[] = [
   { file: "NormalTree_1.glb", pine: false },
   { file: "NormalTree_4.glb", pine: false },
   { file: "BirchTree_1.glb", pine: false },
   { file: "PineTree_1.glb", pine: true },
   { file: "PineTree_3.glb", pine: true },
-  { file: "MapleTree_1.glb", pine: false, accent: true },
 ];
 
 function bakeSpecies(root: THREE.Object3D, pine: boolean): TreeSpecies | null {

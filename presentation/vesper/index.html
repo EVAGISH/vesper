@@ -204,14 +204,25 @@
 
 <div class="deck" id="deck">
 
-  <!-- 1 · HOOK -->
-  <section class="slide s1" data-title="hook">
+  <!-- 0 · TITLE -->
+  <section class="slide s0" data-title="title">
+    <div class="bleed dim"><img src="assets/isaac_early.png" alt="" aria-hidden="true"></div>
+    <div class="pad flex"><div class="wrap bottomer">
+      <div class="eyebrow">DN Hacks</div>
+      <h1 style="font-size:clamp(72px,13vw,190px);line-height:.86">VESPER</h1>
+      <p class="sub" style="margin-top:20px;font-size:clamp(20px,2.5vw,32px);color:var(--ink);max-width:24ch;font-weight:650">Digital twins that train edge-autonomous drones for the comms-denied fight.</p>
+      <p class="cap" style="margin-top:20px">Reconstruct &middot; Train &middot; Deploy — human-authorized on every strike</p>
+      <p class="cap" style="margin-top:22px;color:var(--muted)">Eashan Vagish · Theo Oltean</p>
+    </div></div>
+  </section>
+
+  <!-- 1 · PROBLEM -->
+  <section class="slide s1" data-title="problem">
     <div class="pad"><div class="wrap">
       <div>
-        <div class="eyebrow">Vesper · DN Hacks</div>
-        <h1>The drone war is a comms war.</h1>
-        <p class="sub" style="font-size:clamp(19px,2.3vw,28px);color:var(--ink)">Jam the link and an FPV is <strong class="red">a falling brick.</strong> So they fly on 20 km of fiber — a leash. <strong>You can't scale a leash.</strong></p>
-        <p class="cap" style="margin-top:26px;color:var(--muted)">Eashan Vagish · Theo Oltean</p>
+        <div class="eyebrow">The Front Line</div>
+        <h1>Drones lose the war the moment <span class="red">they lose the link.</span></h1>
+        <p class="sub" style="font-size:clamp(18px,2vw,25px)">In Ukraine, both sides jam the spectrum so hard that GPS and radio simply die. The workaround is desperate — flying drones on <strong>kilometers of fiber-optic cable</strong> that now litter the front.</p>
       </div>
       <div>
         <div class="shot" style="aspect-ratio:630/360;width:100%">
@@ -261,8 +272,8 @@
     <div class="bleed"><img src="assets/tac1.png" alt="Vesper tactical console: coverage sweep over Kramatorsk with a detected tank"></div>
     <div class="pad flex"><div class="wrap bottomer">
       <div class="eyebrow">Vesper</div>
-      <h1>You can't scale a cord.<br>We cut it — <span class="accent">with software.</span></h1>
-      <p class="sub"><strong>Vesper flies without the link.</strong> Small models, trained for one job, running on the drone itself — search, detect, navigate. Jam everything: the hunt doesn't stop.</p>
+      <h1>Autonomy fails when the sim <span class="accent">isn't the battlefield.</span></h1>
+      <p class="sub"><strong>Small, purpose-built models fly the drone itself</strong> — search, detect, strike, no link required. Everyone has tried this. It fails because the models train in generic sims that look nothing like where they'll fly. <strong>Ours train in the fight.</strong></p>
       <p class="cap" style="margin-top:14px">Sixteen autonomous drones over real Kramatorsk terrain — the whole stack running on this Mac.</p>
     </div></div>
   </section>
@@ -272,8 +283,8 @@
     <div class="bleed"><img src="assets/twin_view0.png" alt="Kramatorsk reconstructed in 3D: city, river and terrain, fully modeled"></div>
     <div class="pad flex"><div class="wrap bottomer">
       <div class="eyebrow">The Pipeline</div>
-      <h2>Coordinates in. <span class="accent">Hunters out.</span></h2>
-      <p class="sub"><strong>This background is not a photo — it's our sim.</strong> We rebuild the real battlefield in 3D — satellite, lidar, OpenStreetMap — model the jammers too, because <strong>comms is terrain</strong>, then fly a million RL sorties inside it and ship the weights to the drone.</p>
+      <h2>Reconstruct, train, <span class="accent">deploy.</span></h2>
+      <p class="sub"><strong>This background is not a photo — it's our sim.</strong> Three steps: rebuild the real battlefield in 3D from satellite, lidar, and OpenStreetMap. Fly millions of RL sorties inside it. Ship the weights to the drone — with the RF environment modeled, because <strong>comms is terrain</strong>.</p>
       <div class="pipe">
         <div class="pnode">
           <div class="pimg coords">48.7106°N&nbsp;37.5762°E</div>
@@ -295,17 +306,17 @@
         </div>
         <div class="parr">▶</div>
         <div class="pnode">
-          <div class="pimg"><!-- live_tactical jam overlay crop x60 y300 w560 h315 -->
-            <img src="assets/live_tactical.png" alt="RF model: jammer shadows over the AO, reports held in the orange zone" style="width:300%;height:333.3%;left:-10.7%;top:-95.2%">
-          </div>
-          <div class="pl"><b>04</b> · model the RF</div>
-        </div>
-        <div class="parr">▶</div>
-        <div class="pnode">
           <div class="pimg"><!-- train_curve 1600x900 full -->
             <img src="assets/train_curve.png" alt="Training curve: targets neutralized per sortie rising from 1% to 26%" style="width:100%;height:100%;left:0;top:0">
           </div>
-          <div class="pl"><b>05</b> · train — RL</div>
+          <div class="pl"><b>04</b> · train — RL</div>
+        </div>
+        <div class="parr">▶</div>
+        <div class="pnode">
+          <div class="pimg"><!-- live_tactical jam overlay crop x60 y300 w560 h315 -->
+            <img src="assets/live_tactical.png" alt="RF model: jammer shadows over the AO, reports held in the orange zone" style="width:300%;height:333.3%;left:-10.7%;top:-95.2%">
+          </div>
+          <div class="pl"><b>05</b> · model the RF</div>
         </div>
         <div class="parr">▶</div>
         <div class="pnode">
@@ -315,15 +326,15 @@
           <div class="pl"><b>06</b> · deploy</div>
         </div>
       </div>
-      <p class="cap" style="margin-top:14px">Kramatorsk — reconstructed automatically. Our drones train, fly, and die in this world before they ever fly the real one.</p>
+      <p class="cap" style="margin-top:14px">Kramatorsk — reconstructed automatically. Operators pick the launch point and mark no-strike zones. Our drones train, fly, and die here before they ever fly for real.</p>
     </div></div>
   </section>
 
   <!-- 7 · THE REPS -->
   <section class="slide s6" data-title="trained">
     <div class="pad"><div class="wrap">
-      <div class="eyebrow">Inside Step 05 — Training</div>
-      <h2>A million sorties <span class="accent">before the first real one.</span></h2>
+      <div class="eyebrow">Inside Step 04 — Training</div>
+      <h2>Reinforcement learning, <span class="accent">millions of sorties in the twin.</span></h2>
       <div class="row">
         <div>
           <div class="shot"><img src="assets/prog_0000.png" alt="Training iteration 0: drone still wandering at 43 seconds" style="width:100%;height:100%;left:0;top:0">
@@ -342,7 +353,7 @@
         </div>
       </div>
       <div class="arrowline">lost <span>────▶</span> methodical <span>────▶</span> <b>lethal</b> · same policy, same terrain — the only thing that changed is training</div>
-      <p class="sub" style="margin-top:18px">Millions of rollouts in the twin — nobody wrote a waypoint, nobody scripted a behavior. <strong>Then the weights ship straight to the drone.</strong> What you're about to see live is that policy flying.</p>
+      <p class="sub" style="margin-top:18px">Millions of rollouts in the twin — <strong>more flight data than any real fleet could ever log.</strong> Nobody scripts a behavior: reward defines what the operator wants, and the policy improves with every trajectory. What you're about to see live is that policy flying.</p>
     </div></div>
   </section>
 
@@ -350,14 +361,14 @@
   <section class="slide s4" data-title="loop">
     <div class="pad"><div class="wrap">
       <div class="live-cue"><span class="rec"></span>Going live · Kramatorsk AO · this Mac</div>
-      <h2>Watch it hunt. <span style="color:var(--muted);font-weight:650">Find it. Call it in. Get the nod. <span class="red">Kill it.</span></span></h2>
+      <h2>Search, detect, report, <span class="red">human-authorized strike.</span></h2>
       <div class="loop">
         <div class="step">
           <div class="shot"><!-- tac1 1680x1050 crop x300 y100 w540 h540 -->
             <img src="assets/tac1.png" alt="Coverage sweep over the AO" style="width:311.1%;height:194.4%;left:-55.6%;top:-18.5%">
           </div>
           <div class="n">01</div><div class="t">SEARCH</div>
-          <div class="d">One shared map. Sixteen hunters sweeping it.</div>
+          <div class="d">The fleet sweeps the AO autonomously, sharing one map.</div>
         </div>
         <div class="step">
           <div class="shot"><!-- tac1 crop x420 y300 w300 h300 -->
@@ -370,8 +381,8 @@
           <div class="shot"><!-- live_tactical crop x100 y240 w400 h400 -->
             <img src="assets/live_tactical.png" alt="Jammed zone: lead jammed, reports held" style="width:420%;height:262.5%;left:-25%;top:-60%">
           </div>
-          <div class="n">03</div><div class="t">UPLINK</div>
-          <div class="d">Jammed? Hold the report. Fly to where the link lives.</div>
+          <div class="n">03</div><div class="t">REPORT</div>
+          <div class="d">RF model shows where it can reach the operator; it flies there to report.</div>
         </div>
         <div class="step human">
           <div class="shot"><!-- live_tactical crop x728 y163 w252 h252 -->
@@ -385,10 +396,10 @@
             <img src="assets/kill_frame.png" alt="Target neutralized on the tactical map" style="width:290.9%;height:163.6%;left:-90.9%;top:-38.6%">
           </div>
           <div class="n">05</div><div class="t">STRIKE</div>
-          <div class="d">One nod. One munition. One kill.</div>
+          <div class="d">On the operator's command, the target is neutralized.</div>
         </div>
       </div>
-      <p class="note">It hunts alone. <b>It never kills alone.</b></p>
+      <p class="note">Autonomy without a connection. Fleet coordination without a script. <b>Nothing fires without a human.</b></p>
     </div></div>
   </section>
 
@@ -400,8 +411,8 @@
     </div>
     <div class="pad flex"><div class="wrap bottomer">
       <div class="eyebrow">Vesper</div>
-      <h1>Point it at any coordinates <span class="accent">on Earth.</span></h1>
-      <p class="sub"><strong>This is the strike — through the drone's own eyes.</strong> Photoreal replay of a real run: dive, detonation, done. Kramatorsk today. Anywhere tomorrow.</p>
+      <h1>Deployable at any coordinates <span class="accent">on Earth.</span></h1>
+      <p class="sub"><strong>This is the strike — through the drone's own eyes.</strong> Next: environment-specific models for the cities on the front — Vuhledar, Kramatorsk — trained in their twins, deployed in the real world.</p>
       <div class="close-line">
         <span><b>Edge</b>-autonomous — runs on a Mac</span>
         <span><b>Comms</b>-aware, jam-resilient</span>

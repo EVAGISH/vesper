@@ -85,11 +85,18 @@ parser.add_argument("--no_expend", action="store_true",
 parser.add_argument("--snapshot_every", type=int, default=200,
                     help="save snap_<iter>.pt every N iters and render a short progression "
                          "clip per snapshot after training (0 = off)")
+parser.add_argument("--snapshot_secs", type=float, default=45.0,
+                    help="length of each progression snapshot's eval episode (s)")
+parser.add_argument("--defer_progression", action="store_true",
+                    help="log each snapshot's eval as progression/<tag>/replay.json instead "
+                         "of rendering mp4s here — for GPU-box runs whose progression reel "
+                         "is rendered on the Mac afterwards (scripts/render_progression.py)")
 parser.add_argument("--renderers", default="three,tactical",
                     help="comma list from {tactical,three,isaac}: which replay renderers run "
                          "on the post-training eval episode (scripts/render_dispatch.py). "
                          "three = fast on-device three.js chase+fpv; isaac = photoreal on "
-                         "the GPU box; progression clips stay tactical")
+                         "the GPU box; progression clips stay tactical. 'none' skips the "
+                         "render entirely (a box run rendered on the Mac after the pull)")
 parser.add_argument("--tag", default="search-train-native")
 args = parser.parse_args()
 
@@ -215,7 +222,7 @@ except Exception as e:                                       # noqa: BLE001
 # renderer(s) is the --renderers flag (default the fast on-device three.js lane
 # + tactical; "isaac" adds the photoreal box render). Best-effort: a render
 # failure must never fail the training run.
-if replay_ok:
+if replay_ok and args.renderers.strip() not in ("", "none"):
     try:
         subprocess.run([sys.executable, "scripts/render_dispatch.py", str(cap.dir),
                         "--renderers", args.renderers], cwd=ROOT, check=True)
@@ -236,6 +243,7 @@ if args.snapshot_every:
 
     world_name = Path(cfg.world_map).stem.replace("_map", "")
     snaps = sorted(cap.dir.glob("snap_*.pt")) + [cap.dir / "search_last.pt"]
+    prog_index = []
     for ck_path in snaps:
         tag = "final" if ck_path.name == "search_last.pt" else ck_path.stem.split("_")[1]
         caption = ("FINAL POLICY" if tag == "final"
@@ -248,18 +256,33 @@ if args.snapshot_every:
                 def action(self, obs, deterministic=True):
                     return ac.actor(norm(obs))
 
-            with tempfile.TemporaryDirectory() as td:
-                nfr = log_episode(env, _Snap(), td, world_name,
-                                  max_steps=int(45.0 / env._dt), reach_radius=25.0)
-                subprocess.run(
-                    [sys.executable, "scripts/render_replay.py", td, "--stride", "5",
-                     "--caption", caption,
-                     "--out", str(cap.dir / f"progression_{tag}.mp4")],
-                    cwd=ROOT, check=True)
-            print(f"progression clip {tag}: {nfr} frames -> progression_{tag}.mp4", flush=True)
+            if args.defer_progression:
+                # box lane: keep the replay, render three.js on the Mac later
+                pdir = cap.dir / "progression" / tag
+                pdir.mkdir(parents=True, exist_ok=True)
+                nfr = log_episode(env, _Snap(), pdir, world_name,
+                                  max_steps=int(args.snapshot_secs / env._dt),
+                                  reach_radius=25.0)
+                prog_index.append({"tag": tag, "caption": caption,
+                                   "replay": f"progression/{tag}/replay.json"})
+                print(f"progression replay {tag}: {nfr} frames -> progression/{tag}/",
+                      flush=True)
+            else:
+                with tempfile.TemporaryDirectory() as td:
+                    nfr = log_episode(env, _Snap(), td, world_name,
+                                      max_steps=int(args.snapshot_secs / env._dt),
+                                      reach_radius=25.0)
+                    subprocess.run(
+                        [sys.executable, "scripts/render_replay.py", td, "--stride", "5",
+                         "--caption", caption,
+                         "--out", str(cap.dir / f"progression_{tag}.mp4")],
+                        cwd=ROOT, check=True)
+                print(f"progression clip {tag}: {nfr} frames -> progression_{tag}.mp4", flush=True)
         except Exception as e:                               # noqa: BLE001
             print(f"[warn] progression clip {tag} failed: {e}", flush=True)
             traceback.print_exc()
+    if prog_index:
+        (cap.dir / "progression" / "index.json").write_text(json.dumps(prog_index, indent=1))
 
 # manifest.json names + dates the run for the Runs tab (headless training never
 # added frames, so finish() just writes the manifest -- no ffmpeg, no cleanup).

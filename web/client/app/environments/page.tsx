@@ -6,6 +6,7 @@ import {
   type Area, type Center, type Footprint, type Tool, type ZoneOverlay,
 } from "@/components/area-map";
 import { JobButton } from "@/components/job-controls";
+import { TrainPanel, useTrainControl } from "@/components/train-panel";
 import { Button } from "@/components/ui/button";
 import { fetchJSON, postJSON } from "@/lib/vesper";
 
@@ -239,9 +240,10 @@ function PlaceStep({
 }
 
 // ------------------------------------------------------------------ built worlds
-function EnvCard({ e, active, selected, editing, onActivate, onSelect, onEdit }: {
-  e: Environment; active: boolean; selected: boolean; editing: boolean;
+function EnvCard({ e, active, selected, editing, trainBlocked, onActivate, onSelect, onEdit, onTrain }: {
+  e: Environment; active: boolean; selected: boolean; editing: boolean; trainBlocked: boolean;
   onActivate: (name: string) => void; onSelect: (e: Environment) => void; onEdit: (e: Environment) => void;
+  onTrain: (name: string) => void;
 }) {
   const building = e.build_status === "running";
   const failed = e.build_status === "failed";
@@ -290,8 +292,9 @@ function EnvCard({ e, active, selected, editing, onActivate, onSelect, onEdit }:
               <Button size="sm" variant="secondary" onClick={() => onActivate(e.name)} className={btnCls}>◉ USE THIS</Button>
             )}
             {e.scenario && <JobButton label="▶ FLY MISSION" body={{ kind: "mission", scenario: e.scenario }} />}
-            {e.map && e.usd && (
-              <JobButton label="◉ TRAIN HERE" variant="secondary" body={{ kind: "train", world: e.usd, map: e.map }} />
+            {e.map && (
+              <Button size="sm" variant="secondary" disabled={trainBlocked}
+                onClick={() => onTrain(e.name)} className={btnCls}>◉ TRAIN HERE</Button>
             )}
             {selected && !editing && (
               <Button size="sm" variant="secondary" onClick={() => onEdit(e)} className={btnCls}>▲ EDIT LAUNCH · ZONES</Button>
@@ -324,6 +327,7 @@ export default function Environments() {
   const [saved, setSaved] = useState<ZonesDoc | null>(null);        // selected world's saved zones
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+  const train = useTrainControl();          // fast-lane training, shared with Models
 
   const setWidthKm = useCallback((v: number) => setWidthKmRaw(clampKm(v)), []);
   const onCenter = useCallback((c: Center, z: number) => { setCenter(c); setZoom(z); }, []);
@@ -497,6 +501,9 @@ export default function Environments() {
             </div>
           </section>
         )}
+        {!locked && !editing && (
+          <TrainPanel ctl={train} />
+        )}
         <div className="mt-1 px-0.5 font-mono text-[10px] uppercase tracking-[0.14em] text-muted-foreground">
           Built worlds {envs ? `· ${envs.length}` : ""}
         </div>
@@ -507,7 +514,9 @@ export default function Environments() {
         ) : (
           envs.map((e) => (
             <EnvCard key={e.name} e={e} active={e.name === active} selected={e.name === selected}
-              editing={editing === e.name} onActivate={activate} onSelect={selectEnv} onEdit={editEnv} />
+              editing={editing === e.name} trainBlocked={train.blocked}
+              onActivate={activate} onSelect={selectEnv} onEdit={editEnv}
+              onTrain={(name) => train.startTrain(name)} />
           ))
         )}
       </aside>

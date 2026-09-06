@@ -1,6 +1,6 @@
 # Tree models — license & attribution
 
-`MapleTree_1.glb`, `MapleTree_3.glb`, `BirchTree_1.glb`, `PineTree_1.glb`,
+`NormalTree_1.glb`, `NormalTree_4.glb`, `BirchTree_1.glb`, `PineTree_1.glb`,
 `PineTree_3.glb` are from **Quaternius — Ultimate Stylized Nature Pack**
 (https://quaternius.com), released under **Creative Commons Zero (CC0)**:
 http://creativecommons.org/publicdomain/zero/1.0/

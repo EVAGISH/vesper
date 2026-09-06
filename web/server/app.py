@@ -948,6 +948,282 @@ def session_stop():
     return {"ok": True, "was_running": True}
 
 
+# ---------------------------------------------------------------- fast-lane training
+# "Train a new model" from the UI: the pure-torch native trainer on the GPU
+# box's CUDA (scripts/train_search_native.py — the same round trip as
+# scripts/train_search_gpu.sh), monitored from here. The box only trains and
+# logs per-snapshot replays (--defer_progression --renderers none); the pull
+# brings the run dir home and the three.js progression reel + final replay
+# render on this machine, where the web client lives. One run at a time.
+
+TRAIN_FILE = ROOT / ".vesper_train.json"
+TRAIN_LOG = ROOT / ".vesper_train.log"
+TRAIN_ACTIVE = ("launching", "running", "pulling", "rendering")
+# ~10-min demo shape end to end, measured on the L40S at ~107k env-steps/s:
+# 150 iters x 4096 envs ≈ 4.5 min of PPO + ~4 short snapshot evals, then pull +
+# the three.js progression reel on the Mac (~2-3 min). reach_radius 25 and a
+# small starting arena are the demo levers that make a short run actually
+# lethal — clears register early instead of needing the full 1500-iter shape.
+TRAIN_DEFAULTS = {"iters": 150, "num_envs": 4096, "snapshot_secs": 15.0,
+                  "reach_radius": 25.0, "arena_start": 150.0}
+WORLD_NAME = re.compile(r"^[a-z][a-z0-9_]{1,31}$")
+
+_train_thread: threading.Thread | None = None
+_train_stop = threading.Event()
+_train_lock = threading.Lock()
+
+
+class TrainReq(BaseModel):
+    world: str
+    iters: int | None = None
+    num_envs: int | None = None
+    reach_radius: float | None = None
+
+
+def _train_read() -> dict:
+    try:
+        return json.loads(TRAIN_FILE.read_text())
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def _train_update(**kv):
+    st = _train_read()
+    st.update(kv)
+    TRAIN_FILE.write_text(json.dumps(st))
+    return st
+
+
+def _train_note(msg: str):
+    with open(TRAIN_LOG, "a") as f:
+        f.write(msg.rstrip() + "\n")
+
+
+def _rsync(src: str, dst: str, timeout: int = 300):
+    r = subprocess.run(
+        ["rsync", "-az", "-e",
+         f"ssh -i {KEY_FILE} -o BatchMode=yes -o StrictHostKeyChecking=accept-new",
+         "--exclude", "__pycache__", "--exclude", "*.pyc", src, dst],
+        capture_output=True, text=True, timeout=timeout)
+    if r.returncode != 0:
+        raise RuntimeError(f"rsync failed: {r.stderr.strip()[-300:]}")
+
+
+def _run_train(st: dict, reattach: bool = False):
+    """Monitor thread: (launch,) poll the box until the container exits, pull
+    the run dir back, render the three.js progression reel + final replay."""
+    tag = st["tag"]
+    try:
+        if not reattach:
+            ip = _droplet_ip()
+            if not ip:
+                raise RuntimeError("gpu box is offline")
+            _train_note(f"syncing code -> box ({st['world']}, {st['iters']} iters)")
+            for sub in ("vesper", "scripts"):
+                _rsync(f"{ROOT}/{sub}/", f"root@{ip}:{REMOTE_DIR}/{sub}/")
+            cmd = (f"scripts/train_search_native.py --device cuda --map {st['map']}"
+                   f" --iters {st['iters']} --num_envs {st['num_envs']}"
+                   f" --snapshot_every {st['snapshot_every']}"
+                   f" --snapshot_secs {st['snapshot_secs']}"
+                   f" --reach_radius {st['reach_radius']}"
+                   f" --arena_start {TRAIN_DEFAULTS['arena_start']}"
+                   f" --arena_iters {max(1, int(st['iters'] * 0.6))}"
+                   f" --defer_progression --renderers none --tag {tag}")
+            script = ("#!/bin/bash\n"
+                      f"cd /root/{REMOTE_DIR}\n"
+                      f"docker rm -f vsp_{tag} >/dev/null 2>&1\n"
+                      f"docker compose -f docker/compose.yml run --rm --name vsp_{tag} sim "
+                      f"/isaac-sim/python.sh {cmd} > /root/{REMOTE_DIR}/{tag}.log 2>&1\n")
+            rc, out, err = _ssh_script(script, f"/root/{REMOTE_DIR}/{tag}.sh")
+            if rc != 0 or "launched" not in out:
+                raise RuntimeError(f"launch failed: {(err or out).strip()[-300:]}")
+            _train_update(status="running")
+            _train_note("training launched in the vesper-sim container (device cuda)")
+
+        # poll: container alive? which run dir? latest curve row? finished OK?
+        probe = (
+            f"echo A:$(docker ps --format '{{{{.Names}}}}' | grep -cx vsp_{tag}); "
+            f"run=$(grep -oE 'runs/[0-9]{{8}}-[0-9]{{6}}-{tag}' {REMOTE_DIR}/{tag}.log "
+            f"2>/dev/null | head -1); echo R:$run; "
+            f"echo D:$(grep -c '^DONE ' {REMOTE_DIR}/{tag}.log 2>/dev/null); "
+            f"[ -n \"$run\" ] && tail -c 2000 {REMOTE_DIR}/$run/curve.jsonl 2>/dev/null | tail -1; "
+            f"true"
+        )
+        remote_run, seen_alive, done = None, False, False
+        deadline = time.time() + 2 * 3600
+        while time.time() < deadline:
+            if _train_stop.is_set():
+                _ssh(f"docker rm -f vsp_{tag} >/dev/null 2>&1; true")
+                _train_update(status="stopped", finished=time.time())
+                _train_note("stopped by operator")
+                return
+            time.sleep(5)
+            try:
+                rc, out, _ = _ssh(probe, timeout=20)
+            except HTTPException as e:
+                _train_note(f"box probe failed ({e.detail}); retrying")
+                continue
+            if rc != 0:
+                continue
+            alive = False
+            for line in out.splitlines():
+                if line.startswith("A:"):
+                    alive = line[2:].strip() == "1"
+                elif line.startswith("R:") and line[2:].strip():
+                    remote_run = line[2:].strip()
+                elif line.startswith("D:"):
+                    done = line[2:].strip() not in ("", "0")
+                elif line.startswith("{"):
+                    try:
+                        row = json.loads(line)
+                        _train_update(iter=row.get("iter"), metrics={
+                            k: row.get(k) for k in
+                            ("ep_return", "found", "cleared", "coverage")
+                            if isinstance(row.get(k), (int, float))
+                            and math.isfinite(row.get(k))})
+                    except json.JSONDecodeError:
+                        pass
+            seen_alive = seen_alive or alive
+            if alive:
+                continue
+            if done and remote_run:
+                break                                   # training finished cleanly
+            if seen_alive or time.time() - st["started"] > 600:
+                rc, tail, _ = _ssh(f"tail -c 500 {REMOTE_DIR}/{tag}.log 2>/dev/null; true")
+                raise RuntimeError(f"training died on the box: …{tail.strip()[-300:]}")
+        else:
+            raise RuntimeError("training timed out (2 h ceiling)")
+
+        run_id = remote_run.split("/", 1)[1]
+        ip = _droplet_ip()
+        if not ip:
+            raise RuntimeError("gpu box went offline before the pull")
+        _train_update(status="pulling", remote_run=remote_run)
+        _train_note(f"training done -> pulling {remote_run} back")
+        RUNS.mkdir(exist_ok=True)
+        (RUNS / run_id).mkdir(exist_ok=True)
+        _rsync(f"root@{ip}:{REMOTE_DIR}/{remote_run}/", f"{RUNS / run_id}/", timeout=600)
+
+        _train_update(status="rendering", run_id=run_id)
+        py = ROOT / ".venv" / "bin" / "python"
+        py = str(py) if py.exists() else sys.executable
+        with open(TRAIN_LOG, "a") as logf:
+            _train_note("rendering three.js progression reel")
+            subprocess.run([py, "scripts/render_progression.py", f"runs/{run_id}"],
+                           cwd=ROOT, stdout=logf, stderr=subprocess.STDOUT, timeout=1800)
+            # tactical only for the final replay — the three.js showpiece is the
+            # progression reel (its last clip IS the final policy), and a full
+            # chase+fpv export would blow the ~10-min budget on its own
+            if (RUNS / run_id / "replay.json").exists():
+                _train_note("rendering final replay (tactical)")
+                subprocess.run([py, "scripts/render_dispatch.py", f"runs/{run_id}",
+                                "--renderers", "tactical"],
+                               cwd=ROOT, stdout=logf, stderr=subprocess.STDOUT, timeout=1800)
+        ok = (RUNS / run_id / "progression.mp4").exists()
+        _train_update(status="done", finished=time.time(),
+                      progression=f"runs/{run_id}/progression.mp4" if ok else None)
+        _train_note(f"done -> runs/{run_id}"
+                    + ("" if ok else " (progression render FAILED — see log above)"))
+    except Exception as e:                                   # noqa: BLE001
+        _train_update(status="failed", finished=time.time(), error=str(e)[-400:])
+        _train_note(f"FAILED: {e}")
+
+
+def _spawn_train(st: dict, reattach: bool = False):
+    global _train_thread
+    _train_stop.clear()
+    _train_thread = threading.Thread(target=_run_train, args=(st, reattach), daemon=True)
+    _train_thread.start()
+
+
+def _train_active_state() -> dict | None:
+    """The in-flight training run, or None. A run left 'active' by a server
+    restart gets its monitor thread reattached rather than blocking forever."""
+    st = _train_read()
+    if not st or st.get("status") not in TRAIN_ACTIVE:
+        return None
+    if not (_train_thread and _train_thread.is_alive()):
+        _spawn_train(st, reattach=True)
+    return st
+
+
+@app.post("/api/train/start")
+def train_start(req: TrainReq):
+    with _train_lock:
+        active = _train_active_state()
+        if active:
+            raise HTTPException(
+                409, f"a training run is already {active['status']} on "
+                     f"{active.get('world', '?')} — stop it or wait for it to finish")
+        if not WORLD_NAME.match(req.world):
+            raise HTTPException(400, "bad world name")
+        map_rel = f"assets/{req.world}/{req.world}_map.npz"
+        if not (ROOT / map_rel).is_file():
+            raise HTTPException(400, f"{req.world} has no baked map — build the world first")
+        iters = max(50, min(20000, req.iters or TRAIN_DEFAULTS["iters"]))
+        num_envs = max(256, min(8192, req.num_envs or TRAIN_DEFAULTS["num_envs"]))
+        snapshot_every = max(20, iters // 3 // 10 * 10)      # ~4 clips incl. before/final
+        st = {"tag": f"ui-{req.world}", "world": req.world, "map": map_rel,
+              "iters": iters, "num_envs": num_envs, "snapshot_every": snapshot_every,
+              "snapshot_secs": TRAIN_DEFAULTS["snapshot_secs"],
+              "reach_radius": req.reach_radius or TRAIN_DEFAULTS["reach_radius"],
+              "status": "launching",
+              "started": time.time(), "iter": None, "metrics": {}, "run_id": None,
+              "error": None, "finished": None}
+        TRAIN_LOG.write_text("")
+        TRAIN_FILE.write_text(json.dumps(st))
+        _spawn_train(st)
+        return st
+
+
+@app.get("/api/train/worlds")
+def train_worlds():
+    """Trainable worlds for the Train panel: every assets/<name>/ with a baked
+    <name>_map.npz. A cheap glob only — unlike /api/environments it opens no USD
+    stages, so the dropdown populates instantly instead of blocking ~6 s on
+    world-metadata reads."""
+    out = []
+    for d in sorted(ASSETS.iterdir()) if ASSETS.is_dir() else []:
+        if not d.is_dir():
+            continue
+        mp = d / f"{d.name}_map.npz"
+        if mp.is_file():
+            out.append({"name": d.name, "map": f"assets/{d.name}/{d.name}_map.npz"})
+    return out
+
+
+@app.get("/api/train/status")
+def train_status():
+    st = _train_read()
+    if st and st.get("status") in TRAIN_ACTIVE:
+        with _train_lock:
+            _train_active_state()                            # reattach after a restart
+    tail = ""
+    if TRAIN_LOG.exists():
+        try:
+            tail = TRAIN_LOG.read_text()[-800:]
+        except OSError:
+            pass
+    return {"running": bool(st and st.get("status") in TRAIN_ACTIVE), **st, "log": tail}
+
+
+@app.post("/api/train/stop")
+def train_stop():
+    st = _train_read()
+    if not st or st.get("status") not in TRAIN_ACTIVE:
+        return {"ok": True, "was_running": False}
+    if st["status"] in ("pulling", "rendering"):
+        raise HTTPException(409, "training already finished — the run is being pulled/rendered")
+    _train_stop.set()
+    if not (_train_thread and _train_thread.is_alive()):     # no monitor to do it for us
+        try:
+            _ssh(f"docker rm -f vsp_{st['tag']} >/dev/null 2>&1; true")
+        except HTTPException:
+            pass
+        _train_update(status="stopped", finished=time.time())
+    return {"ok": True, "was_running": True}
+
+
 # ---------------------------------------------------------------- jobs (Isaac lane)
 # Everything below launches on the GPU box — Isaac only, chosen explicitly from
 # the Models/Environments pages. The demo's live session is /api/session above.

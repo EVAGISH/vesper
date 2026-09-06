@@ -189,7 +189,9 @@ export function parseJSONL(text: string): Record<string, unknown>[] {
     const s = line.trim();
     if (!s) continue;
     try {
-      const v = JSON.parse(s);
+      // python's json.dump writes bare NaN/Infinity (curve.jsonl from the
+      // trainers); JSON.parse rejects them, so map to null before parsing
+      const v = JSON.parse(s.replace(/\b(?:-?Infinity|NaN)\b/g, "null"));
       if (v && typeof v === "object" && !Array.isArray(v)) out.push(v);
     } catch {
       /* tolerate a torn tail line while a run is still writing */

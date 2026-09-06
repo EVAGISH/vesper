@@ -15,7 +15,8 @@
 import { useEffect, useRef, useState } from "react";
 import * as THREE from "three";
 import {
-  buildWorldScene, CAM_PITCH_RAD, droneModel, tankModel, w2t, type World3D,
+  buildWorldScene, CAM_PITCH_RAD, droneModel, preloadVehicle, vehicleModel, w2t,
+  type World3D,
 } from "@/lib/scene3d";
 
 type Replay = {
@@ -153,7 +154,8 @@ export default function RenderPage() {
       const drones = Array.from({ length: nDrones }, () => droneModel());
       drones.forEach((d) => scene.add(d));
       const nT = rep.targets;
-      const tanks = Array.from({ length: nT }, () => tankModel());
+      await preloadVehicle();              // BTR in frame 0, deterministically
+      const tanks = Array.from({ length: nT }, () => vehicleModel());
       const tankMats: THREE.MeshStandardMaterial[][] = tanks.map((tk) => {
         const ms: THREE.MeshStandardMaterial[] = [];
         tk.traverse((o) => {
@@ -171,7 +173,7 @@ export default function RenderPage() {
         color: 0xff8a2a, transparent: true, opacity: 0.9, fog: false,
       });
       const smokeM = new THREE.MeshBasicMaterial({
-        color: 0x22201d, transparent: true, opacity: 0.65,
+        color: 0x4a453e, transparent: true, opacity: 0.38, depthWrite: false,
       });
       const boomG = new THREE.IcosahedronGeometry(1, 1);
       const booms = Array.from({ length: nT }, () => {
@@ -188,7 +190,13 @@ export default function RenderPage() {
       const lastKill = kills.length ? kills[kills.length - 1].t : null;
       const tEnd = full || lastKill === null ? tLast : Math.min(tLast, lastKill + 4);
       const hero = kills.length ? kills[kills.length - 1].striker : 0;
-      const heroDeathT = kills.length ? kills[kills.length - 1].t : Infinity;
+      const heroKill = kills.length ? kills[kills.length - 1] : null;
+      // the log registers the kill at the kill-sphere (up to ~25 m out); the
+      // clip carries the airframe the rest of the way in, so the impact is ON
+      // the hull, on camera — presentation only, the outcome is the log's
+      const DIVE_S = heroKill ? 0.35 : 0;
+      const heroDeathT = heroKill ? heroKill.t + DIVE_S : Infinity;
+      const killDelay = (kk: Kill) => (kk === heroKill ? DIVE_S : 0);
       const total = Math.max(1, Math.ceil(tEnd * fps));
 
       const frameDt = F.length > 1 ? (F[F.length - 1].t - t0) / (F.length - 1) : 1;
@@ -197,6 +205,18 @@ export default function RenderPage() {
         const j = Math.floor(f);
         return { a: F[j], b: F[Math.min(j + 1, F.length - 1)], f: f - j, j };
       };
+
+      // the hero's logged position at the moment its kill registered — the
+      // start of the synthetic terminal segment
+      const heroPosAtKill = new THREE.Vector3();
+      if (heroKill) {
+        const { a, b, f } = sample(heroKill.t);
+        const pa = a.d[hero], pb = b.d[hero];
+        heroPosAtKill.copy(w2t(
+          pa[0] + (pb[0] - pa[0]) * f,
+          pa[1] + (pb[1] - pa[1]) * f,
+          pa[2] + (pb[2] - pa[2]) * f));
+      }
 
       // sequential camera state (the driver always seeks 0..N in order)
       const chaseDir = new THREE.Vector2(1, 0);
@@ -225,6 +245,20 @@ export default function RenderPage() {
           drones[d].rotation.set(0, yaw, -Math.min(0.4, sp * 0.022), "YXZ");
           drones[d].visible = !deadSet.has(d);
         }
+        // synthetic terminal segment: carry the hero from the kill-sphere edge
+        // into the hull, nose-first, so the impact happens on camera
+        if (heroKill && t >= heroKill.t && t < heroDeathT) {
+          const e = (t - heroKill.t) / DIVE_S;
+          const to = tanks[heroKill.k].position.clone().add(new THREE.Vector3(0, 1.1, 0));
+          drones[hero].visible = true;
+          drones[hero].position.copy(heroPosAtKill.clone().lerp(to, e));
+          const dir = to.clone().sub(heroPosAtKill);
+          drones[hero].rotation.set(
+            0, Math.atan2(-dir.z, dir.x),
+            -Math.atan2(-dir.y, Math.hypot(dir.x, dir.z)), "YXZ");
+        } else if (heroKill && t >= heroDeathT) {
+          drones[hero].visible = false;
+        }
 
         for (let k = 0; k < nT; k++) {
           const ta = a.tg[k], tb = b.tg[k];
@@ -235,7 +269,7 @@ export default function RenderPage() {
           if (mv > 0.05) tankHdg[k] = Math.atan2(tb[1] - ta[1], tb[0] - ta[0]);
           tanks[k].rotation.y = tankHdg[k];
           const kill = kills.find((kk) => kk.k === k);
-          const age = kill ? t - kill.t : -1;
+          const age = kill ? t - kill.t - killDelay(kill) : -1;
           const wrecked = kill !== undefined && age >= 0;
           tankMats[k].forEach((m, mi) => {
             m.color.copy(tankBase[k][mi]);
@@ -254,7 +288,7 @@ export default function RenderPage() {
             smoke.visible = true;
             smoke.position.copy(tanks[k].position).add(new THREE.Vector3(0, 3 + 16 * e, 0));
             smoke.scale.setScalar(3 + 9 * e);
-            (smoke.material as THREE.MeshBasicMaterial).opacity = 0.6 * (1 - e);
+            (smoke.material as THREE.MeshBasicMaterial).opacity = 0.36 * (1 - e);
           } else smoke.visible = false;
         }
 
@@ -277,7 +311,7 @@ export default function RenderPage() {
             // terminal guidance: through the hero's last 2.5 s the seeker
             // settles on the target, so the impact happens ON camera
             const dive = kills.find(
-              (kk) => kk.striker === hero && t > kk.t - 2.5 && t <= kk.t + 0.02);
+              (kk) => kk.striker === hero && t > kk.t - 2.5 && t <= kk.t + DIVE_S + 0.02);
             if (dive) {
               const wgt = Math.min(1, (t - (dive.t - 2.5)) / 1.8);
               look.lerp(tanks[dive.k].position, wgt);
@@ -302,10 +336,15 @@ export default function RenderPage() {
               chaseDir.y = chaseDir.y * 0.9 + (vy / sp) * 0.1;
               chaseDir.normalize();
             }
-            const back = w2t(-chaseDir.x * 22, -chaseDir.y * 22, 9);
+            // close in for the terminal dive: 22 m back / 9 m up cruising,
+            // riding ~8 m off the airframe by the time it hits
+            const dv = heroKill
+              ? Math.min(1, Math.max(0, (t - (heroKill.t - 2.5)) / 2.5)) : 0;
+            const back = w2t(-chaseDir.x * (22 - 13 * dv), -chaseDir.y * (22 - 13 * dv),
+                             9 - 5.5 * dv);
             const goal = hp.clone().add(back);
             if (!camInit) { camera.position.copy(goal); camInit = true; }
-            else camera.position.lerp(goal, 0.14);
+            else camera.position.lerp(goal, 0.14 + 0.12 * dv);
             camera.up.set(0, 1, 0);
             // the hero's own strike pulls the gaze to its target so the dive
             // reads; other drones' kills don't yank the camera around

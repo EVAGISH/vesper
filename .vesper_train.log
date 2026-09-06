@@ -1,0 +1,33 @@
+syncing code -> box (cornell, 150 iters)
+training launched in the vesper-sim container (device cuda)
+training done -> pulling runs/20260906-150543-ui-cornell back
+rendering three.js progression reel
+[progression] booting next start on :3199
+[export] page server: http://127.0.0.1:3199
+[export] world: 360 frames @ 24 fps (15.0s clip, hero drone 0, 0 strikes) -> /Users/eashan.vagish/Documents/vesper/runs/20260906-150543-ui-cornell/progression/0000/clip.mp4
+[export]   200/360 (12 fps capture)
+[export] world done in 25.4s
+[export] total 26.6s
+[progression] clip 0000 ready (ITER 0000 / 0150)
+[export] page server: http://127.0.0.1:3199
+[export] world: 360 frames @ 24 fps (15.0s clip, hero drone 0, 0 strikes) -> /Users/eashan.vagish/Documents/vesper/runs/20260906-150543-ui-cornell/progression/0050/clip.mp4
+[export]   200/360 (14 fps capture)
+[export] world done in 22.2s
+[export] total 23.0s
+[progression] clip 0050 ready (ITER 0050 / 0150)
+[export] page server: http://127.0.0.1:3199
+[export] world: 83 frames @ 24 fps (3.4s clip, hero drone 0, 0 strikes) -> /Users/eashan.vagish/Documents/vesper/runs/20260906-150543-ui-cornell/progression/0100/clip.mp4
+[export] world done in 8.8s
+[export] total 9.4s
+[progression] clip 0100 ready (ITER 0100 / 0150)
+[export] page server: http://127.0.0.1:3199
+[export] world: 360 frames @ 24 fps (15.0s clip, hero drone 0, 0 strikes) -> /Users/eashan.vagish/Documents/vesper/runs/20260906-150543-ui-cornell/progression/final/clip.mp4
+[export]   200/360 (11 fps capture)
+[export] world done in 27.0s
+[export] total 27.8s
+[progression] clip final ready (FINAL POLICY)
+[progression] 4 clips -> /Users/eashan.vagish/Documents/vesper/runs/20260906-150543-ui-cornell/progression.mp4 in 93s
+rendering final replay (tactical)
+wrote runs/20260906-150543-ui-cornell/tactical.mp4 (1124 frames, 47s)
+[dispatch] tactical finished in 90s
+done -> runs/20260906-150543-ui-cornell
