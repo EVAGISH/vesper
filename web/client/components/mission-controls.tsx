@@ -82,6 +82,15 @@ export function StartMissionButton({
   );
 }
 
+// Renderer FLAG for a recorded sortie — which replay lane(s) the keeper kicks
+// off. three.js is the default: real-time on this machine, same scene as the
+// live 3D view. Isaac remains the photoreal hero-shot lane on the GPU box.
+const RENDER_CHOICES: { value: string; label: string; renderers: string }[] = [
+  { value: "three", label: "3D (fast, on-device)", renderers: "three,tactical" },
+  { value: "isaac", label: "photoreal (isaac, box, slow)", renderers: "isaac,tactical" },
+  { value: "tactical", label: "tactical only", renderers: "tactical" },
+];
+
 /** Compact header controls while the native session is live: record + stop. */
 export function LiveMissionControls({
   ip,
@@ -93,15 +102,17 @@ export function LiveMissionControls({
   const [rec, setRec] = useState<"idle" | "busy" | "saved" | "failed">("idle");
   const [savedRun, setSavedRun] = useState<string | null>(null);
   const [stopping, setStopping] = useState(false);
+  const [renderer, setRenderer] = useState("three");
 
   const record = async () => {
     setRec("busy");
     setSavedRun(null);
     try {
+      const choice = RENDER_CHOICES.find((c) => c.value === renderer) ?? RENDER_CHOICES[0];
       const r = await fetch(`http://${ip}:8180/command`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ kind: "record" }),
+        body: JSON.stringify({ kind: "record", renderers: choice.renderers }),
       });
       if (!r.ok) throw new Error();
       // the dump is async in the session; grab the run id once it lands
@@ -128,11 +139,24 @@ export function LiveMissionControls({
 
   return (
     <span className="flex items-center gap-3">
+      <label className="flex items-center gap-1 font-mono text-[10px] normal-case tracking-[0.08em] text-muted-foreground">
+        renderer
+        <select
+          value={renderer}
+          onChange={(e) => setRenderer(e.target.value)}
+          className="cursor-pointer border border-border/60 bg-background/60 px-1 py-0.5 font-mono text-[10px] text-secondary-foreground"
+          title="which replay renderer a recorded sortie kicks off"
+        >
+          {RENDER_CHOICES.map((c) => (
+            <option key={c.value} value={c.value}>{c.label}</option>
+          ))}
+        </select>
+      </label>
       <button
         onClick={record}
         disabled={rec !== "idle"}
         className="cursor-pointer font-mono text-[10px] font-semibold normal-case tracking-[0.08em] text-[#d03b3b] hover:text-[#ff6b5b] disabled:cursor-default"
-        title="save the mission so far to Runs (replay + tactical video)"
+        title="save the mission so far to Runs (replay + the selected render lane)"
       >
         {rec === "busy"
           ? "◉ RECORDING…"

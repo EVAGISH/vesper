@@ -138,6 +138,8 @@ const ARTIFACT_LABELS: Record<string, string> = {
   "chase.mp4": "chase cam",
   "fpv.mp4": "fpv",
   "tactical.mp4": "tactical replay",
+  "three.mp4": "chase — 3d replay",
+  "three_fpv.mp4": "drone fpv — 3d replay",
   "isaac_fpv.mp4": "drone fpv — photoreal (isaac rtx)",
   "isaac.mp4": "chase — photoreal (isaac rtx)",
   "track.png": "track map",

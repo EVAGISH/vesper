@@ -209,12 +209,18 @@
       <div>
         <div class="eyebrow">Vesper · DN Hacks</div>
         <h1>The drone war is a comms war.</h1>
-        <p class="sub" style="font-size:clamp(19px,2.3vw,28px);color:var(--ink)">And right now, the state of the art is <strong class="red">a leash.</strong></p>
+        <p class="sub" style="font-size:clamp(19px,2.3vw,28px);color:var(--ink)">Jam the link and an FPV is <strong class="red">a falling brick.</strong> So they fly on 20 km of fiber — a leash. <strong>You can't scale a leash.</strong></p>
         <p class="cap" style="margin-top:26px;color:var(--muted)">Eashan Vagish · Theo Oltean</p>
       </div>
       <div>
-        <!-- original illustration: fiber-optic FPV drone -->
-        <svg viewBox="0 0 640 400" role="img" aria-label="Diagram: a drone flying on a fiber-optic tether under a jammed radio spectrum">
+        <div class="shot" style="aspect-ratio:630/360;width:100%">
+          <img src="assets/ukraine_fiber.png" alt="A Ukrainian village blanketed in glinting fiber-optic threads left by FPV drones"
+               style="width:100%;height:100%;left:0;top:0">
+          <div class="tag"><b>UKRAINE</b> · every glinting thread is one drone sortie's fiber, left where it fell</div>
+        </div>
+        <p class="cap" style="margin-top:12px">A village near the front, silvered with spent fiber-optic cable — drones flown by wire because radio is dead. <span style="color:var(--amber)">War-reporting photo — credit the source.</span></p>
+        <!-- original illustration kept for reference, now unused -->
+        <svg style="display:none" viewBox="0 0 640 400" role="img" aria-label="Diagram: a drone flying on a fiber-optic tether under a jammed radio spectrum">
           <g stroke="#e0483b" fill="none" opacity=".8">
             <path d="M120 118 q14 -16 0 -32 M136 126 q24 -24 0 -48 M152 134 q34 -32 0 -64" stroke-width="1.6"/>
             <path d="M520 108 q-14 -16 0 -32 M504 116 q-24 -24 0 -48 M488 124 q-34 -32 0 -64" stroke-width="1.6"/>
@@ -250,69 +256,87 @@
     </div></div>
   </section>
 
-  <!-- 2 · PROBLEM -->
-  <section class="slide s2" data-title="problem">
-    <div class="pad"><div class="wrap">
-      <div class="eyebrow">The Problem</div>
-      <h2>Out there, anything that phones home <span class="red">dies.</span></h2>
-      <div class="facts">
-        <div class="fact">
-          <div class="shot" aria-label="RF coverage model of the Kramatorsk AO with jammer shadow">
-            <!-- live_tactical.png 1680x1050, crop x120 y330 w520 h325 -->
-            <img src="assets/live_tactical.png" alt="Vesper RF coverage model showing a jammed zone over the Kramatorsk AO"
-                 style="width:323%;height:323%;left:-23.1%;top:-101.5%">
-            <div class="tag"><b>JAMMED</b> · our RF model of the demo AO</div>
-          </div>
-          <div class="k">No Spectrum</div>
-          <div class="v"><b>Key up a radio, become a target.</b> The jammers own the air.</div>
-        </div>
-        <div class="fact">
-          <div class="diag" aria-label="Diagram of GPS denial">
-            <svg viewBox="0 0 200 120" role="img" aria-label="Crossed-out satellite: GPS denied">
-              <g stroke="#93a08f" stroke-width="2" fill="none">
-                <rect x="82" y="34" width="36" height="22" rx="3"/>
-                <path d="M62 38 l16 8 M138 38 l-16 8 M62 58 l16 -6 M138 58 l-16 -6"/>
-                <rect x="46" y="30" width="18" height="30" rx="2"/><rect x="136" y="30" width="18" height="30" rx="2"/>
-                <path d="M100 56 v14" opacity=".7"/>
-                <path d="M88 78 q12 10 24 0 M80 88 q20 16 40 0" opacity=".5"/>
-              </g>
-              <path d="M40 100 L160 16" stroke="#e0483b" stroke-width="4"/>
-            </svg>
-          </div>
-          <div class="k">No GPS</div>
-          <div class="v"><b>Every satellite fix is a lie.</b> Fly by what you see — or don't fly.</div>
-        </div>
-        <div class="fact">
-          <div class="shot" aria-label="Armor concealed at a treeline, drone view">
-            <!-- isaac_kill.png 900x900, crop x330 y400 w570 h356 -->
-            <img src="assets/isaac_kill.png" alt="Photoreal drone view of armor tucked against a treeline"
-                 style="width:157.9%;height:252.8%;left:-57.9%;top:-112.4%">
-            <div class="tag"><b>HIDDEN</b> · armor under canopy</div>
-          </div>
-          <div class="k">No Easy Targets</div>
-          <div class="v"><b>The armor isn't on anyone's map.</b> It's under the trees, waiting.</div>
-        </div>
-      </div>
-      <p class="rule">And the line that never moves: <span>a human pulls the trigger. Every time.</span></p>
-    </div></div>
-  </section>
-
   <!-- 3 · REVEAL -->
   <section class="slide s3" data-title="vesper">
     <div class="bleed"><img src="assets/tac1.png" alt="Vesper tactical console: coverage sweep over Kramatorsk with a detected tank"></div>
     <div class="pad flex"><div class="wrap bottomer">
       <div class="eyebrow">Vesper</div>
       <h1>You can't scale a cord.<br>We cut it — <span class="accent">with software.</span></h1>
-      <p class="sub"><strong>Sixteen drones that hunt in radio silence</strong> — and everything they need fits on a laptop we could carry into the field. No datacenter. No datalink. No leash.</p>
-      <p class="cap" style="margin-top:14px">The Vesper console — live sortie over real Kramatorsk terrain, running on this Mac.</p>
+      <p class="sub"><strong>Vesper flies without the link.</strong> Small models, trained for one job, running on the drone itself — search, detect, navigate. Jam everything: the hunt doesn't stop.</p>
+      <p class="cap" style="margin-top:14px">Sixteen autonomous drones over real Kramatorsk terrain — the whole stack running on this Mac.</p>
+    </div></div>
+  </section>
+
+  <!-- 6 · THE TWIN -->
+  <section class="slide s6t" data-title="twin">
+    <div class="bleed"><img src="assets/twin_view0.png" alt="Kramatorsk reconstructed in 3D: city, river and terrain, fully modeled"></div>
+    <div class="pad flex"><div class="wrap bottomer">
+      <div class="eyebrow">The Pipeline</div>
+      <h2>Coordinates in. <span class="accent">A hunting swarm out.</span></h2>
+      <p class="sub"><strong>This background is not a photo — it's our sim.</strong> We rebuild the real battlefield in 3D — satellite, lidar, OpenStreetMap — fly a million RL sorties inside it, and ship the weights to the drone.</p>
+      <div class="pipe">
+        <div class="pnode">
+          <div class="pimg coords">48.7106°N&nbsp;37.5762°E</div>
+          <div class="pl"><b>01</b> · type coordinates</div>
+        </div>
+        <div class="parr">▶</div>
+        <div class="pnode hot">
+          <div class="pimg"><!-- twin_view1 1280x720 full -->
+            <img src="assets/twin_view1.png" alt="The real city reconstructed in 3D" style="width:100%;height:100%;left:0;top:0">
+          </div>
+          <div class="pl"><b>02</b> · reconstruct in 3D</div>
+        </div>
+        <div class="parr">▶</div>
+        <div class="pnode">
+          <div class="pimg"><!-- prog_final 1280x720 full -->
+            <img src="assets/prog_final.png" alt="Reinforcement-learning training run in the twin" style="width:100%;height:100%;left:0;top:0">
+          </div>
+          <div class="pl"><b>03</b> · train — RL in the twin</div>
+        </div>
+        <div class="parr">▶</div>
+        <div class="pnode">
+          <div class="pimg"><!-- tac1 console crop x180 y120 w800 h450 -->
+            <img src="assets/tac1.png" alt="The live console flying the trained policy" style="width:210%;height:233.3%;left:-22.5%;top:-26.7%">
+          </div>
+          <div class="pl"><b>04</b> · deploy to the drone</div>
+        </div>
+      </div>
+      <p class="cap" style="margin-top:14px">Kramatorsk — reconstructed automatically. The swarm trains, flies, and dies in this world before it ever flies the real one.</p>
+    </div></div>
+  </section>
+
+  <!-- 7 · THE REPS -->
+  <section class="slide s6" data-title="trained">
+    <div class="pad"><div class="wrap">
+      <div class="eyebrow">Inside Step 03 — Training</div>
+      <h2>A million sorties <span class="accent">before the first real one.</span></h2>
+      <div class="row">
+        <div>
+          <div class="shot"><img src="assets/prog_0000.png" alt="Training iteration 0: drone still wandering at 43 seconds" style="width:100%;height:100%;left:0;top:0">
+            <div class="tag"><b>ITER 0</b> · 43 seconds in — still lost</div>
+          </div>
+        </div>
+        <div>
+          <div class="shot"><img src="assets/prog_0040.png" alt="Training iteration 40: covering ground, first neutralization" style="width:100%;height:100%;left:0;top:0">
+            <div class="tag"><b>ITER 40</b> · covering ground, first kill</div>
+          </div>
+        </div>
+        <div>
+          <div class="shot"><img src="assets/prog_final.png" alt="Final policy: target neutralized at 11 seconds" style="width:100%;height:100%;left:0;top:0">
+            <div class="tag"><b>FINAL</b> · first kill in 12 seconds</div>
+          </div>
+        </div>
+      </div>
+      <div class="arrowline">lost <span>────▶</span> methodical <span>────▶</span> <b>lethal</b> · same policy, same terrain — the only thing that changed is training</div>
+      <p class="sub" style="margin-top:18px">Millions of rollouts in the twin — nobody wrote a waypoint, nobody scripted a behavior. <strong>Then the weights ship straight to the drone.</strong> What you're about to see live is that policy flying.</p>
     </div></div>
   </section>
 
   <!-- 4 · THE HUNT -->
   <section class="slide s4" data-title="loop">
     <div class="pad"><div class="wrap">
-      <div class="eyebrow">The Hunt</div>
-      <h2>Find it. Call it in. Get the nod. <span class="red">Kill it.</span></h2>
+      <div class="live-cue"><span class="rec"></span>Going live · Kramatorsk AO · this Mac</div>
+      <h2>Watch it hunt. <span style="color:var(--muted);font-weight:650">Find it. Call it in. Get the nod. <span class="red">Kill it.</span></span></h2>
       <div class="loop">
         <div class="step">
           <div class="shot"><!-- tac1 1680x1050 crop x300 y100 w540 h540 -->
@@ -354,133 +378,16 @@
     </div></div>
   </section>
 
-  <!-- 5 · LIVE -->
-  <section class="slide s5" data-title="live">
-    <div class="bleed dim"><img src="assets/live_tactical.png" alt="" aria-hidden="true"></div>
-    <div class="pad"><div class="wrap">
-      <div class="live-cue"><span class="rec"></span>Going live · Kramatorsk AO · this Mac</div>
-      <h1>Watch it hunt.</h1>
-      <p class="sub" style="color:var(--ink);font-size:clamp(18px,2.2vw,26px)">Sixteen drones. Three hidden tanks. Most of the AO jammed.<br>Nothing dies until <span class="accent">we</span> say so.</p>
-    </div></div>
-  </section>
-
-  <!-- 6 · THE TWIN -->
-  <section class="slide s6t" data-title="twin">
-    <div class="bleed"><img src="assets/twin_view0.png" alt="Kramatorsk reconstructed in 3D: city, river and terrain, fully modeled"></div>
-    <div class="pad flex"><div class="wrap bottomer">
-      <div class="eyebrow">The Pipeline · 01 — Reconstruct</div>
-      <h2>We cloned the battlefield.</h2>
-      <p class="sub"><strong>This background is not a photo — it's our sim.</strong> Type coordinates, and the pipeline reconstructs the real city in 3D from public satellite and terrain — every roof raised, every canopy grown, exactly where the real ones stand. Hours, not months.</p>
-      <div class="pipe">
-        <div class="pnode">
-          <div class="pimg coords">48.7106°N&nbsp;37.5762°E</div>
-          <div class="pl"><b>01</b> · type coordinates</div>
-        </div>
-        <div class="parr">▶</div>
-        <div class="pnode">
-          <div class="pimg"><!-- tac1 AO map crop x1112 y150 w448 h252 -->
-            <img src="assets/tac1.png" alt="Public satellite imagery of the AO" style="width:375%;height:416.7%;left:-248.2%;top:-59.5%">
-          </div>
-          <div class="pl"><b>02</b> · pull satellite + terrain</div>
-        </div>
-        <div class="parr">▶</div>
-        <div class="pnode hot">
-          <div class="pimg"><!-- twin_view1 1280x720 full -->
-            <img src="assets/twin_view1.png" alt="The city reconstructed in 3D from another angle" style="width:100%;height:100%;left:0;top:0">
-          </div>
-          <div class="pl"><b>03</b> · reconstruct in 3D</div>
-        </div>
-        <div class="parr">▶</div>
-        <div class="pnode">
-          <div class="pimg"><!-- fpv_mid 900x900 crop to 16:9 -->
-            <img src="assets/fpv_mid.png" alt="Drone's-eye view flying inside the reconstructed world" style="width:100%;height:177.9%;left:0;top:-35.6%">
-          </div>
-          <div class="pl"><b>04</b> · fly it — native sim</div>
-        </div>
-      </div>
-      <p class="cap" style="margin-top:14px">Kramatorsk — reconstructed automatically by our pipeline. The swarm trains, flies, and dies in this world.</p>
-    </div></div>
-  </section>
-
-  <!-- 7 · THE REPS -->
-  <section class="slide s6" data-title="trained">
-    <div class="pad"><div class="wrap">
-      <div class="eyebrow">The Pipeline · 02 — Train</div>
-      <h2>A million sorties <span class="accent">before the first real one.</span></h2>
-      <div class="row">
-        <div>
-          <div class="shot"><img src="assets/prog_0000.png" alt="Training iteration 0: drone still wandering at 43 seconds" style="width:100%;height:100%;left:0;top:0">
-            <div class="tag"><b>ITER 0</b> · 43 seconds in — still lost</div>
-          </div>
-        </div>
-        <div>
-          <div class="shot"><img src="assets/prog_0040.png" alt="Training iteration 40: covering ground, first neutralization" style="width:100%;height:100%;left:0;top:0">
-            <div class="tag"><b>ITER 40</b> · covering ground, first kill</div>
-          </div>
-        </div>
-        <div>
-          <div class="shot"><img src="assets/prog_final.png" alt="Final policy: target neutralized at 11 seconds" style="width:100%;height:100%;left:0;top:0">
-            <div class="tag"><b>FINAL</b> · first kill in 12 seconds</div>
-          </div>
-        </div>
-      </div>
-      <div class="arrowline">lost <span>────▶</span> methodical <span>────▶</span> <b>lethal</b> · same policy, same terrain — the only thing that changed is training</div>
-      <p class="sub" style="margin-top:18px">Millions of rollouts in the twin. Nobody wrote a waypoint. Nobody scripted a behavior. <strong>Reward did the teaching — the kill lives in the weights.</strong></p>
-    </div></div>
-  </section>
-
-  <!-- 8 · THE STACK -->
-  <section class="slide s9" data-title="stack">
-    <div class="bleed dim"><img src="assets/twin_view1.png" alt="" aria-hidden="true"></div>
-    <div class="pad"><div class="wrap">
-      <div class="eyebrow">The Pipeline · Under the Hood</div>
-      <h2>Open data in. <span class="accent">A hunting swarm out.</span></h2>
-      <p class="sub">Every source is public. Every algorithm is ours. Running today — not a roadmap.</p>
-      <div class="cols">
-        <div class="panel">
-          <h3>Data In</h3>
-          <div class="row"><span class="k">ESRI WORLD IMAGERY · NAIP</span><span class="v">orthophoto ground truth, down to 1 m</span></div>
-          <div class="row"><span class="k">USGS 3DEP LIDAR · COPERNICUS GLO-30</span><span class="v">elevation — 1 m US, 30 m anywhere on Earth</span></div>
-          <div class="row"><span class="k">DRONE-SURVEY DSMs</span><span class="v">OpenDroneMap photogrammetry, ingested as GeoTIFF</span></div>
-          <div class="row"><span class="k">OPENSTREETMAP · OVERPASS</span><span class="v">building footprints + heights, roads, rail, water, forest</span></div>
-        </div>
-        <div class="panel alg">
-          <h3>What We Do With It</h3>
-          <div class="row"><span class="k">TERRAIN MESHING</span><span class="v">DEM/DSM → collidable ground, filtered and true to relief</span></div>
-          <div class="row"><span class="k">FOOTPRINT EXTRUSION</span><span class="v">OSM tags → textured 3D buildings, physics included</span></div>
-          <div class="row"><span class="k">PROCEDURAL CANOPY</span><span class="v">60k solid trees a drone cannot cheat through — one fetch, endless world variants</span></div>
-          <div class="row"><span class="k">RF SHADOW MODEL</span><span class="v">baked jammer coverage raster — comms is terrain too</span></div>
-          <div class="row"><span class="k">PPO · REINFORCEMENT LEARNING</span><span class="v">reward-shaped search policy, millions of sim steps, on-device</span></div>
-        </div>
-      </div>
-    </div></div>
-  </section>
-
-  <!-- 9 · PHOTOREAL AFTER-ACTION -->
-  <section class="slide s7" data-title="photoreal">
-    <div class="bleed">
-      <video id="fpv" src="assets/isaac_fpv.mp4" muted loop playsinline preload="auto" poster="assets/isaac_kill.png"></video>
-      <img class="print-poster" src="assets/fpv_mid.png" alt="Photoreal drone's-eye view over the reconstructed town">
-    </div>
-    <div class="pad flex"><div class="wrap bottomer">
-      <div class="eyebrow">After Action</div>
-      <h1>Then fly it back — <span class="accent">through the drone's eyes.</span></h1>
-      <p class="sub"><strong>Every sortie replays photoreal</strong> in Isaac Sim — the same flight, frame for frame, from search to strike.</p>
-      <p class="cap" style="margin-top:12px">Isaac RTX replay of the recorded strike sortie — simulation render, not combat footage.</p>
-    </div></div>
-    <div class="inset">
-      <img src="assets/runs_page.png" alt="Run detail page: photoreal chase and FPV replays beside the tactical replay and trajectory">
-      <div class="cap">One click in the console: tactical ▸ trajectory ▸ photoreal</div>
-    </div>
-  </section>
-
   <!-- 9 · CLOSE -->
   <section class="slide s8" data-title="close">
-    <div class="bleed dim"><img src="assets/fpv_mid.png" alt="" aria-hidden="true"></div>
-    <div class="pad"><div class="wrap">
+    <div class="bleed">
+      <video id="fpv" src="assets/kill_fpv.mp4" muted loop playsinline preload="auto" poster="assets/kill_dive.png"></video>
+      <img class="print-poster" src="assets/kill_dive.png" alt="The strike drone diving onto the tank, photoreal render">
+    </div>
+    <div class="pad flex"><div class="wrap bottomer">
       <div class="eyebrow">Vesper</div>
       <h1>Point it at any coordinates <span class="accent">on Earth.</span></h1>
-      <p class="sub">Kramatorsk today. Anywhere tomorrow. The twin builds itself — the swarm trains overnight.</p>
+      <p class="sub"><strong>This is the strike — through the drone's own eyes.</strong> Photoreal replay of a real run: dive, detonation, done. Kramatorsk today. Anywhere tomorrow.</p>
       <div class="close-line">
         <span><b>Edge</b>-autonomous — runs on a Mac</span>
         <span><b>Comms</b>-aware, jam-resilient</span>
@@ -507,8 +414,13 @@
   const slides=[...document.querySelectorAll('.slide')];
   const dotsBox=document.getElementById('dots');
   const cur=document.getElementById('cur'),tot=document.getElementById('tot');
-  const fpv=document.getElementById('fpv');
+  let fpv=document.getElementById('fpv');
   const reduced=matchMedia('(prefers-reduced-motion: reduce)').matches;
+  if(fpv && new URLSearchParams(location.search).has('still')){
+    const im=document.createElement('img');
+    im.src=fpv.getAttribute('poster'); im.alt=''; im.style.cssText='width:100%;height:100%;object-fit:cover';
+    fpv.replaceWith(im); fpv=null;
+  }
   let i=0; tot.textContent=String(slides.length).padStart(2,'0');
   slides.forEach((_,n)=>{const d=document.createElement('i');d.tabIndex=0;d.setAttribute('role','button');
     d.setAttribute('aria-label','Go to slide '+(n+1));
@@ -519,7 +431,7 @@
     slides.forEach((s,k)=>s.classList.toggle('on',k===i));
     dots.forEach((d,k)=>d.classList.toggle('on',k===i));
     cur.textContent=String(i+1).padStart(2,'0');
-    if(fpv){ if(slides[i].dataset.title==='photoreal' && !reduced){fpv.currentTime=0;fpv.play().catch(()=>{});} else {fpv.pause();} }
+    if(fpv){ if(slides[i].contains(fpv) && !reduced){fpv.currentTime=0;fpv.play().catch(()=>{});} else {fpv.pause();} }
   }
   addEventListener('keydown',e=>{
     if(e.key==='ArrowRight'||e.key===' '||e.key==='PageDown'){e.preventDefault();go(i+1);}

@@ -45,6 +45,9 @@ parser.add_argument("--no_expend", action="store_true",
 parser.add_argument("--fleet", action="store_true",
                     help="demo shape: all drones hunt one shared vehicle set; "
                          "score fleet-level distinct kills over --episodes sorties")
+parser.add_argument("--shared_coverage", action="store_true",
+                    help="VES-24: union the group's recency grid into each drone's actor obs "
+                         "so the frontier policy self-spreads (fleet only; deploy-side, no retrain)")
 parser.add_argument("--out", default=None)
 args = parser.parse_args()
 
@@ -70,13 +73,30 @@ if ck["obs_dim"] != env.num_obs:
 ac, norm = load_policy(ck, env.device)
 
 
-@torch.no_grad()
-def policy(o):
-    return ac.actor(norm(o))
-
-
 N, K = env.num_envs, env.k
 dev = env.device
+_G = env.task.cfg.grid
+_REC0, _REC1 = 12 + 8 * K, 12 + 8 * K + _G * _G   # recency block in the privileged obs
+_grp0 = env.group == 0
+
+
+def share_coverage(o):
+    """VES-24: union the group's recency grid into each drone's actor obs."""
+    if not args.shared_coverage:
+        return o
+    live = _grp0 & ~expended
+    if not bool(live.any()):
+        return o
+    o = o.clone()
+    o[_grp0, _REC0:_REC1] = env.task.recency[live].amax(dim=0)
+    return o
+
+
+@torch.no_grad()
+def policy(o):
+    return ac.actor(norm(share_coverage(o)))
+
+
 W = int(10.0 / env._dt)                      # 10 s orbit-detection window
 
 obs = env.ppo_reset()
@@ -91,7 +111,11 @@ reach_radii = []                             # per-drone episode max radius, on 
 outer_serviced = []                          # fleet: was the outermost target killed?
 ep = {"found": [], "cleared": [], "coverage": [], "len_s": [],
       "crash": 0, "oob": 0, "flip": 0, "expend": 0, "timeout": 0, "all": 0}
-fleet = {"kills": [], "found": [], "expended": []}   # per completed sortie
+fleet = {"kills": [], "found": [], "expended": [],
+         "cov": [], "outer_cov": []}                # per completed sortie
+_cell_r = env.task.cell_xy.norm(dim=1)               # [G*G] each cell's radius
+_outer = _cell_r > 0.7 * env.tcfg.arena_half         # outer-ring cells
+sortie_cov = sortie_outer = 0.0                      # running-max union coverage this sortie
 wrecked = torch.zeros(K, dtype=torch.bool, device=dev)
 expended = torch.zeros(N, dtype=torch.bool, device=dev)
 sortie_found = torch.zeros(K, dtype=torch.bool, device=dev)
@@ -142,11 +166,14 @@ while done_eps < args.episodes:
             fleet["kills"].append(int(wrecked.sum()))
             fleet["found"].append(int((sortie_found | wrecked).sum()))
             fleet["expended"].append(int(expended.sum()))
+            fleet["cov"].append(sortie_cov)
+            fleet["outer_cov"].append(sortie_outer)
             # outer-ring acceptance: the target farthest from the AO centre --
             # was it serviced (killed) this sortie? sortie_tr held the radii
             # before this step's auto-reset swapped in a new target set
             outer_serviced.append(float(wrecked[int(sortie_tr.argmax())]))
             wrecked[:] = False
+            sortie_cov = sortie_outer = 0.0
             expended[:] = False
             sortie_found[:] = False
             prev_known = env.task.known.clone()
@@ -154,6 +181,10 @@ while done_eps < args.episodes:
             done_eps += 1
         else:
             sortie_found |= env.task.known[grp0].any(dim=0)
+            # fleet-union coverage, running max over the sortie (monotone until reset)
+            uv = env.task.visited[grp0].any(dim=0)
+            sortie_cov = max(sortie_cov, float(uv.float().mean()))
+            sortie_outer = max(sortie_outer, float(uv[_outer].float().mean()))
             # warm-session wreck pinning: the striker's auto-reset must not
             # revive the tank for the rest of this sortie
             if bool(wrecked.any()):
@@ -203,7 +234,10 @@ if args.fleet:
             "found_per_sortie": mean(fleet["found"]),
             "expended_per_sortie": mean(fleet["expended"]),
             "sorties_3_for_3": mean([1.0 if k >= K else 0.0 for k in fleet["kills"]]),
-            "outer_target_serviced": mean(outer_serviced)}
+            "outer_target_serviced": mean(outer_serviced),
+            "fleet_coverage": mean(fleet["cov"]),
+            "fleet_outer_coverage": mean(fleet["outer_cov"]),
+            "shared_coverage": bool(args.shared_coverage)}
 else:
     n = done_eps
     res |= {"mode": "solo", "found": mean(ep["found"]), "cleared": mean(ep["cleared"]),

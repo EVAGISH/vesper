@@ -9,6 +9,7 @@ import { MissionPanel } from "@/components/mission-panel";
 import { TacticalView } from "@/components/tactical-view";
 import { Teleop } from "@/components/teleop";
 import { useVesper } from "@/components/vesper-provider";
+import { WorldView } from "@/components/world-view";
 import { fetchJSON, fmtTime, KIND_COLOR, runKind } from "@/lib/vesper";
 
 // Operator home, in watch → situate → control → reference order: the drone
@@ -46,6 +47,13 @@ export default function Live() {
     () => typeof window !== "undefined" &&
       !!new URLSearchParams(window.location.search).get("viewport"),
   );
+  // native session live picture: the 2D tactical console or the in-browser 3D
+  // world (components/world-view.tsx — same scene the replay exporter films).
+  // /?view=3d opens the 3D view immediately (bookmarkable)
+  const [live3d, setLive3d] = useState(
+    () => typeof window !== "undefined" &&
+      new URLSearchParams(window.location.search).get("view") === "3d",
+  );
 
   // pollLive is also handed to the mission controls, so start/stop reflect
   // in the header immediately instead of waiting out the 15 s interval
@@ -74,6 +82,24 @@ export default function Live() {
                 <span className="font-mono text-[#d03b3b]">no session</span>
               ) : ip === "localhost" ? (
                 <span className="flex items-center gap-3">
+                  <span className="flex items-center gap-1">
+                    {([["tactical", false], ["3d", true]] as [string, boolean][]).map(
+                      ([label, val]) => (
+                        <button
+                          key={label}
+                          onClick={() => setLive3d(val)}
+                          className={`cursor-pointer border border-border/60 px-1.5 py-0.5 font-mono text-[10px] uppercase tracking-[0.08em] ${
+                            live3d === val
+                              ? "bg-foreground text-background"
+                              : "text-muted-foreground hover:text-foreground"
+                          }`}
+                          title={val ? "live 3D world (in-browser render)" : "2D tactical console"}
+                        >
+                          {label}
+                        </button>
+                      ),
+                    )}
+                  </span>
                   <LiveMissionControls ip={ip} onChanged={pollLive} />
                   <span className="font-mono text-[#0ca30c]">native sim @ localhost</span>
                 </span>
@@ -96,9 +122,12 @@ export default function Live() {
           >
             {ip ? (
               <>
-                {/* Native session → the tactical operator console (live, on-device).
+                {/* Native session → the tactical operator console (live, on-device)
+                    or the in-browser 3D world, per the header toggle.
                     Isaac box session → its rendered MJPEG feeds. */}
-                {ip === "localhost" ? <TacticalView ip={ip} /> : <DroneFeeds ip={ip} />}
+                {ip === "localhost"
+                  ? live3d ? <WorldView ip={ip} /> : <TacticalView ip={ip} />
+                  : <DroneFeeds ip={ip} />}
                 <div className="border-t border-border">
                   <Teleop ip={ip} />
                 </div>

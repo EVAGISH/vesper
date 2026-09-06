@@ -41,13 +41,16 @@ Serves on VESPER_LIVE_PORT (8180):
                            re-sent every ~100 ms by the page. Older than --deadman_s: hover.
                            {"kind":"approve","target":i} | {"kind":"deny","target":i}
                            the operator's strike decision for target i
-                           {"kind":"record"}   dump the mission buffered since the
-                           last reset to a fresh runs/<id>/ (replay.json +
-                           trajectory.parquet + manifest) and render tactical.mp4
-                           in the background -- the Live->Runs loop. A manual
-                           record is the KEEPER: never pruned, and it also kicks
-                           off the photoreal Isaac render on the droplet
-                           (isaac_fpv.mp4 lands in the run when it finishes).
+                           {"kind":"record","renderers":"three,tactical"}   dump the
+                           mission buffered since the last reset to a fresh
+                           runs/<id>/ (replay.json + trajectory.parquet +
+                           manifest) and kick scripts/render_dispatch.py in the
+                           background -- the Live->Runs loop. `renderers` is the
+                           render FLAG: any of tactical (2D top-down), three
+                           (on-device three.js chase+fpv, the default fast lane)
+                           and isaac (photoreal on the droplet, the hero shot);
+                           unset falls back to --renderers. A manual record is
+                           the KEEPER: never pruned.
 
 Missions also auto-save: when the lead's episode completes (all-cleared or the
 episode_s rollover) the buffered mission lands in runs/ by itself IF it scored
@@ -59,13 +62,11 @@ import copy
 import json
 import math
 import os
-import re
 import shutil
 import subprocess
 import sys
 import threading
 import time
-import urllib.request
 
 import numpy as np
 import torch
@@ -115,6 +116,12 @@ parser.add_argument("--transit", action="store_true",
                          "the policy taking back over on detection. Off by default -- the "
                          "search behavior should be the policy's own (retrain with "
                          "w_cover_stale / w_yaw_rate), not choreography")
+parser.add_argument("--renderers", default="three,tactical",
+                    help="comma list from {tactical,three,isaac}: which replay renderers a "
+                         "manual RECORD SORTIE kicks off (the record command's own "
+                         "'renderers' field overrides; auto-saves always render tactical "
+                         "only). three = fast on-device three.js chase+fpv; isaac = "
+                         "photoreal on the GPU box (the hero shot)")
 parser.add_argument("--disengage_s", type=float, default=20.0,
                     help="a target whose strike request stays un-approved this long is shown "
                          "to the actor as already struck, so its drones break off and keep "
@@ -206,6 +213,35 @@ def sync_wrecks():
     if bool(wrecked.any()):
         env.task.reached[_grp0] |= wrecked
         env.task.known[_grp0] |= wrecked
+
+
+# --- shared fleet coverage (VES-24): union the group's recency grid into each
+# drone's actor obs, so the frontier-seeking policy spreads instead of every
+# drone re-sweeping the same central ground. The teacher already reads a G*G
+# recency grid in its obs and was trained to fly toward low-recency (stale)
+# cells; here we replace each drone's OWN grid with the group MAX (a cell any
+# drone swept recently reads as covered for all), so the profitable heading is
+# ground NOBODY has recently looked at. Each drone still closes on its NEAREST
+# stale cell, and they start from different positions, so the fleet fans out
+# instead of herding. Deploy-only: no retrain, the obs slot is unchanged.
+# obs layout (search_task.privileged): [self 12 | targets 8K | recency G*G | tail 3]
+_G = env.task.cfg.grid
+_REC0 = 12 + 8 * args.targets            # recency block start column
+_REC1 = _REC0 + _G * _G                  # recency block end column
+_shared_cov = os.environ.get("VESPER_SHARED_COVERAGE", "1") != "0"
+
+
+def apply_shared_coverage(o):
+    """Overwrite each group-0 drone's recency obs with the group-union recency."""
+    if not _shared_cov or not bool(_grp0.any()):
+        return o
+    live = _grp0 & ~expended
+    if not bool(live.any()):
+        return o
+    union = env.task.recency[live].amax(dim=0)      # [G*G] most-recent sweep by anyone
+    o = o.clone()
+    o[_grp0, _REC0:_REC1] = union
+    return o
 
 
 # --- strike commit: the deterministic terminal dive on an APPROVED request.
@@ -396,11 +432,6 @@ manual_recorded = False           # this mission was kept by hand -> skip the au
 last_record: dict = {}
 _REPO = _P(__file__).resolve().parents[1]
 
-# droplet access for the photoreal render (same key/layout web/server/app.py uses)
-_SSH_KEY = os.path.expanduser(os.environ.get("KEY_FILE", "~/.ssh/vesper.pem"))
-_SSH_OPTS = f"ssh -i {_SSH_KEY} -o BatchMode=yes -o StrictHostKeyChecking=accept-new"
-
-
 def _yaws_np(q):
     """World yaw per drone from wxyz quats [N,4] (matches vesper.native.replay)."""
     w, x, y, z = q[:, 0], q[:, 1], q[:, 2], q[:, 3]
@@ -412,85 +443,6 @@ def reset_recording():
     rec_buf.clear()
     rec_t, rec_every, rec_count = 0.0, REC_EVERY, 0
     manual_recorded = False
-
-
-def _droplet_ip():
-    """Public IP of the GPU droplet, or None (box down / no token in .env)."""
-    token = os.environ.get("DIGITALOCEAN_TOKEN")
-    if not token:
-        envf = _REPO / ".env"
-        if envf.exists():
-            for line in envf.read_text().splitlines():
-                m = re.match(r"^(?:export\s+)?DIGITALOCEAN_TOKEN=[\"']?([^\"'#\s]+)", line)
-                if m:
-                    token = m.group(1)
-                    break
-    if not token:
-        return None
-    name = os.environ.get("DROPLET_NAME", "vesper-dev")
-    req = urllib.request.Request(
-        "https://api.digitalocean.com/v2/droplets?tag_name=vesper",
-        headers={"Authorization": f"Bearer {token}"})
-    try:
-        with urllib.request.urlopen(req, timeout=6) as r:
-            for drop in json.load(r).get("droplets", []):
-                if drop.get("name") != name:
-                    continue
-                for net in drop.get("networks", {}).get("v4", []):
-                    if net.get("type") == "public":
-                        return net.get("ip_address")
-    except OSError:
-        pass
-    return None
-
-
-def _set_isaac_status(run_dir, status):
-    """Stamp the photoreal render's state into the run's manifest, so the Runs
-    tab can show 'rendering photoreal…' / 'pending' beside tactical.mp4."""
-    mf = run_dir / "manifest.json"
-    try:
-        m = json.loads(mf.read_text())
-    except (OSError, json.JSONDecodeError):
-        m = {}
-    m["isaac"] = status
-    mf.write_text(json.dumps(m))
-
-
-def _isaac_render(run_dir):
-    """Photoreal Isaac render of a manually-recorded sortie, on the droplet.
-
-    Push the run's replay.json to the box, run scripts/render_isaac_replay.py
-    in the Isaac container, and pull isaac.mp4 + isaac_fpv.mp4 back into the
-    run dir. Entirely async (own thread) and best-effort: droplet down leaves
-    the run marked isaac:"pending" so it can be rendered later; a crashed
-    render (tree-heavy worlds) marks "failed". The UI never blocks on this."""
-    run_id = run_dir.name
-    ip = _droplet_ip()
-    if not ip:
-        _set_isaac_status(run_dir, "pending")
-        print(f"[warm] photoreal render deferred: gpu box is offline (runs/{run_id})", flush=True)
-        return
-    try:
-        subprocess.run(["rsync", "-az", "-e", _SSH_OPTS, str(run_dir),
-                        f"root@{ip}:vesper/runs/"], timeout=300, check=True)
-        r = subprocess.run(
-            ["ssh", "-i", _SSH_KEY, "-o", "BatchMode=yes",
-             "-o", "StrictHostKeyChecking=accept-new", f"root@{ip}",
-             f"cd vesper && docker compose -f docker/compose.yml run --rm "
-             f"--name vsp_replay_{run_id} sim "
-             f"/isaac-sim/python.sh scripts/render_isaac_replay.py runs/{run_id}"],
-            capture_output=True, text=True, timeout=2400)
-        subprocess.run(["rsync", "-az", "-e", _SSH_OPTS,
-                        f"root@{ip}:vesper/runs/{run_id}/isaac*.mp4",
-                        str(run_dir) + "/"], timeout=300)
-        ok = (run_dir / "isaac_fpv.mp4").exists()
-        _set_isaac_status(run_dir, "done" if ok else "failed")
-        print(f"[warm] photoreal render {'done' if ok else 'FAILED'} -> runs/{run_id}"
-              + ("" if ok else f" ({(r.stderr or r.stdout)[-200:]})"), flush=True)
-    except (OSError, subprocess.SubprocessError) as e:
-        _set_isaac_status(run_dir, "pending")
-        print(f"[warm] photoreal render deferred ({e}); re-run render_isaac_replay "
-              f"against runs/{run_id} later", flush=True)
 
 
 def _prune_auto_runs(keep=AUTO_KEEP):
@@ -513,17 +465,21 @@ def _prune_auto_runs(keep=AUTO_KEEP):
         print(f"[warm] pruned old auto sortie runs/{d.name}", flush=True)
 
 
-def dump_recording(frames, frame_dt, auto=False):
+def dump_recording(frames, frame_dt, auto=False, renderers=None):
     """Write the buffered mission as a run: replay.json (vesper.native.replay
     schema) + trajectory.parquet + manifest.json into runs/<id>/, then kick off
-    scripts/render_replay.py detached so tactical.mp4 appears without stalling
+    scripts/render_dispatch.py detached so the videos appear without stalling
     the sim loop. Runs on its own thread over a snapshot; touches no env state.
 
     auto=True is the end-of-episode auto-save: tagged {kind:"sortie", auto:true}
-    in the manifest and pruned to the last AUTO_KEEP. auto=False is the operator's
-    RECORD SORTIE keeper: never pruned, and it also starts the photoreal Isaac
-    render (isaac_fpv.mp4) for this run on the droplet."""
+    in the manifest, pruned to the last AUTO_KEEP, and rendered tactical-only
+    (cheap). auto=False is the operator's RECORD SORTIE keeper: never pruned,
+    rendered by `renderers` — the record command's choice, else --renderers
+    (default the fast on-device three.js lane + tactical; "isaac" adds the
+    photoreal render on the droplet, the hero-shot lane)."""
     global last_record
+    rends = ["tactical"] if auto else [r.strip() for r in
+                                       (renderers or args.renderers).split(",") if r.strip()]
     run_id = time.strftime("%Y%m%d-%H%M%S-" + ("auto-sortie" if auto else "live-sortie"))
     run_dir = _REPO / "runs" / run_id
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -531,7 +487,7 @@ def dump_recording(frames, frame_dt, auto=False):
     dur = frames[-1]["t"] - frames[0]["t"]
     manifest = {"name": "auto sortie" if auto else "live sortie", "scene": world_name,
                 "kind": "sortie", "auto": auto, "started": now - dur, "finished": now}
-    if not auto:
+    if "isaac" in rends:
         manifest["isaac"] = "rendering"           # photoreal is on its way (or pending)
     (run_dir / "manifest.json").write_text(json.dumps(manifest))
     (run_dir / "replay.json").write_text(json.dumps({
@@ -545,14 +501,13 @@ def dump_recording(frames, frame_dt, auto=False):
     if not auto:
         last_record = {"run": run_id, "at": round(now, 1)}
     print(f"[warm] recorded {len(frames)} frames -> runs/{run_id}"
-          f" ({'auto' if auto else 'manual keeper'})", flush=True)
-    subprocess.Popen([sys.executable, "scripts/render_replay.py", str(run_dir)],
+          f" ({'auto' if auto else 'manual keeper'}; renderers: {','.join(rends)})", flush=True)
+    subprocess.Popen([sys.executable, "scripts/render_dispatch.py", str(run_dir),
+                      "--renderers", ",".join(rends)],
                      cwd=_REPO, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                      start_new_session=True)
     if auto:
         _prune_auto_runs()
-    else:
-        threading.Thread(target=_isaac_render, args=(run_dir,), daemon=True).start()
 
 
 def finish_mission():
@@ -736,8 +691,17 @@ def apply_commands():
             if len(frames) < 12:
                 print("[warm] record ignored: nothing buffered yet", flush=True)
             else:
+                # renderer FLAG: the UI's choice rides the command ("renderers":
+                # "three" | "isaac" | ... or a list); unset -> --renderers default
+                req = cmd.get("renderers") or cmd.get("renderer")
+                if isinstance(req, list):
+                    req = ",".join(str(r) for r in req)
+                if req:
+                    req = ",".join(r for r in str(req).split(",")
+                                   if r.strip() in ("tactical", "three", "isaac")) or None
                 manual_recorded = True                      # keeper exists; skip the auto-save
-                threading.Thread(target=dump_recording, args=(frames, dt * rec_every),
+                threading.Thread(target=dump_recording,
+                                 args=(frames, dt * rec_every, False, req),
                                  daemon=True).start()
         elif kind in ("approve", "deny"):
             try:
@@ -760,7 +724,7 @@ try:
     while True:
         tick = time.time()
         apply_commands()
-        act = policy.act(obs)
+        act = policy.act(apply_shared_coverage(obs))
         if args.transit:
             act = transit_override(act)   # manual override below still wins for drone 0
         sync_strike_commits()

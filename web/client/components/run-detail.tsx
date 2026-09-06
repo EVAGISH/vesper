@@ -6,8 +6,41 @@ import { EventsTimeline } from "@/components/events-timeline";
 import { SweepTable } from "@/components/sweep-table";
 import { TrajectoryPlot } from "@/components/trajectory-plot";
 import {
-  artifactLabel, fetchJSON, fmtDur, fmtTime, KIND_COLOR, media, runKind, type Run,
+  artifactLabel, fetchJSON, fmtDur, fmtTime, KIND_COLOR, media, postJSON, runKind,
+  type Run,
 } from "@/lib/vesper";
+
+/** Re-render a run's replay through a chosen lane (the renderer FLAG's UI on
+ *  existing runs): POST /api/runs/<id>/render spawns render_dispatch.py
+ *  detached; the mp4 appears in the run on the next poll. */
+function RenderButtons({ runId }: { runId: string }) {
+  const [busy, setBusy] = useState<string | null>(null);
+  const kick = async (renderers: string, tag: string) => {
+    setBusy(tag);
+    try {
+      await postJSON(`/api/runs/${runId}/render`, { renderers });
+    } catch {}
+    setTimeout(() => setBusy(null), 4000);
+  };
+  const cls =
+    "cursor-pointer border border-border/60 px-2 py-0.5 font-mono text-[10px] " +
+    "normal-case tracking-[0.08em] text-muted-foreground hover:text-foreground " +
+    "disabled:cursor-default disabled:opacity-50";
+  return (
+    <span className="ml-auto flex items-center gap-1.5">
+      <button className={cls} disabled={busy !== null}
+        title="render chase + fpv with the on-device three.js lane (~a minute)"
+        onClick={() => kick("three", "three")}>
+        {busy === "three" ? "queued ✓" : "render 3d"}
+      </button>
+      <button className={cls} disabled={busy !== null}
+        title="render photoreal on the GPU box (isaac rtx, slow — the hero shot)"
+        onClick={() => kick("isaac", "isaac")}>
+        {busy === "isaac" ? "queued ✓" : "render photoreal"}
+      </button>
+    </span>
+  );
+}
 
 function Panel({
   title, right, children, wide,
@@ -108,6 +141,7 @@ export function RunDetail({ run }: { run: Run }) {
           {fmtDur(m) && ` · ${fmtDur(m)}`}
           {m.scene && ` · ${m.scene}`}
         </span>
+        {run.files.includes("replay.json") && <RenderButtons runId={run.id} />}
       </div>
 
       <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">

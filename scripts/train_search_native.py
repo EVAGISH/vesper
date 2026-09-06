@@ -85,6 +85,11 @@ parser.add_argument("--no_expend", action="store_true",
 parser.add_argument("--snapshot_every", type=int, default=200,
                     help="save snap_<iter>.pt every N iters and render a short progression "
                          "clip per snapshot after training (0 = off)")
+parser.add_argument("--renderers", default="three,tactical",
+                    help="comma list from {tactical,three,isaac}: which replay renderers run "
+                         "on the post-training eval episode (scripts/render_dispatch.py). "
+                         "three = fast on-device three.js chase+fpv; isaac = photoreal on "
+                         "the GPU box; progression clips stay tactical")
 parser.add_argument("--tag", default="search-train-native")
 args = parser.parse_args()
 
@@ -206,15 +211,17 @@ except Exception as e:                                       # noqa: BLE001
     print(f"[warn] replay logging failed: {e}", flush=True)
     traceback.print_exc()
 
-# auto-render the tactical mp4 so the video attaches without a manual step.
-# Best-effort: a render failure must never fail the training run.
+# auto-render the replay videos so they attach without a manual step — which
+# renderer(s) is the --renderers flag (default the fast on-device three.js lane
+# + tactical; "isaac" adds the photoreal box render). Best-effort: a render
+# failure must never fail the training run.
 if replay_ok:
     try:
-        subprocess.run([sys.executable, "scripts/render_replay.py", str(cap.dir)],
-                       cwd=ROOT, check=True)
-        print(f"rendered tactical video -> {cap.dir / 'tactical.mp4'}", flush=True)
+        subprocess.run([sys.executable, "scripts/render_dispatch.py", str(cap.dir),
+                        "--renderers", args.renderers], cwd=ROOT, check=True)
+        print(f"rendered replay videos ({args.renderers}) -> {cap.dir}", flush=True)
     except Exception as e:                                   # noqa: BLE001
-        print(f"[warn] tactical render failed: {e}", flush=True)
+        print(f"[warn] replay render failed: {e}", flush=True)
         traceback.print_exc()
 
 # progression reel: a short eval clip per snapshot, so the Runs tab shows the
