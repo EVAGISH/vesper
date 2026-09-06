@@ -35,7 +35,7 @@
   .wrap{width:100%;max-width:1240px;margin:0 auto}
 
   .eyebrow{font-family:var(--mono);font-size:12px;letter-spacing:.28em;text-transform:uppercase;color:var(--accent);
-    display:flex;align-items:center;gap:10px;margin-bottom:18px}
+    display:flex;align-items:center;gap:10px;margin-bottom:18px;text-shadow:0 1px 10px rgba(8,11,9,.95),0 0 24px rgba(8,11,9,.8)}
   .eyebrow::before{content:"";width:22px;height:1px;background:var(--accent)}
   h1{font-size:clamp(44px,7.2vw,104px);font-weight:800;line-height:.96;letter-spacing:-.02em;text-wrap:balance}
   h2{font-size:clamp(30px,4.6vw,58px);font-weight:760;line-height:1.0;letter-spacing:-.015em;text-wrap:balance}
@@ -99,13 +99,20 @@
   .live-cue .rec{width:12px;height:12px;border-radius:50%;background:var(--strike);box-shadow:0 0 12px var(--strike);animation:pulse 1.4s infinite}
   @keyframes pulse{0%,100%{opacity:1}50%{opacity:.3}}
 
-  /* slide 6 — twin */
-  .s6t .pair{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-top:28px}
-  .s6t .shot{aspect-ratio:4/3;width:100%}
-  .s6t .vs{position:relative}
-  .s6t .vs::after{content:"▶";position:absolute;top:50%;right:-21px;transform:translateY(-50%);z-index:3;
-    color:var(--accent);font-size:16px}
-  @media(max-width:960px){.s6t .pair{grid-template-columns:1fr}.s6t .vs::after{display:none}}
+  /* slide 6 — twin / reconstruction pipeline */
+  .s6t .pipe{display:flex;align-items:center;gap:12px;margin-top:30px;flex-wrap:wrap}
+  .s6t .pnode{flex:1;min-width:170px;background:rgba(8,11,9,.84);border:1px solid var(--line2)}
+  .s6t .pnode.hot{border-color:var(--accent)}
+  .s6t .pimg{position:relative;overflow:hidden;aspect-ratio:16/9;background:var(--panel)}
+  .s6t .pimg>img{position:absolute;display:block;max-width:none}
+  .s6t .pimg.coords{display:flex;align-items:center;justify-content:center;
+    font-family:var(--mono);color:var(--amber);font-size:clamp(13px,1.15vw,18px);letter-spacing:.06em}
+  .s6t .pl{padding:8px 10px;font-family:var(--mono);font-size:10.5px;letter-spacing:.14em;
+    text-transform:uppercase;color:var(--muted);border-top:1px solid var(--line)}
+  .s6t .pl b{color:var(--ink)}
+  .s6t .pnode.hot .pl b{color:var(--accent)}
+  .s6t .parr{color:var(--accent);font-size:15px;flex:0 0 auto}
+  @media(max-width:960px){.s6t .pipe{flex-direction:column;align-items:stretch}.s6t .parr{display:none}}
 
   /* slide 7 — trained */
   .s6 .row{display:grid;grid-template-columns:repeat(3,1fr);gap:14px;margin-top:28px}
@@ -114,6 +121,19 @@
     font-size:11.5px;letter-spacing:.14em;text-transform:uppercase;color:var(--faint)}
   .s6 .arrowline b{color:var(--accent)}
   @media(max-width:960px){.s6 .row{grid-template-columns:1fr}}
+
+  /* slide — the stack */
+  .s9 .cols{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-top:30px}
+  .s9 .panel{border:1px solid var(--line2);background:rgba(8,11,9,.86);padding:18px 22px}
+  .s9 .panel h3{font-family:var(--mono);font-size:12px;letter-spacing:.24em;text-transform:uppercase;
+    color:var(--accent);margin-bottom:6px;display:flex;align-items:center;gap:10px}
+  .s9 .panel h3::before{content:"";width:18px;height:1px;background:var(--accent)}
+  .s9 .panel.alg h3{color:var(--amber)} .s9 .panel.alg h3::before{background:var(--amber)}
+  .s9 .row{display:flex;justify-content:space-between;align-items:baseline;gap:16px;padding:10px 0;border-top:1px solid var(--line)}
+  .s9 .row:first-of-type{border-top:none}
+  .s9 .row .k{font-family:var(--mono);font-size:12.5px;letter-spacing:.05em;color:var(--ink);white-space:nowrap}
+  .s9 .row .v{font-size:13px;color:var(--muted);text-align:right;line-height:1.35}
+  @media(max-width:960px){.s9 .cols{grid-template-columns:1fr}}
 
   /* slide 8 — photoreal video */
   .s7 h1{font-size:clamp(38px,5.4vw,80px);max-width:14ch}
@@ -346,27 +366,46 @@
 
   <!-- 6 · THE TWIN -->
   <section class="slide s6t" data-title="twin">
-    <div class="pad"><div class="wrap">
-      <div class="eyebrow">How · The Twin</div>
+    <div class="bleed"><img src="assets/twin_view0.png" alt="Kramatorsk reconstructed in 3D: city, river and terrain, fully modeled"></div>
+    <div class="pad flex"><div class="wrap bottomer">
+      <div class="eyebrow">The Pipeline · 01 — Reconstruct</div>
       <h2>We cloned the battlefield.</h2>
-      <p class="sub">Give us coordinates. We pull public satellite and terrain data and rebuild the city in 3D — <strong>every road, roof, and tree</strong> — a digital twin the swarm can die in, ten thousand times a night.</p>
-      <div class="pair">
-        <div class="shot vs"><!-- tac1 AO map panel: crop x1112 y120 w448 h336 -->
-          <img src="assets/tac1.png" alt="Real satellite imagery of Kramatorsk" style="width:375%;height:312.5%;left:-248.2%;top:-35.7%">
-          <div class="tag"><b>KRAMATORSK</b> · the real city — satellite</div>
+      <p class="sub"><strong>This background is not a photo — it's our sim.</strong> Type coordinates, and the pipeline reconstructs the real city in 3D from public satellite and terrain — every roof raised, every canopy grown, exactly where the real ones stand. Hours, not months.</p>
+      <div class="pipe">
+        <div class="pnode">
+          <div class="pimg coords">48.7106°N&nbsp;37.5762°E</div>
+          <div class="pl"><b>01</b> · type coordinates</div>
         </div>
-        <div class="shot"><!-- isaac_early 900x900, crop to 4:3 -->
-          <img src="assets/isaac_early.png" alt="The same city rebuilt as a photoreal 3D digital twin" style="width:100%;height:133.3%;left:0;top:-16.6%">
-          <div class="tag"><b>KRAMATORSK</b> · our twin — flyable, photoreal</div>
+        <div class="parr">▶</div>
+        <div class="pnode">
+          <div class="pimg"><!-- tac1 AO map crop x1112 y150 w448 h252 -->
+            <img src="assets/tac1.png" alt="Public satellite imagery of the AO" style="width:375%;height:416.7%;left:-248.2%;top:-59.5%">
+          </div>
+          <div class="pl"><b>02</b> · pull satellite + terrain</div>
+        </div>
+        <div class="parr">▶</div>
+        <div class="pnode hot">
+          <div class="pimg"><!-- twin_view1 1280x720 full -->
+            <img src="assets/twin_view1.png" alt="The city reconstructed in 3D from another angle" style="width:100%;height:100%;left:0;top:0">
+          </div>
+          <div class="pl"><b>03</b> · reconstruct in 3D</div>
+        </div>
+        <div class="parr">▶</div>
+        <div class="pnode">
+          <div class="pimg"><!-- fpv_mid 900x900 crop to 16:9 -->
+            <img src="assets/fpv_mid.png" alt="Drone's-eye view flying inside the reconstructed world" style="width:100%;height:177.9%;left:0;top:-35.6%">
+          </div>
+          <div class="pl"><b>04</b> · fly it — native sim</div>
         </div>
       </div>
+      <p class="cap" style="margin-top:14px">Kramatorsk — reconstructed automatically by our pipeline. The swarm trains, flies, and dies in this world.</p>
     </div></div>
   </section>
 
   <!-- 7 · THE REPS -->
   <section class="slide s6" data-title="trained">
     <div class="pad"><div class="wrap">
-      <div class="eyebrow">How · The Reps</div>
+      <div class="eyebrow">The Pipeline · 02 — Train</div>
       <h2>A million sorties <span class="accent">before the first real one.</span></h2>
       <div class="row">
         <div>
@@ -390,7 +429,34 @@
     </div></div>
   </section>
 
-  <!-- 8 · PHOTOREAL AFTER-ACTION -->
+  <!-- 8 · THE STACK -->
+  <section class="slide s9" data-title="stack">
+    <div class="bleed dim"><img src="assets/twin_view1.png" alt="" aria-hidden="true"></div>
+    <div class="pad"><div class="wrap">
+      <div class="eyebrow">The Pipeline · Under the Hood</div>
+      <h2>Open data in. <span class="accent">A hunting swarm out.</span></h2>
+      <p class="sub">Every source is public. Every algorithm is ours. Running today — not a roadmap.</p>
+      <div class="cols">
+        <div class="panel">
+          <h3>Data In</h3>
+          <div class="row"><span class="k">ESRI WORLD IMAGERY · NAIP</span><span class="v">orthophoto ground truth, down to 1 m</span></div>
+          <div class="row"><span class="k">USGS 3DEP LIDAR · COPERNICUS GLO-30</span><span class="v">elevation — 1 m US, 30 m anywhere on Earth</span></div>
+          <div class="row"><span class="k">DRONE-SURVEY DSMs</span><span class="v">OpenDroneMap photogrammetry, ingested as GeoTIFF</span></div>
+          <div class="row"><span class="k">OPENSTREETMAP · OVERPASS</span><span class="v">building footprints + heights, roads, rail, water, forest</span></div>
+        </div>
+        <div class="panel alg">
+          <h3>What We Do With It</h3>
+          <div class="row"><span class="k">TERRAIN MESHING</span><span class="v">DEM/DSM → collidable ground, filtered and true to relief</span></div>
+          <div class="row"><span class="k">FOOTPRINT EXTRUSION</span><span class="v">OSM tags → textured 3D buildings, physics included</span></div>
+          <div class="row"><span class="k">PROCEDURAL CANOPY</span><span class="v">60k solid trees a drone cannot cheat through — one fetch, endless world variants</span></div>
+          <div class="row"><span class="k">RF SHADOW MODEL</span><span class="v">baked jammer coverage raster — comms is terrain too</span></div>
+          <div class="row"><span class="k">PPO · REINFORCEMENT LEARNING</span><span class="v">reward-shaped search policy, millions of sim steps, on-device</span></div>
+        </div>
+      </div>
+    </div></div>
+  </section>
+
+  <!-- 9 · PHOTOREAL AFTER-ACTION -->
   <section class="slide s7" data-title="photoreal">
     <div class="bleed">
       <video id="fpv" src="assets/isaac_fpv.mp4" muted loop playsinline preload="auto" poster="assets/isaac_kill.png"></video>
