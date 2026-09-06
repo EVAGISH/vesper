@@ -6,6 +6,13 @@ __pycache__/
 .env
 runs/
 assets/
+# ...except the BTR-80A, which the pursuit env and the detector datasets need.
+# CC BY 4.0, redistributed with assets/vehicles/btr80/ATTRIBUTION.md.
+!assets/
+assets/*
+!assets/vehicles/
+assets/vehicles/*
+!assets/vehicles/btr80/
 .venv/
 .vesper_jobs.json
 .vesper_session.json

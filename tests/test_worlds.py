@@ -57,8 +57,9 @@ def test_custom_tank_is_a_drivable_rigid_body(tmp_path):
 def _fake_converted_mesh(path, extent, bow_axis=2):
     """Stand in for convert_asset.py's output: one collidable box mesh.
 
-    The real BTR-80A cannot be committed (it is a gitignored CC-BY download), so
-    the wrapper is tested against a mesh with the same awkward properties: not
+    The real BTR-80A is committed, but this test deliberately does not load it, so
+    a re-fetch or a different donor model cannot quietly invalidate the test.
+    Instead the wrapper faces a mesh with the same awkward properties: not
     metre-scale, not centred, not resting on z=0, and carrying a collider the
     wrapper is supposed to switch off.
     """
