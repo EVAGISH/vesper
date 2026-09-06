@@ -141,7 +141,9 @@ def log(row):
     curve.write(json.dumps(row) + "\n"); curve.flush()
     steps = (row["iter"] + 1) * args.horizon * args.num_envs
     sps = steps / (time.time() - t0 + 1e-9)
-    det = f"| det {row['det_recall']:.2f} " if "det_recall" in row else ""
+    # three decimals: a recall of half a percent is a real signal and rounds to
+    # 0.00 at two, which reads as "the detector sees nothing"
+    det = f"| det {row['det_recall']:.3f} " if "det_recall" in row else ""
     print(f"it {row['iter']:5d} | ret {row['ep_return']:8.1f} | found {row['found']:.2f} " + det +
           f"| cleared {row['cleared']:.2f} | swept {row['coverage']:.2f} "
           f"| all {row['intercept_rate']:.2f} | t {row['time_to_intercept']:5.1f}s "

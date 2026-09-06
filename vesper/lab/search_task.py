@@ -234,13 +234,17 @@ class SearchTask:
             self.contrast[env_ids] = contrast
 
     # ------------------------------------------------------------------ sensor
-    def detect(self, drone_pos, quat, target_pos):
+    def detect(self, drone_pos, quat, target_pos, dropout: bool = True):
         """Geometric sighting. Returns (visible [N,K], slant [N,K]).
 
         A target is seen when it is inside the camera cone, inside the effective
         range for its contrast and the foliage in the way, with unbroken line of
         sight over terrain and buildings -- and the sensor does not happen to miss
         it this frame.
+
+        `dropout=False` skips the per-frame miss, and with it the random draw:
+        a diagnostic can then ask "what would the cone say here" beside another
+        sensor without consuming the generator and shifting the run.
         """
         cfg = self.cfg
         rel = target_pos - drone_pos.unsqueeze(1)                     # [N,K,3]
@@ -258,7 +262,7 @@ class SearchTask:
         transmit = torch.exp(-cfg.canopy_k * foliage)
         r_eff = (cfg.detect_range * self.contrast * transmit).clamp(min=cfg.min_detect_range)
         hit = in_cone & clear & (slant < r_eff) & ~self.reached
-        if cfg.miss_p > 0:
+        if dropout and cfg.miss_p > 0:
             keep = torch.rand(hit.shape, device=hit.device, generator=self.gen) >= cfg.miss_p
             hit = hit & keep
         if cfg.pos_id_range > 0:

@@ -23,9 +23,16 @@ parser.add_argument("--groups", type=int, default=0, help="vehicle sets shared b
 parser.add_argument("--camera", action="store_true",
                     help="render the body-fixed TiledCamera and check pixel sightings (the "
                          "smoke test for vision: does it render on this world, how fast, how much VRAM)")
+parser.add_argument("--cam_res", type=int, default=None, help="square camera tile in pixels")
+parser.add_argument("--detector", default=None,
+                    help="URL of a running scripts/detect_server.py: decide sightings with the "
+                         "trained detector and report what it calls beside the cone and the "
+                         "renderer's own segmentation; implies --camera")
 AppLauncher.add_app_launcher_args(parser)
 args = parser.parse_args()
 args.headless = True
+if args.detector:
+    args.camera = True
 if args.camera:
     args.enable_cameras = True
 app = AppLauncher(args).app
@@ -45,6 +52,9 @@ cfg.search = {"arena_half": args.arena}
 cfg.vehicle_model = args.vehicle
 cfg.n_groups = args.groups
 cfg.camera = args.camera
+cfg.detector = args.detector
+if args.cam_res:
+    cfg.cam_res = args.cam_res
 env = SearchEnv(cfg, seed=0)
 obs = env.ppo_reset()
 full = env._get_observations()
@@ -78,6 +88,15 @@ if args.camera:
     check("vehicle segmentation labels are present",
           env._seen_px() is not None and env._seg_table is not None and env._seg_table.numel() > 1,
           f"{0 if env._seg_table is None else int((env._seg_table >= 0).sum())} vehicle ids")
+    if args.detector:
+        # the network is the sensor now: it has to be reachable, and its boxes
+        # have to land on the vehicles rather than merely exist
+        check("detector is connected", env._sight is not None,
+              str(env._sight.client.info.get("model") if env._sight else "none"))
+        if env._sight is not None:
+            boxes, _ = env._sight.client.detect(env.pixels())
+            check("detector answers a rendered batch", len(boxes) == env.num_envs,
+                  f"{sum(len(b) for b in boxes)} boxes over {env.num_envs} frames")
     print(f"       VRAM after first render: {torch.cuda.max_memory_allocated()/1e9:.2f} GB", flush=True)
 
 # --- vehicles: on the ground they were placed on, and on drivable ground
@@ -122,6 +141,9 @@ check("some targets are parked or crawling", float(env.veh_speed.min()) < 1.5,
 
 # --- step it under a random policy
 zs, above, vis_frac, spd, nose_err, px_hits = [], [], [], [], [], []
+# detector run: the cone's answer over the same steps, and the overlap with
+# what the renderer's segmentation says was in frame
+cone_hits, agree, in_frame_n = [], [], []
 torch.manual_seed(0)
 t_start = time.time()
 for i in range(args.steps):
@@ -146,6 +168,16 @@ for i in range(args.steps):
             nose_err.append(torch.atan2(torch.sin(head - yaw), torch.cos(head - yaw)).abs())
         if args.camera:
             px_hits.append((env._seen_px() > 0).float().mean().clone())
+        if args.detector:
+            # what the cone would have said here, with no random miss so the
+            # comparison does not shift the run
+            d = env._robot.data
+            cone, _ = env.task.detect(d.root_pos_w, d.root_quat_w, env.target_pos, dropout=False)
+            cone_hits.append(cone.float().mean().clone())
+            seg = env._seen_px()
+            in_frame = seg >= env.tcfg.sight_px
+            agree.append((in_frame & info["visible"]).float().sum().clone())
+            in_frame_n.append(in_frame.float().sum().clone())
 else:
     check("observations stay finite", True)
 wall = time.time() - t_start
@@ -174,9 +206,28 @@ if nose_err:
           f"median heading error {float(ne.median()):.2f} rad on {ne.numel()} fast samples")
 else:
     print("[SKIP] never fast enough to judge the heading follow", flush=True)
+ph = float(torch.stack(px_hits).mean()) if px_hits else float("nan")
 if args.camera and px_hits:
-    ph = float(torch.stack(px_hits).mean())
     check("some vehicles land in some frames", ph > 0.0, f"{100*ph:.1f}% of target-steps with pixels")
+if args.detector and cone_hits:
+    # Three answers to the same question over the same steps: the cone the
+    # policies were trained against, the renderer's own segmentation, and the
+    # network. They should be the same order of magnitude; a detector reporting
+    # nothing while the other two do is a broken loop, not a hard world.
+    ch = float(torch.stack(cone_hits).mean())
+    dh = float(torch.stack(vis_frac).mean())
+    print(f"       sightings per target-step: cone {100*ch:.1f}%  "
+          f"segmentation {100*ph:.1f}%  detector {100*dh:.1f}%", flush=True)
+    check("the detector is actually calling targets", dh > 0.0,
+          f"{100*dh:.1f}% of target-steps")
+    seen_n = float(torch.stack(in_frame_n).sum())
+    if seen_n > 0:
+        rec = float(torch.stack(agree).sum()) / seen_n
+        check("the detector finds targets the renderer says are in frame", rec > 0.05,
+              f"recall {100*rec:.0f}% over {seen_n:.0f} target-steps in frame")
+    else:
+        print("[SKIP] segmentation never put a target in frame; no recall to measure",
+              flush=True)
 
 # --- the belief must never carry an unseen target
 never = ~env.task.known

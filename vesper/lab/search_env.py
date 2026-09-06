@@ -448,10 +448,15 @@ class SearchEnv(VesperQuadEnv):
             d.root_pos_w, d.root_lin_vel_w, d.root_quat_w, d.root_ang_vel_b,
             self.target_pos, self.episode_length_buf, seen_px=self._sightings())
         if self._sight is not None:
-            # of the target-in-frame opportunities this episode, the share the
+            # Of the target-in-frame opportunities this episode, the share the
             # network actually called: the one number that says whether the
-            # policy is learning from a sensor or from a black frame
-            info["det_recall"] = self._det_hits / self._det_truth.clamp(min=1.0)
+            # policy is learning from a sensor or from a black frame. An episode
+            # that never put a target in frame had no opportunity to miss one,
+            # so it reports NaN and PPO leaves it out of the average rather than
+            # scoring it a perfect zero.
+            info["det_recall"] = torch.where(
+                self._det_truth > 0, self._det_hits / self._det_truth.clamp(min=1.0),
+                torch.full_like(self._det_hits, float("nan")))
         self.extras.update(info)
         self._evaluated = True
 
