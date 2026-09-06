@@ -343,6 +343,7 @@ def dive_alpha(fi):
 for _ in range(args.settle):
     world.render()
 
+hidden_drones = set()               # expended airframes already hidden
 for fi, fr in enumerate(frames):
     dpos = np.array(fr["d"], dtype=float)
     hdg = fr["hdg"]
@@ -354,6 +355,13 @@ for fi, fr in enumerate(frames):
             strike_contact + np.array([0.0, 0.0, MESH_H]))
     for i, prim in enumerate(drones):
         prim.set_world_pose(dpos[i], yaw_quat(hdg[i]))
+    # loitering munitions: a drone the log lists as dead was consumed by its
+    # strike -- its model is gone from this frame on (drone 0's own strike is
+    # additionally handled by the kamikaze-dive override below)
+    for i in fr.get("dead", []):
+        if i < n_drones and i not in hidden_drones:
+            _set_visible(f"/World/Drone_{i}", False)
+            hidden_drones.add(i)
     for i, prim in enumerate(tanks):
         x, y = fr["tg"][i][0], fr["tg"][i][1]
         if abs(x - txy[i, 0]) > 0.05 or abs(y - txy[i, 1]) > 0.05:

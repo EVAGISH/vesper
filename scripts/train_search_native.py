@@ -57,6 +57,27 @@ parser.add_argument("--w_time", type=float, default=None,
                     help="per-step time penalty -- the 'staying alive is bad' finish pressure")
 parser.add_argument("--reach_radius", type=float, default=None,
                     help="3D range that counts as neutralizing a target (m); larger = easier reaches")
+parser.add_argument("--w_cover_stale", type=float, default=None,
+                    help="anti-circling: re-sweeping a stale coverage cell pays (1-recency) x this, "
+                         "so exploring keeps paying all episode instead of only the first pass")
+parser.add_argument("--w_yaw_rate", type=float, default=None,
+                    help="anti-circling: per-step cost on |body yaw rate| beyond yaw_rate_free -- "
+                         "makes the saturated-orbit scan unprofitable")
+parser.add_argument("--yaw_rate_free", type=float, default=None,
+                    help="rad/s of turn that costs nothing (camera panning stays free)")
+parser.add_argument("--w_frontier", type=float, default=None,
+                    help="anti-circling: per metre closed on the nearest stale coverage cell "
+                         "while no known target is in hand -- a persistent 'go where you "
+                         "haven't recently looked' gradient for the whole episode")
+parser.add_argument("--frontier_stale", type=float, default=None,
+                    help="recency below this marks a cell as frontier (default 0.5, ~17 s unswept)")
+parser.add_argument("--pos_id_range", type=float, default=None,
+                    help="close-range omnidirectional positive ID: within this 3D slant with "
+                         "clear LOS the target is detected regardless of the camera cone, "
+                         "contrast or foliage (0 disables; default 25)")
+parser.add_argument("--no_expend", action="store_true",
+                    help="disable the loitering-munition model (historical behavior: a drone "
+                         "that strikes keeps flying instead of being expended)")
 parser.add_argument("--snapshot_every", type=int, default=200,
                     help="save snap_<iter>.pt every N iters and render a short progression "
                          "clip per snapshot after training (0 = off)")
@@ -72,10 +93,14 @@ cfg.num_envs = args.num_envs
 cfg.n_targets = args.targets
 cfg.episode_length_s = args.episode_s
 cfg.search = {"arena_half": args.arena}
-for _k in ("w_proximity", "w_time", "reach_radius"):   # reward overrides, if given
+for _k in ("w_proximity", "w_time", "reach_radius",    # reward overrides, if given
+           "w_cover_stale", "w_yaw_rate", "yaw_rate_free",
+           "w_frontier", "frontier_stale", "pos_id_range"):
     _v = getattr(args, _k)
     if _v is not None:
         cfg.search[_k] = _v
+if args.no_expend:
+    cfg.search["expend_on_reach"] = False
 cfg.n_groups = args.groups
 cfg.ppo_key = args.obs
 if args.map:
@@ -114,7 +139,8 @@ if args.resume:
 cap = RunCapture(args.tag)
 cap.note(num_envs=args.num_envs, iters=args.iters, targets=args.targets, arena=args.arena,
          episode_s=args.episode_s, gamma=args.gamma, world=cfg.world_map, seed=args.seed,
-         hidden=list(hidden), groups=env.G, obs=args.obs, device=args.device, native=True)
+         hidden=list(hidden), groups=env.G, obs=args.obs, device=args.device, native=True,
+         search_overrides=dict(cfg.search), resume=args.resume)
 curve = open(cap.dir / "curve.jsonl", "w")
 print(f"train (native, {args.device}): {args.num_envs} envs x {args.iters} iters, "
       f"{args.targets} targets in a {2*args.arena:.0f} m box, obs {env.num_obs} -> {cap.dir}", flush=True)

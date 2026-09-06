@@ -89,11 +89,16 @@ def log_episode(env, policy, run_dir, world_name: str, max_steps: int | None = N
     tw = TrajectoryWriter(run_dir)
     order = [hero] + [e for e in range(P) if e != hero][: SWARM - 1]
     frames = []
+    dead = torch.zeros(P, dtype=torch.bool)   # expended on impact (loitering munition)
     for k in range(end):
         b = buf[k]
         t = k * dt
         tw.append(t, b["pos"][hero].numpy(), b["quat"][hero].numpy())
         tp, known, reached = b["tp"][hero], b["known"][hero], b["reached"][hero]
+        # a drone whose episode ends with a kill on the board was consumed by
+        # the impact: its glyph disappears on this very frame, leaving the
+        # strike animation + wreck where it dove in
+        dead |= b["done"].bool() & b["reached"].any(dim=1)
         frames.append({
             "t": round(t, 2),
             "d": [[round(float(x), 1), round(float(y), 1), round(float(z), 1)]
@@ -102,6 +107,7 @@ def log_episode(env, policy, run_dir, world_name: str, max_steps: int | None = N
             "tg": [[round(float(tp[i, 0]), 1), round(float(tp[i, 1]), 1),
                     int(bool(known[i])), int(bool(reached[i]))] for i in range(env.k)],
             "agl": round(float(b["agl"][hero]), 1),
+            "dead": [j for j, e in enumerate(order) if bool(dead[e])],
         })
     tw.close()
 

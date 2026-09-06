@@ -69,6 +69,13 @@ class SearchCfg:
     fov_half_deg: float = 55.0         # half-angle of the lens cone
     detect_range: float = 220.0        # slant range on a plain target in clear air (m)
     min_detect_range: float = 15.0     # you can always see it from close enough
+    # Close-range positive ID, omnidirectional: a drone within this 3D slant of
+    # a vehicle with clear line of sight KNOWS it is there, cone or no cone --
+    # the deployed policy was flying directly over tanks without ever "seeing"
+    # them because the forward-down cone had already swept past. LOS occlusion
+    # still applies (a roof still hides it); contrast, foliage attenuation and
+    # per-frame dropout do not at point-blank range. 0 disables.
+    pos_id_range: float = 25.0
     canopy_k: float = 0.15             # extinction per density-weighted metre of foliage
     miss_p: float = 0.04               # per-step dropout on an otherwise valid detection
     fix_noise_m: float = 2.5           # error on a reported fix
@@ -105,6 +112,26 @@ class SearchCfg:
     w_progress: float = 1.2            # per metre closed on the nearest known target
     w_time: float = 0.02               # per-step cost: the pressure to finish
     w_cover: float = 1.2               # per coverage cell swept for the first time
+    # Anti-circling shaping (0 = off, the historical behavior). The deployed
+    # policy learned to "search" by orbiting at the accel limit because first-
+    # sweep coverage pays nothing mid-episode and turning is free (see project
+    # memory circling-root-cause). w_cover_stale keeps exploration paying all
+    # episode: re-sweeping a cell earns (1 - recency) * this, so stale ground
+    # is always the profitable heading. w_yaw_rate charges for turn held above
+    # yaw_rate_free -- gentle, because panning the body-fixed camera is how the
+    # drone looks around at all.
+    w_cover_stale: float = 0.0         # per re-swept cell, scaled by staleness
+    w_yaw_rate: float = 0.0            # per rad/s of |body yaw rate| beyond the free band
+    yaw_rate_free: float = 0.5         # rad/s of turn that costs nothing
+    # Frontier-approach gradient: with only sweep bonuses, the reward between
+    # sweeps is flat -- nothing says WHICH WAY fresh ground lies, and the cheap
+    # local optimum is a tight orbit. This pays per metre closed on the nearest
+    # stale cell (recency below frontier_stale; never-swept cells count), the
+    # same delta-clamped shaping w_progress uses, but only while the drone has
+    # no known pursuable target: the moment something is found, homing owns the
+    # gradient and search shaping goes silent.
+    w_frontier: float = 0.0            # per metre closed on the nearest stale cell
+    frontier_stale: float = 0.5        # recency below this marks a cell as frontier
     w_proximity: float = 1.0           # per step, w_proximity / (1 + dist/20)
     w_foliage: float = 0.05            # per step spent inside a crown (branch strikes)
     r_detect: float = 30.0             # first sighting of a vehicle
@@ -114,6 +141,14 @@ class SearchCfg:
     r_crash: float = 80.0              # flew into ground or a building
     r_oob: float = 60.0
     r_flip: float = 60.0
+
+    # --- loitering-munition model ---
+    # The strike is a kamikaze impact: the drone dives into the vehicle and both
+    # are destroyed. A registered reach therefore ENDS that drone's episode --
+    # one airframe, one kill -- instead of leaving a spent munition flying around
+    # (the post-kill wander of project memory circling-root-cause). A touch held
+    # by strike_hold does not expend: the gate withheld the detonation.
+    expend_on_reach: bool = True
 
 
 from vesper.lab.frames import (PROPRIO_DIM, camera_axis, proprio as _proprio, quat_mul, seg_counts,  # noqa: F401,E402
@@ -158,6 +193,7 @@ class SearchTask:
         self.visited = torch.zeros(n, g * g, dtype=torch.bool, device=device)
         self.recency = torch.zeros(n, g * g, device=device)
         self.prev_dist = torch.zeros(n, device=device)
+        self.prev_frontier = torch.zeros(n, device=device)   # 0 = no valid baseline
 
         self.tan_fov = math.tan(math.radians(cfg.fov_half_deg))
         self.cos_fov = math.cos(math.radians(cfg.fov_half_deg))
@@ -193,6 +229,7 @@ class SearchTask:
         self.visited[env_ids] = False
         self.recency[env_ids] = 0.0
         self.prev_dist[env_ids] = 0.0
+        self.prev_frontier[env_ids] = 0.0
         if contrast is not None:
             self.contrast[env_ids] = contrast
 
@@ -224,6 +261,10 @@ class SearchTask:
         if cfg.miss_p > 0:
             keep = torch.rand(hit.shape, device=hit.device, generator=self.gen) >= cfg.miss_p
             hit = hit & keep
+        if cfg.pos_id_range > 0:
+            # point-blank omnidirectional ID: cone, contrast, foliage and frame
+            # dropout stop mattering this close; unbroken line of sight still does
+            hit = hit | (clear & (slant < cfg.pos_id_range) & ~self.reached)
         return hit, slant
 
     def footprint(self, drone_xy, agl, quat):
@@ -287,6 +328,9 @@ class SearchTask:
         fresh = swept & ~self.visited
         self.visited |= swept
         self.recency = self.recency * math.exp(-self.dt / cfg.recency_tau_s)
+        # staleness credit is read BEFORE the sweep refreshes recency, and only
+        # for re-sweeps: first-ever sweeps are already paid at w_cover
+        stale_credit = ((swept & ~fresh).float() * (1.0 - self.recency)).sum(dim=1)
         self.recency = torch.where(swept, torch.ones_like(self.recency), self.recency)
 
         # --- progress toward the nearest known, unreached target ------------
@@ -305,6 +349,24 @@ class SearchTask:
         progress = progress.clamp(-3.0, 3.0)
         self.prev_dist = torch.where(has_target, nearest_d, torch.zeros_like(nearest_d))
 
+        # --- frontier: closing on the nearest stale coverage cell ------------
+        # Read AFTER the sweep refreshed recency, so ground the camera is on
+        # right now never counts as its own frontier. Baseline semantics mirror
+        # prev_dist: zero means "no valid baseline" (fresh episode, was pursuing
+        # a target last step, or nothing stale left), and the delta is clamped
+        # because the nearest stale cell can change identity between steps.
+        f_prog = None
+        if cfg.w_frontier > 0:
+            stale_cell = self.recency < cfg.frontier_stale
+            f_dist = (self.cell_xy.unsqueeze(0) - drone_pos[:, :2].unsqueeze(1)).norm(dim=2)
+            f_dist = torch.where(stale_cell, f_dist, torch.full_like(f_dist, 1e6))
+            f_near = f_dist.min(dim=1).values
+            searching = ~has_target & stale_cell.any(dim=1)
+            f_prog = torch.where(searching & (self.prev_frontier > 0),
+                                 self.prev_frontier - f_near,
+                                 torch.zeros_like(f_near)).clamp(-3.0, 3.0)
+            self.prev_frontier = torch.where(searching, f_near, torch.zeros_like(f_near))
+
         # --- failures ------------------------------------------------------
         solid = self.world.solid_at(drone_pos[:, 0], drone_pos[:, 1])
         # a drone inside the kill sphere is on its terminal run, approved or
@@ -321,6 +383,11 @@ class SearchTask:
         tilt = tilt_from_quat(quat)
         flip = tilt > cfg.tilt_limit
         terminated = crash | oob | flip | all_done
+        expended = new_reach.any(dim=1)
+        if cfg.expend_on_reach:
+            # loitering munition: the impact consumes the airframe, so the
+            # striking drone's episode ends the step its kill registers
+            terminated = terminated | expended
 
         # --- reward --------------------------------------------------------
         time_frac = (step_count.float() / self.max_steps).clamp(0, 1)
@@ -331,6 +398,12 @@ class SearchTask:
         r = cfg.w_progress * progress
         r = r - cfg.w_time
         r = r + cfg.w_cover * fresh.float().sum(dim=1)
+        if cfg.w_cover_stale > 0:
+            r = r + cfg.w_cover_stale * stale_credit
+        if cfg.w_yaw_rate > 0:
+            r = r - cfg.w_yaw_rate * (ang_vel_b[:, 2].abs() - cfg.yaw_rate_free).clamp(min=0.0)
+        if f_prog is not None:
+            r = r + cfg.w_frontier * f_prog
         # dense homing on the nearest known target: without it the last 50 m of
         # the approach carries almost no gradient and is never explored
         r = r + torch.where(has_target,
@@ -354,6 +427,10 @@ class SearchTask:
             "coverage": self.visited.float().mean(dim=1),
             "crash": crash, "oob": oob, "flip": flip,
             "visible": visible, "agl": agl, "nearest_known": nearest_d,
+            # [N,K] this step's registered kills; a live session uses it to
+            # expend the striking drone and pin the wreck (the striker's own
+            # auto-reset would otherwise clear `reached` and revive the tank)
+            "strike": new_reach,
         }
         return obs, r, terminated, info
 

@@ -123,6 +123,9 @@ def main():
     for fi, fr in enumerate(frames):
         drones = fr["d"]
         hdgs = fr.get("hdg", [0.0] * len(drones))
+        # loitering munitions: a drone listed dead was consumed by its strike --
+        # its glyph (and its sensor) are gone from this frame on
+        dead = set(fr.get("dead", []))
         lead = drones[0]
         agl = fr["agl"]
         # rising edges first, so the camera can react this same frame
@@ -143,7 +146,9 @@ def main():
             cy += (lead[1] - cy) * 0.10
 
         # stamp coverage: a disc ahead-and-below each drone's camera
-        for d, h in zip(drones, hdgs):
+        for di, (d, h) in enumerate(zip(drones, hdgs)):
+            if di in dead:
+                continue
             r_m = float(np.clip(d[2] * 0.8, 18, 120))
             fx = d[0] + np.cos(h) * d[2] * 0.6
             fy = d[1] + np.sin(h) * d[2] * 0.6
@@ -168,20 +173,23 @@ def main():
         img = win.convert("RGB")
         g = ImageDraw.Draw(img, "RGBA")
 
-        # sensor beam + footprint from the lead
-        h = hdgs[0]
-        r_m = float(np.clip(agl * 0.8, 18, 120))
-        fx = lead[0] + np.cos(h) * agl * 0.6
-        fy = lead[1] + np.sin(h) * agl * 0.6
+        # sensor beam + footprint from the lead (gone once the lead is expended)
         lx, ly = w2c(lead[0], lead[1])
-        fcx, fcy = w2c(fx, fy)
-        rpx = r_m / (2 * WMx) * CW
-        g.polygon([(lx, ly), (fcx - rpx * 0.5, fcy - rpx * 0.5),
-                   (fcx + rpx * 0.5, fcy - rpx * 0.5)], fill=(12, 163, 12, 30))
-        g.ellipse([fcx - rpx, fcy - rpx, fcx + rpx, fcy + rpx], outline=(12, 163, 12, 150), width=2)
+        if 0 not in dead:
+            h = hdgs[0]
+            r_m = float(np.clip(agl * 0.8, 18, 120))
+            fx = lead[0] + np.cos(h) * agl * 0.6
+            fy = lead[1] + np.sin(h) * agl * 0.6
+            fcx, fcy = w2c(fx, fy)
+            rpx = r_m / (2 * WMx) * CW
+            g.polygon([(lx, ly), (fcx - rpx * 0.5, fcy - rpx * 0.5),
+                       (fcx + rpx * 0.5, fcy - rpx * 0.5)], fill=(12, 163, 12, 30))
+            g.ellipse([fcx - rpx, fcy - rpx, fcx + rpx, fcy + rpx], outline=(12, 163, 12, 150), width=2)
 
         # swarm markers
-        for d in drones[1:]:
+        for di, d in enumerate(drones[1:], start=1):
+            if di in dead:
+                continue
             dx, dy = w2c(d[0], d[1])
             g.ellipse([dx - 3, dy - 3, dx + 3, dy + 3], fill=(150, 210, 200, 210))
 
@@ -207,7 +215,8 @@ def main():
                 _label(g, sx, sy, f"TGT-{i+1:02d} · TANK", "DETECTED", col, fontS)
 
         # lead chevron, rotated to heading (screen: north up)
-        _chevron(img, lx, ly, -h)
+        if 0 not in dead:
+            _chevron(img, lx, ly, -hdgs[0])
 
         # HUD
         t_s = fr["t"]
@@ -219,7 +228,7 @@ def main():
             g.text((26, 62), args.caption, font=fontS, fill=ORANGE + (235,))
         clk = f"T+{int(t_s)//60:02d}:{int(t_s)%60:02d}"
         g.text((CW - 150, 22), clk, font=fontHUD, fill=(230, 240, 230, 255))
-        g.text((26, CH - 40), f"DETECTED {found}/{K}    NEUTRALIZED {neut}/{K}    ASSETS {len(drones)}",
+        g.text((26, CH - 40), f"DETECTED {found}/{K}    NEUTRALIZED {neut}/{K}    ASSETS {len(drones) - len(dead)}",
                font=font, fill=ACCENT + (255,))
         # corner ticks
         for (ox, oy, dx, dy) in [(14, 14, 1, 1), (CW - 14, 14, -1, 1),

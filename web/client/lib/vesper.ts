@@ -77,7 +77,7 @@ export type LiveState = {
   found: number;
   reached: number;
   targets: number;
-  drones: { x: number; y: number; z: number }[];
+  drones: { x: number; y: number; z: number; expended?: boolean }[];
   vehicles: { x: number; y: number; found: boolean; reached: boolean }[];
 };
 

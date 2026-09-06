@@ -15,7 +15,7 @@ import { mergeGeometries } from "three/examples/jsm/utils/BufferGeometryUtils.js
 
 type CamMode = "chase" | "fpv" | "orbit";
 
-type StateDrone = { x: number; y: number; z: number; q?: number[] };
+type StateDrone = { x: number; y: number; z: number; q?: number[]; expended?: boolean };
 type StateVehicle = { x: number; y: number; z?: number; hdg?: number; found: boolean; reached: boolean };
 type LiveState = {
   t: number; world?: string; drones: StateDrone[]; vehicles: StateVehicle[];
@@ -258,6 +258,8 @@ export function WorldView({ ip }: { ip: string }) {
         for (let i = 0; i < drones.length && i < next.drones.length; i++) {
           const a = prev.drones[i] ?? next.drones[i];
           const b = next.drones[i];
+          // a loitering munition that struck is expended: its glyph is gone
+          drones[i].visible = !b.expended;
           drones[i].position.copy(lerp3(a, b, f));
           if (a.q && b.q) drones[i].quaternion.copy(q2t(a.q).slerp(q2t(b.q), f));
         }

@@ -28,7 +28,7 @@ type LiveState = {
   reached: number;
   targets: number;
   drone0?: { speed: number; vz: number; agl: number };
-  drones?: { x: number; y: number; z: number }[];
+  drones?: { x: number; y: number; z: number; expended?: boolean }[];
   vehicles?: Vehicle[];
   requests?: StrikeReq[];
   strikes?: { pending: number; awaiting: number; approved: number; denied: number };
@@ -119,7 +119,7 @@ export function MissionPanel({ ip }: { ip: string | null }) {
   }
 
   const vs = st.vehicles ?? [];
-  const assets = st.drones?.length ?? 0;
+  const assets = (st.drones ?? []).filter((d) => !d.expended).length;
   const complete = st.reached >= st.targets && st.targets > 0;
   const reqs = st.requests ?? [];
   const reqBy = new Map(reqs.map((r) => [r.target, r]));

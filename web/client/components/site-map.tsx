@@ -307,6 +307,7 @@ export function SiteMap({ liveIp }: { liveIp?: string | null }) {
         }
       }
       live.drones.forEach((d, i) => {
+        if (d.expended) return; // consumed by its strike — no glyph
         const sx = m.toX(d.x), sy = m.toY(d.y);
         g.fillStyle = i === 0 ? "#3987e5" : "rgba(57,135,229,0.55)";
         g.strokeStyle = "#ffffff";
@@ -412,6 +413,7 @@ export function SiteMap({ liveIp }: { liveIp?: string | null }) {
     if (live) {
       for (let i = 0; i < live.drones.length; i++) {
         const d = live.drones[i];
+        if (d.expended) continue;
         if (near(d.x, d.y))
           return clamp({
             sx: m.toX(d.x), sy: m.toY(d.y),

@@ -14,7 +14,10 @@ Serves on VESPER_LIVE_PORT (8180):
     GET  /streams          {"run": ..., "streams": ["fpv", "overview"]}
     GET  /fpv.mjpeg        drone 0's own camera, synthetic (task lens)
     GET  /overview.mjpeg   chase view trailing drone 0
-    GET  /state            {t, drones:[{x,y,z,linked}], vehicles:[{x,y,found,reached,pending}],
+    GET  /state            {t, drones:[{x,y,z,linked,expended}], vehicles:[{x,y,found,reached,pending}],
+                            -- a drone flagged `expended` was consumed by its own
+                            strike (loitering munition) and is gone until the
+                            next sortie fields a fresh fleet --
                             policy, found, reached, pending, manual, teleop_age_s,
                             comms_denied, comms:{n,half,grid,denied_frac}} -- `grid` is the
                             mission's confirmed-connectivity map over the AO, one digit per
@@ -52,6 +55,7 @@ at least one neutralization -- tagged auto in the manifest and capped at the
 last AUTO_KEEP, so the Runs tab fills with real sorties without flooding.
 """
 import argparse
+import copy
 import json
 import math
 import os
@@ -105,6 +109,12 @@ parser.add_argument("--episode_s", type=float, default=None,
 parser.add_argument("--auto_approve_s", type=float, default=None,
                     help="unattended demo: a strike request AWAITING_APPROVAL this many "
                          "seconds auto-promotes to APPROVED (default off: operator decides)")
+parser.add_argument("--transit", action="store_true",
+                    help="OPT-IN scripted transit layer: drones with no pursuable target "
+                         "fly straight to the stalest coverage cell of their own sector, "
+                         "the policy taking back over on detection. Off by default -- the "
+                         "search behavior should be the policy's own (retrain with "
+                         "w_cover_stale / w_yaw_rate), not choreography")
 parser.add_argument("--disengage_s", type=float, default=20.0,
                     help="a target whose strike request stays un-approved this long is shown "
                          "to the actor as already struck, so its drones break off and keep "
@@ -178,6 +188,112 @@ env.task.strike_hold = strike_hold
 engage = torch.ones(env.num_envs, args.targets, dtype=torch.bool, device=env.device)
 env.task.engage_mask = engage
 
+# --- loitering-munition bookkeeping. A registered strike is a kamikaze impact:
+# the drone dives into the tank and both are destroyed. `expended` marks the
+# consumed airframes -- hidden from the map, the comms reveal, the relay lane and
+# the request raising until the next sortie fields a fresh fleet. `wrecked` pins
+# the kill at FLEET level: the striker's episode ends on impact (SearchCfg.
+# expend_on_reach) and its auto-reset clears its own `reached` row, which would
+# otherwise let the "destroyed" tank drive off again (_drive_vehicles recomputes
+# wrecks from task.reached every step).
+expended = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
+wrecked = torch.zeros(args.targets, dtype=torch.bool, device=env.device)
+
+
+def sync_wrecks():
+    """Re-assert fleet-level kills into every group-0 drone's belief, so the
+    wreck stays a wreck and every surviving drone reads it as already struck."""
+    if bool(wrecked.any()):
+        env.task.reached[_grp0] |= wrecked
+        env.task.known[_grp0] |= wrecked
+
+
+# --- strike commit: the deterministic terminal dive on an APPROVED request.
+# The RL policy finds and shadows targets but loiters OUTSIDE the kill sphere,
+# so an approval used to open the strike_hold gate and then nothing walked
+# through it -- approved targets survived while drones circled (the HITL half of
+# project memory circling-root-cause). Approval is a commitment: the nearest
+# surviving drone is put into a STRIKE state and flown by a deterministic
+# terminal-guidance override -- through the exact same body-frame action path
+# the policy uses -- straight into the target until `touching` fires, the tank
+# dies and the airframe is expended. Search stays the policy's job; only the
+# committed strike is scripted, and only for the one servicing drone.
+STRIKE_CRUISE_AGL = 60.0        # en-route height over ground until the terminal dive
+STRIKE_DIVE_AT = 60.0           # horizontal range where the dive onto the target begins
+STRIKE_GAIN = 1.5               # pre-tanh stick per look_ahead of remaining offset
+strike_tgt = torch.full((env.num_envs,), -1, dtype=torch.long, device=env.device)
+
+
+def sync_strike_commits():
+    """Keep exactly one live servicing drone per APPROVED, still-alive target."""
+    pos = env.flight_state()[0]
+    for i in torch.nonzero(strike_tgt >= 0).flatten().tolist():
+        k = int(strike_tgt[i])
+        # call the dive off when the approval lapses, the target dies (to this
+        # drone or another), or the airframe is spent
+        if req_status[k] != REQ_APPROVED or bool(wrecked[k]) or bool(expended[i]):
+            strike_tgt[i] = -1
+    for k in range(args.targets):
+        if req_status[k] != REQ_APPROVED or bool(wrecked[k]) or bool((strike_tgt == k).any()):
+            continue
+        cand = _grp0 & ~expended & (strike_tgt < 0)
+        cand = cand.clone()
+        # the lead is never conscripted: its episode owns the vehicle set, so
+        # expending it ends the whole sortie (and in manual it is the operator's)
+        cand[0] = False
+        if not bool(cand.any()):
+            continue
+        d = (pos[:, :2] - env.target_pos[:, k, :2]).norm(dim=1)
+        d = torch.where(cand, d, torch.full_like(d, 1e9))
+        i = int(d.argmin())
+        strike_tgt[i] = k
+        print(f"[warm] strike committed: drone {i} diving on target {k} "
+              f"({float(d[i]):.0f} m out)", flush=True)
+
+
+def strike_override(act):
+    """Terminal guidance for drones in STRIKE: cruise to the target, then dive
+    into it. Same body-frame/tanh action path the policy flies.
+
+    The descent is thrust-aware: a naive "setpoint 20 m below" saturates the
+    SE(3) vertical accel demand past -g, the world thrust vector inverts, the
+    airframe chases an upside-down attitude and the task terminates it as a
+    flip -- which is exactly how the first version lost every diver en route.
+    So the vertical offset is floored each step at what keeps a_z above
+    A_Z_MIN given the current sink rate, and a sink-rate brake caps the dive
+    at VZ_MAX. The kill needs slant < reach_radius, not a ballistic impact.
+    """
+    idx = torch.nonzero(strike_tgt >= 0).flatten()
+    if not len(idx):
+        return act
+    pos, vel, quat, _ = env.flight_state()
+    tgt = env.target_pos[idx, strike_tgt[idx]]                    # [M,3]
+    d = tgt - pos[idx]
+    horiz = d[:, :2].norm(dim=1)
+    yaw = torch.atan2(2 * (quat[idx, 0] * quat[idx, 3] + quat[idx, 1] * quat[idx, 2]),
+                      1 - 2 * (quat[idx, 2] ** 2 + quat[idx, 3] ** 2))
+    c, s = torch.cos(yaw), torch.sin(yaw)
+    la = env.task.cfg.look_ahead
+    lim = 0.97 * la
+    agl = pos[idx, 2] - env.world.ground_at(pos[idx, 0], pos[idx, 1])
+    # desired vertical offset (metres): hold cruise height en route, close on
+    # the hull inside STRIKE_DIVE_AT
+    off_z = torch.where(horiz > STRIKE_DIVE_AT, STRIKE_CRUISE_AGL - agl, d[:, 2])
+    # thrust-aware floor: kp*off_z - kv*vz >= A_Z_MIN keeps f_z comfortably
+    # positive; the brake overrides everything when the sink rate hits VZ_MAX
+    A_Z_MIN, VZ_MAX = -5.5, 12.0
+    vz = vel[idx, 2]
+    off_z = torch.maximum(off_z, (A_Z_MIN + env.ctrl.kv * vz) / env.ctrl.kp)
+    off_z = torch.where(vz < -VZ_MAX, torch.zeros_like(off_z), off_z)
+    off_f = (c * d[:, 0] + s * d[:, 1]).clamp(-lim, lim)
+    off_l = (-s * d[:, 0] + c * d[:, 1]).clamp(-lim, lim)
+    off_z = off_z.clamp(-lim, lim)
+    act = act.clone()
+    act[idx, 0] = torch.atanh(off_f / la)          # tanh(a)*la = off, exactly
+    act[idx, 1] = torch.atanh(off_l / la)
+    act[idx, 2] = torch.atanh(off_z / la)
+    return act
+
 
 def sync_strike_hold():
     """Push the approval state into the task's neutralization gate."""
@@ -209,6 +325,58 @@ def reset_requests():
 
 
 sync_strike_hold()
+
+# --- scripted transit layer: navigator between engagements.
+# The policy is a good closer (detect->strike in ~8 s) but its learned "search"
+# is a saturated orbit (project memory: circling-root-cause). So a drone whose
+# actor currently sees no pursuable target is flown by script instead: straight
+# to the stalest coverage cell of ITS OWN sector -- the AO's cells are dealt
+# round-robin across the fleet, so 16 drones sweep 16 disjoint slices instead
+# of all re-scanning the same ground. The moment a target is visible to the
+# actor (known, unreached, engaged) the policy takes the stick back.
+# Actions go through the exact same body-frame/tanh path the policy uses.
+TRANSIT_GAIN = 1.2               # pre-tanh stick -> ~21 m setpoint offset, ~17 m/s
+TRANSIT_AGL = 65.0               # cruise height over ground: wide footprint, safe over trees
+_G2 = env.task.cell_xy.shape[0]
+_cellsector = torch.arange(_G2, device=env.device) % env.num_envs
+_sector = _cellsector.unsqueeze(0) == torch.arange(env.num_envs,
+                                                   device=env.device).unsqueeze(1)  # [N,G2]
+transit_wp = env.task.cell_xy[torch.zeros(env.num_envs, dtype=torch.long,
+                                          device=env.device)].clone()   # [N,2]
+transit_next = torch.zeros(env.num_envs, device=env.device)  # steps until a re-pick
+
+
+def transit_override(act):
+    """Replace the action rows of no-target drones with a transect command."""
+    pursuable = (env.task.known & ~env.task.reached & engage).any(dim=1)
+    script = ~pursuable
+    if not bool(script.any()):
+        return act
+    pos, _, quat, _ = env.flight_state()
+    # re-pick when arrived or on a slow clock (a swept sector should move on)
+    transit_next.sub_(1)
+    d_wp = (transit_wp - pos[:, :2]).norm(dim=1)
+    repick = script & ((d_wp < 35.0) | (transit_next <= 0))
+    if bool(repick.any()):
+        stale = env.task.recency + (~_sector).float() * 1e6   # own sector only
+        cell = stale.argmin(dim=1)
+        transit_wp[repick] = env.task.cell_xy[cell[repick]]
+        transit_next[repick] = 10.0 / dt
+    d = transit_wp - pos[:, :2]
+    dirw = d / d.norm(dim=1, keepdim=True).clamp(min=1e-6)
+    yaw = torch.atan2(2 * (quat[:, 0] * quat[:, 3] + quat[:, 1] * quat[:, 2]),
+                      1 - 2 * (quat[:, 2] ** 2 + quat[:, 3] ** 2))
+    c, s = torch.cos(yaw), torch.sin(yaw)
+    fwd = (c * dirw[:, 0] + s * dirw[:, 1]) * TRANSIT_GAIN
+    left = (-s * dirw[:, 0] + c * dirw[:, 1]) * TRANSIT_GAIN
+    agl = pos[:, 2] - env.world.ground_at(pos[:, 0], pos[:, 1])
+    up = ((TRANSIT_AGL - agl) / 25.0).clamp(-0.9, 0.9)
+    act = act.clone()
+    act[script, 0] = fwd[script]
+    act[script, 1] = left[script]
+    act[script, 2] = up[script]
+    return act
+
 
 # --- sortie recorder: the mission since the last reset, buffered in the same
 # frame schema replay.json carries (vesper.native.replay), so a {"kind":"record"}
@@ -541,6 +709,9 @@ def apply_commands():
             t0, step = 0.0, 0
             comms_seen[:] = 0                               # fresh mission, fresh reveal
             relayed_found[:] = relayed_reach[:] = False
+            expended[:] = False
+            wrecked[:] = False
+            strike_tgt[:] = -1
             reset_requests()
             reset_recording()
             print("[warm] reset", flush=True)
@@ -552,6 +723,9 @@ def apply_commands():
                 t0, step = 0.0, 0
                 comms_seen[:] = 0
                 relayed_found[:] = relayed_reach[:] = False
+                expended[:] = False
+                wrecked[:] = False
+                strike_tgt[:] = -1
                 reset_requests()
                 reset_recording()
                 print(f"[warm] deployed {policy.name}", flush=True)
@@ -587,15 +761,68 @@ try:
         tick = time.time()
         apply_commands()
         act = policy.act(obs)
+        if args.transit:
+            act = transit_override(act)   # manual override below still wins for drone 0
+        sync_strike_commits()
+        act = strike_override(act)        # approved strikes: committed terminal dives
         if manual:
             # drone 0 belongs to the operator: body-frame stick through the same
             # action the policy uses, so WASD flies exactly what the policy would
             fresh = (time.time() - teleop["t"]) < args.deadman_s
             ax = teleop["axes"] if fresh else [0.0, 0.0, 0.0]
             act[0] = torch.tensor(ax, device=env.device) * stick
+        if bool(expended.any()):
+            act[expended] = 0.0        # a spent airframe flies nothing
         obs, rew, done, info = env.ppo_step(act)
         step += 1
         t = step * dt
+
+        # --- loitering-munition accounting, BEFORE anything reads task state.
+        # env.step already auto-reset whoever finished, so `info["strike"]` is
+        # the only record of a kill that just registered.
+        ep0 = int(env.episode_length_buf[0].item())
+        rolled = ep0 < prev_ep0                   # the lead's episode just ended
+        st = info["strike"]                       # [N,K] kills registered this step
+        striker = st.any(dim=1)
+        new_wreck = st[_grp0].any(dim=0)
+        if rolled:
+            # sortie over (lead expended on its strike / all cleared / rollover).
+            # A kill on this final step would be lost with the fleet reset --
+            # stamp it into the buffered mission before the auto-save.
+            if bool(new_wreck.any()) and rec_buf:
+                fin = copy.deepcopy(rec_buf[-1])
+                for _k in torch.nonzero(new_wreck).flatten().tolist():
+                    fin["tg"][_k][2] = fin["tg"][_k][3] = 1
+                fin["dead"] = sorted(set(fin.get("dead", []))
+                                     | set(torch.nonzero(striker).flatten().tolist()))
+                rec_buf.append(fin)
+            finish_mission()                      # auto-save the completed sortie
+            relayed_found[:] = relayed_reach[:] = False
+            reset_requests()                      # requests die with the sortie
+            expended[:] = False                   # a new sortie fields a fresh fleet
+            wrecked[:] = False
+            strike_tgt[:] = -1
+        elif bool(st.any()):
+            for _k in torch.nonzero(new_wreck & ~wrecked).flatten().tolist():
+                lag = (f", {t - req_await_t[_k]:.1f}s after approval"
+                       if req_status[_k] == REQ_APPROVED else "")
+                print(f"[warm] impact on target {_k} at t={t:.1f}s: tank destroyed, "
+                      f"striking drone expended{lag}", flush=True)
+            expended |= striker
+            wrecked |= new_wreck
+        # an episode that ended without a kill (crash/timeout) aborts any dive
+        # that drone was flying; sync_strike_commits recommits the nearest
+        aborted = done & (strike_tgt >= 0) & ~striker
+        if bool(aborted.any()):
+            for i in torch.nonzero(aborted).flatten().tolist():
+                cause = ("crash" if bool(info["crash"][i]) else
+                         "oob" if bool(info["oob"][i]) else
+                         "flip" if bool(info["flip"][i]) else "rollover")
+                print(f"[warm] dive aborted: drone {i} lost to {cause} en route "
+                      f"to target {int(strike_tgt[i])}", flush=True)
+            strike_tgt[aborted] = -1
+        prev_ep0 = ep0
+        sync_wrecks()
 
         # publish world state for the AO map + 3D view (all drones, env-0 targets)
         pos, vel, quat, _ = env.flight_state()
@@ -607,26 +834,25 @@ try:
         reached = env.task.reached[0].cpu().numpy()
         v0 = vel[0]
         linked = env.linked.cpu().numpy()
-        stamp_comms(drones[:, :2])
-        # relay gate: the lead's episode rolled over -> unrelayed contacts die
-        # with it; while linked, everything it knows commits to the operator
-        ep0 = int(env.episode_length_buf[0].item())
-        if ep0 < prev_ep0:
-            finish_mission()                      # auto-save the completed sortie
-            relayed_found[:] = relayed_reach[:] = False
-            reset_requests()                      # requests die with the sortie
-        prev_ep0 = ep0
-        if linked[0]:
-            relayed_found |= known
-            relayed_reach |= reached
+        expended_np = expended.cpu().numpy()
+        stamp_comms(drones[~expended_np][:, :2])   # spent airframes confirm nothing
+        # relay gate: a contact (or confirmed kill) commits to the operator's
+        # map as soon as ANY surviving group-0 drone holds a link -- the same
+        # relay lane the strike requests ride, not just the lead's own radio.
+        # A non-lead loitering munition that kills deep in a dead zone stays
+        # PENDING until some drone climbs back into coverage, then registers.
+        if bool((linked & ~expended_np).any()):
+            relayed_found |= env.task.known[_grp0 & ~expended].any(dim=0).cpu().numpy()
+            relayed_reach |= (env.task.reached[_grp0].any(dim=0).cpu().numpy()
+                              | wrecked.cpu().numpy())
 
-        # engagement: ANY group-0 drone's detection raises a strike request
-        # (the hold gates the whole group, so the whole group's eyes count);
-        # it reaches the operator once ANY drone holds a link (the relay lane,
-        # not just the lead's own radio); approval opens the gate
+        # engagement: ANY surviving group-0 drone's detection raises a strike
+        # request (the hold gates the whole group, so the whole group's eyes
+        # count); it reaches the operator once ANY surviving drone holds a link
+        # (the relay lane, not just the lead's own radio); approval opens the gate
         mission_t[0] = float(t)
-        known_any = env.task.known[_grp0].any(dim=0).cpu().numpy()
-        any_link = bool(linked.any())
+        known_any = env.task.known[_grp0 & ~expended].any(dim=0).cpu().numpy()
+        any_link = bool((linked & ~expended_np).any())
         for k in range(args.targets):
             if req_status[k] == REQ_NONE and known_any[k]:
                 req_status[k] = REQ_PENDING
@@ -661,6 +887,7 @@ try:
                         int(relayed_found[k]), int(relayed_reach[k])]
                        for k in range(args.targets)],
                 "agl": round(float(info["agl"][0]), 1),
+                "dead": [int(i) for i in np.nonzero(expended_np)[0]],
             })
             if len(rec_buf) > REC_CAP:            # thin 2x, keep the whole mission
                 rec_buf[:] = rec_buf[1::2]
@@ -682,7 +909,9 @@ try:
                           "x": round(float(tp[k][0]), 1), "y": round(float(tp[k][1]), 1),
                           "detected_t": round(req_detected_t[k], 1),
                           "uplink": any_link,
-                          "disengaged": not bool(engage[0, k])}
+                          "disengaged": not bool(engage[0, k]),
+                          "committed": (int((strike_tgt == k).nonzero()[0])
+                                        if bool((strike_tgt == k).any()) else None)}
                          for k in range(args.targets) if req_status[k] != REQ_NONE],
             "strikes": {"pending": n_by[REQ_PENDING], "awaiting": n_by[REQ_AWAITING],
                         "approved": n_by[REQ_APPROVED], "denied": n_by[REQ_DENIED]},
@@ -691,10 +920,12 @@ try:
             "comms_denied": round(comms_denied_frac, 3),
             "comms": {"n": COMMS_N, "half": _ao_half, "denied_frac": round(comms_denied_frac, 3),
                       "grid": (comms_seen + ord("0")).astype(np.uint8).tobytes().decode("ascii")},
+            "expended": int(expended_np.sum()),   # airframes consumed by strikes
             "drones": [{"x": round(float(p[0]), 1), "y": round(float(p[1]), 1),
                         "z": round(float(p[2]), 1), "linked": bool(lk),
+                        "expended": bool(ex),
                         "q": [round(float(v), 3) for v in q]}
-                       for p, q, lk in zip(drones, quats, linked)],
+                       for p, q, lk, ex in zip(drones, quats, linked, expended_np)],
             "vehicles": [{"x": round(float(tp[k][0]), 1), "y": round(float(tp[k][1]), 1),
                           "z": round(float(tp[k][2]), 1), "hdg": round(float(headings[k]), 2),
                           "found": bool(relayed_found[k]), "reached": bool(relayed_reach[k]),
@@ -704,10 +935,11 @@ try:
 
         if fpv_cam is not None and step % args.every == 0:
             pos, vel, quat, _ = env.flight_state()
+            alive = pos[~expended]                 # spent airframes carry no glyph
             with _feed_cv:
                 _feed_slot["req"] = (pos[0].cpu().numpy(), quat[0].cpu().tolist(),
                                      vel[0, :2].cpu().numpy(), env.target_pos[0].cpu().tolist(),
-                                     pos[1:].cpu().tolist(), pos.cpu().tolist())
+                                     pos[1:][~expended[1:]].cpu().tolist(), alive.cpu().tolist())
                 _feed_cv.notify()
 
         # NB: env.step() already auto-resets each drone individually as it
