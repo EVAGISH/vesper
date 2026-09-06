@@ -1,0 +1,469 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Vesper — Cut the Cord</title>
+<style>
+  :root{
+    --ground:#080b09; --panel:#10150e; --ink:#e6ecdf; --muted:#93a08f; --faint:#5c675b;
+    --accent:#19c219; --rf:#3b8dff; --strike:#e0483b; --amber:#e0a43b;
+    --line:#20301d; --line2:#2c3a28;
+    --mono:ui-monospace,"SF Mono",Menlo,Consolas,monospace;
+    --sans:system-ui,-apple-system,"Helvetica Neue",Arial,sans-serif;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  html,body{height:100%}
+  body{background:var(--ground);color:var(--ink);font-family:var(--sans);overflow:hidden;-webkit-font-smoothing:antialiased}
+  body::before{content:"";position:fixed;inset:0;pointer-events:none;z-index:6;opacity:.45;
+    background:linear-gradient(rgba(25,194,25,.03) 1px,transparent 1px) 0 0/100% 3px}
+
+  /* HUD chrome */
+  .hud{position:fixed;top:0;left:0;right:0;z-index:7;display:flex;align-items:center;gap:14px;
+    padding:12px 22px;font-family:var(--mono);font-size:11px;letter-spacing:.16em;text-transform:uppercase;
+    color:var(--muted);border-bottom:1px solid var(--line);background:rgba(8,11,9,.72);backdrop-filter:blur(4px)}
+  .hud b{color:var(--ink);letter-spacing:.22em}
+  .hud .dot{width:7px;height:7px;border-radius:50%;background:var(--accent);box-shadow:0 0 8px var(--accent)}
+  .hud .sp{flex:1}
+  .hud .co{color:var(--faint)}
+
+  .deck{position:fixed;inset:0;z-index:2}
+  .slide{position:absolute;inset:0;opacity:0;visibility:hidden;transform:translateY(12px);
+    transition:opacity .45s ease,transform .45s ease,visibility .45s;display:flex;flex-direction:column;justify-content:center}
+  .slide.on{opacity:1;visibility:visible;transform:none}
+  .pad{padding:clamp(40px,6vw,96px);padding-top:88px;padding-bottom:76px}
+  .wrap{width:100%;max-width:1240px;margin:0 auto}
+
+  .eyebrow{font-family:var(--mono);font-size:12px;letter-spacing:.28em;text-transform:uppercase;color:var(--accent);
+    display:flex;align-items:center;gap:10px;margin-bottom:18px}
+  .eyebrow::before{content:"";width:22px;height:1px;background:var(--accent)}
+  h1{font-size:clamp(44px,7.2vw,104px);font-weight:800;line-height:.96;letter-spacing:-.02em;text-wrap:balance}
+  h2{font-size:clamp(30px,4.6vw,58px);font-weight:760;line-height:1.0;letter-spacing:-.015em;text-wrap:balance}
+  .sub{margin-top:18px;font-size:clamp(17px,2vw,25px);line-height:1.4;color:var(--muted);max-width:56ch}
+  .sub strong{color:var(--ink)}
+  .accent{color:var(--accent)} .red{color:var(--strike)} .blue{color:var(--rf)}
+  .cap{font-family:var(--mono);font-size:11px;letter-spacing:.12em;text-transform:uppercase;color:var(--faint);line-height:1.6}
+
+  /* full-bleed image slides */
+  .bleed{position:absolute;inset:0;z-index:-1;overflow:hidden}
+  .bleed img,.bleed video{width:100%;height:100%;object-fit:cover;display:block}
+  .bleed::after{content:"";position:absolute;inset:0;
+    background:linear-gradient(180deg,rgba(8,11,9,.66) 0%,rgba(8,11,9,.14) 34%,rgba(8,11,9,.5) 58%,rgba(8,11,9,.93) 82%,rgba(8,11,9,.97) 100%)}
+  .bleed.dim::after{background:rgba(8,11,9,.78)}
+  .bottomer{margin-top:auto}
+  .slide .pad.flex{display:flex;flex-direction:column;height:100%}
+  .print-poster{display:none}
+
+  /* cropped-image tile machinery */
+  .shot{position:relative;overflow:hidden;background:var(--panel);border:1px solid var(--line)}
+  .shot>img{position:absolute;display:block;max-width:none}
+  .shot .tag{position:absolute;left:0;bottom:0;right:0;z-index:2;padding:8px 10px;
+    font-family:var(--mono);font-size:10.5px;letter-spacing:.14em;text-transform:uppercase;color:var(--ink);
+    background:linear-gradient(180deg,transparent,rgba(8,11,9,.9) 55%)}
+  .shot .tag b{color:var(--accent)}
+
+  /* slide 1 — hook */
+  .s1 .wrap{display:grid;grid-template-columns:1fr 1.15fr;gap:clamp(28px,4vw,64px);align-items:center}
+  .s1 svg{width:100%;height:auto;display:block}
+  .s1 .cap{margin-top:12px}
+  @media(max-width:960px){.s1 .wrap{grid-template-columns:1fr}}
+
+  /* slide 2 — problem */
+  .s2 .facts{display:grid;grid-template-columns:repeat(3,1fr);gap:14px;margin-top:30px}
+  .s2 .fact{border:1px solid var(--line);background:var(--panel);display:flex;flex-direction:column}
+  .s2 .fact .shot,.s2 .fact .diag{aspect-ratio:16/10;width:100%}
+  .s2 .fact .diag{display:flex;align-items:center;justify-content:center;background:var(--panel)}
+  .s2 .fact .diag svg{width:64%;height:auto}
+  .s2 .fact .k{padding:12px 14px 4px;font-family:var(--mono);font-size:11px;letter-spacing:.2em;text-transform:uppercase;color:var(--strike)}
+  .s2 .fact .v{padding:0 14px 14px;font-size:14.5px;line-height:1.45;color:var(--muted)}
+  .s2 .fact .v b{color:var(--ink)}
+  .s2 .rule{margin-top:26px;font-size:clamp(20px,2.6vw,32px);font-weight:700;letter-spacing:-.01em}
+  .s2 .rule span{color:var(--rf)}
+  @media(max-width:960px){.s2 .facts{grid-template-columns:1fr}}
+
+  /* slide 4 — loop */
+  .s4 .loop{display:grid;grid-template-columns:repeat(5,1fr);gap:12px;margin-top:28px}
+  .s4 .step .shot{aspect-ratio:1/1;width:100%}
+  .s4 .step .n{font-family:var(--mono);font-size:10px;letter-spacing:.16em;color:var(--faint);margin:10px 0 4px}
+  .s4 .step .t{font-size:15px;font-weight:750;letter-spacing:.03em}
+  .s4 .step .d{font-size:12.5px;color:var(--muted);margin-top:4px;line-height:1.4}
+  .s4 .step.human .t{color:var(--rf)} .s4 .step.human .shot{border-color:var(--rf)}
+  .s4 .step.kill .t{color:var(--strike)} .s4 .step.kill .shot{border-color:var(--strike)}
+  .s4 .note{margin-top:20px;font-family:var(--mono);font-size:12.5px;letter-spacing:.05em;color:var(--muted)}
+  .s4 .note b{color:var(--ink)}
+  @media(max-width:960px){.s4 .loop{grid-template-columns:repeat(2,1fr)}}
+
+  /* slide 5 — live */
+  .live-cue{display:inline-flex;align-items:center;gap:14px;margin-bottom:16px;font-family:var(--mono);
+    font-size:13px;letter-spacing:.24em;text-transform:uppercase;color:var(--strike)}
+  .live-cue .rec{width:12px;height:12px;border-radius:50%;background:var(--strike);box-shadow:0 0 12px var(--strike);animation:pulse 1.4s infinite}
+  @keyframes pulse{0%,100%{opacity:1}50%{opacity:.3}}
+
+  /* slide 6 — twin */
+  .s6t .pair{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-top:28px}
+  .s6t .shot{aspect-ratio:4/3;width:100%}
+  .s6t .vs{position:relative}
+  .s6t .vs::after{content:"▶";position:absolute;top:50%;right:-21px;transform:translateY(-50%);z-index:3;
+    color:var(--accent);font-size:16px}
+  @media(max-width:960px){.s6t .pair{grid-template-columns:1fr}.s6t .vs::after{display:none}}
+
+  /* slide 7 — trained */
+  .s6 .row{display:grid;grid-template-columns:repeat(3,1fr);gap:14px;margin-top:28px}
+  .s6 .shot{aspect-ratio:16/9;width:100%}
+  .s6 .arrowline{display:flex;align-items:center;gap:10px;margin-top:14px;font-family:var(--mono);
+    font-size:11.5px;letter-spacing:.14em;text-transform:uppercase;color:var(--faint)}
+  .s6 .arrowline b{color:var(--accent)}
+  @media(max-width:960px){.s6 .row{grid-template-columns:1fr}}
+
+  /* slide 8 — photoreal video */
+  .s7 h1{font-size:clamp(38px,5.4vw,80px);max-width:14ch}
+  .s7 .inset{position:absolute;right:clamp(20px,3vw,48px);bottom:86px;width:min(26vw,360px);z-index:3;
+    border:1px solid var(--line2);box-shadow:0 12px 40px rgba(0,0,0,.55)}
+  .s7 .inset img{width:100%;display:block}
+  .s7 .inset .cap{padding:8px 10px;background:rgba(8,11,9,.92)}
+  @media(max-width:960px){.s7 .inset{display:none}}
+
+  /* slide 9 — close */
+  .s8 .close-line{margin-top:28px;display:flex;gap:26px;flex-wrap:wrap;font-family:var(--mono);
+    font-size:12px;letter-spacing:.16em;text-transform:uppercase;color:var(--muted)}
+  .s8 .close-line b{color:var(--accent)}
+  .s8 .team{margin-top:38px;display:flex;gap:clamp(28px,5vw,72px);flex-wrap:wrap}
+  .s8 .team .who .nm{font-size:clamp(18px,2vw,24px);font-weight:750}
+  .s8 .team .who .em{margin-top:4px;font-family:var(--mono);font-size:13px;letter-spacing:.08em;color:var(--accent)}
+  .s8 .fin{margin-top:34px;font-size:clamp(22px,2.8vw,36px);font-weight:800;letter-spacing:-.01em}
+
+  /* nav */
+  .foot{position:fixed;bottom:20px;left:0;right:0;z-index:7;display:flex;align-items:center;justify-content:center;gap:16px;
+    font-family:var(--mono);font-size:11px;letter-spacing:.16em;color:var(--faint)}
+  .dots{display:flex;gap:8px}
+  .dots i{width:7px;height:7px;border:1px solid var(--line2);border-radius:50%;cursor:pointer;transition:all .2s}
+  .dots i.on{background:var(--accent);border-color:var(--accent);box-shadow:0 0 7px var(--accent)}
+  .count b{color:var(--muted)}
+  .hint{position:fixed;bottom:20px;right:22px;z-index:7;font-family:var(--mono);font-size:10px;letter-spacing:.12em;color:var(--faint);text-transform:uppercase}
+
+  @media (prefers-reduced-motion:reduce){
+    .slide{transition:opacity .01s}
+    .live-cue .rec{animation:none}
+  }
+  :focus-visible{outline:2px solid var(--accent);outline-offset:3px}
+
+  /* ============ PDF EXPORT ============ */
+  @page{size:1680px 1050px;margin:0}
+  @media print{
+    html,body{height:auto;overflow:visible;-webkit-print-color-adjust:exact;print-color-adjust:exact}
+    body::before{display:none}
+    .hud{position:absolute}
+    .deck{position:static}
+    .slide{position:relative;inset:auto;width:1680px;height:1050px;opacity:1 !important;visibility:visible !important;
+      transform:none !important;page-break-after:always;break-after:page;overflow:hidden}
+    .slide:last-of-type{page-break-after:auto}
+    .foot,.hint{display:none}
+    video{display:none}
+    .print-poster{display:block}
+    .live-cue .rec{animation:none}
+    /* pin desktop layouts + type sizes regardless of print viewport */
+    h1{font-size:104px} h2{font-size:58px}
+    .s1 .wrap{grid-template-columns:1fr 1.15fr !important}
+    .s2 .facts{grid-template-columns:repeat(3,1fr) !important}
+    .s4 .loop{grid-template-columns:repeat(5,1fr) !important}
+    .s6t .pair{grid-template-columns:1fr 1fr !important}
+    .s6 .row{grid-template-columns:repeat(3,1fr) !important}
+    .s7 h1{font-size:80px}
+    .s7 .inset{display:block !important}
+  }
+</style>
+</head>
+<body>
+
+<div class="hud">
+  <span class="dot"></span><b>VESPER</b><span>SIM OPS</span>
+  <span class="sp"></span>
+  <span class="co">48.7106°N 37.5762°E · KRAMATORSK AO</span>
+</div>
+
+<div class="deck" id="deck">
+
+  <!-- 1 · HOOK -->
+  <section class="slide s1" data-title="hook">
+    <div class="pad"><div class="wrap">
+      <div>
+        <div class="eyebrow">Vesper · DN Hacks</div>
+        <h1>The drone war is a comms war.</h1>
+        <p class="sub" style="font-size:clamp(19px,2.3vw,28px);color:var(--ink)">And right now, the state of the art is <strong class="red">a leash.</strong></p>
+        <p class="cap" style="margin-top:26px;color:var(--muted)">Eashan Vagish · Theo Oltean</p>
+      </div>
+      <div>
+        <!-- original illustration: fiber-optic FPV drone -->
+        <svg viewBox="0 0 640 400" role="img" aria-label="Diagram: a drone flying on a fiber-optic tether under a jammed radio spectrum">
+          <g stroke="#e0483b" fill="none" opacity=".8">
+            <path d="M120 118 q14 -16 0 -32 M136 126 q24 -24 0 -48 M152 134 q34 -32 0 -64" stroke-width="1.6"/>
+            <path d="M520 108 q-14 -16 0 -32 M504 116 q-24 -24 0 -48 M488 124 q-34 -32 0 -64" stroke-width="1.6"/>
+          </g>
+          <g font-family="ui-monospace,Menlo,monospace" font-size="11" letter-spacing="2" fill="#e0483b">
+            <text x="106" y="52">JAMMER</text><text x="468" y="42">JAMMER</text>
+            <text x="252" y="30" fill="#e0483b" opacity=".9">RF DENIED · GPS DENIED</text>
+          </g>
+          <line x1="60" y1="70" x2="580" y2="70" stroke="#e0483b" stroke-width="1" stroke-dasharray="3 5" opacity=".55"/>
+          <g stroke="#8a4b45" stroke-width="2" fill="none">
+            <path d="M118 120 v40 M110 160 h16 M518 110 v50 M510 160 h16"/>
+          </g>
+          <path d="M20 330 q90 -18 180 -8 q140 14 240 2 q100 -10 180 4" fill="none" stroke="#2c3a28" stroke-width="2"/>
+          <g stroke="#93a08f" fill="none" stroke-width="2">
+            <rect x="52" y="290" width="54" height="32" rx="3"/>
+            <path d="M79 290 v-16 M71 274 h16"/>
+          </g>
+          <circle cx="140" cy="315" r="16" fill="none" stroke="#e0a43b" stroke-width="2.4"/>
+          <circle cx="140" cy="315" r="7" fill="none" stroke="#e0a43b" stroke-width="1.4"/>
+          <text x="36" y="356" font-family="ui-monospace,Menlo,monospace" font-size="11" letter-spacing="2" fill="#93a08f">PILOT</text>
+          <text x="118" y="356" font-family="ui-monospace,Menlo,monospace" font-size="11" letter-spacing="2" fill="#e0a43b">SPOOL</text>
+          <path d="M154 310 C 260 330, 330 300, 400 250 S 520 190, 545 172" fill="none" stroke="#e0a43b" stroke-width="2.6"/>
+          <text x="256" y="298" font-family="ui-monospace,Menlo,monospace" font-size="12" letter-spacing="2" fill="#e0a43b">20 KM OF GLASS</text>
+          <g transform="translate(548,160)" stroke="#e6ecdf" stroke-width="2.4" fill="none">
+            <path d="M-14 8 L14 -8 M-14 -8 L14 8"/>
+            <circle cx="-14" cy="8" r="7"/><circle cx="14" cy="-8" r="7"/>
+            <circle cx="-14" cy="-8" r="7"/><circle cx="14" cy="8" r="7"/>
+          </g>
+          <text x="470" y="212" font-family="ui-monospace,Menlo,monospace" font-size="11" letter-spacing="2" fill="#e6ecdf">FPV · TETHERED</text>
+        </svg>
+        <p class="cap">Ukraine, today: crews fly strike drones on 20 kilometers of unspooling glass — because the spectrum is too jammed for radio. <span style="color:var(--amber)">Original illustration.</span></p>
+      </div>
+    </div></div>
+  </section>
+
+  <!-- 2 · PROBLEM -->
+  <section class="slide s2" data-title="problem">
+    <div class="pad"><div class="wrap">
+      <div class="eyebrow">The Problem</div>
+      <h2>Out there, anything that phones home <span class="red">dies.</span></h2>
+      <div class="facts">
+        <div class="fact">
+          <div class="shot" aria-label="RF coverage model of the Kramatorsk AO with jammer shadow">
+            <!-- live_tactical.png 1680x1050, crop x120 y330 w520 h325 -->
+            <img src="assets/live_tactical.png" alt="Vesper RF coverage model showing a jammed zone over the Kramatorsk AO"
+                 style="width:323%;height:323%;left:-23.1%;top:-101.5%">
+            <div class="tag"><b>JAMMED</b> · our RF model of the demo AO</div>
+          </div>
+          <div class="k">No Spectrum</div>
+          <div class="v"><b>Key up a radio, become a target.</b> The jammers own the air.</div>
+        </div>
+        <div class="fact">
+          <div class="diag" aria-label="Diagram of GPS denial">
+            <svg viewBox="0 0 200 120" role="img" aria-label="Crossed-out satellite: GPS denied">
+              <g stroke="#93a08f" stroke-width="2" fill="none">
+                <rect x="82" y="34" width="36" height="22" rx="3"/>
+                <path d="M62 38 l16 8 M138 38 l-16 8 M62 58 l16 -6 M138 58 l-16 -6"/>
+                <rect x="46" y="30" width="18" height="30" rx="2"/><rect x="136" y="30" width="18" height="30" rx="2"/>
+                <path d="M100 56 v14" opacity=".7"/>
+                <path d="M88 78 q12 10 24 0 M80 88 q20 16 40 0" opacity=".5"/>
+              </g>
+              <path d="M40 100 L160 16" stroke="#e0483b" stroke-width="4"/>
+            </svg>
+          </div>
+          <div class="k">No GPS</div>
+          <div class="v"><b>Every satellite fix is a lie.</b> Fly by what you see — or don't fly.</div>
+        </div>
+        <div class="fact">
+          <div class="shot" aria-label="Armor concealed at a treeline, drone view">
+            <!-- isaac_kill.png 900x900, crop x330 y400 w570 h356 -->
+            <img src="assets/isaac_kill.png" alt="Photoreal drone view of armor tucked against a treeline"
+                 style="width:157.9%;height:252.8%;left:-57.9%;top:-112.4%">
+            <div class="tag"><b>HIDDEN</b> · armor under canopy</div>
+          </div>
+          <div class="k">No Easy Targets</div>
+          <div class="v"><b>The armor isn't on anyone's map.</b> It's under the trees, waiting.</div>
+        </div>
+      </div>
+      <p class="rule">And the line that never moves: <span>a human pulls the trigger. Every time.</span></p>
+    </div></div>
+  </section>
+
+  <!-- 3 · REVEAL -->
+  <section class="slide s3" data-title="vesper">
+    <div class="bleed"><img src="assets/tac1.png" alt="Vesper tactical console: coverage sweep over Kramatorsk with a detected tank"></div>
+    <div class="pad flex"><div class="wrap bottomer">
+      <div class="eyebrow">Vesper</div>
+      <h1>You can't scale a cord.<br>We cut it — <span class="accent">with software.</span></h1>
+      <p class="sub"><strong>Sixteen drones that hunt in radio silence</strong> — and everything they need fits on a laptop we could carry into the field. No datacenter. No datalink. No leash.</p>
+      <p class="cap" style="margin-top:14px">The Vesper console — live sortie over real Kramatorsk terrain, running on this Mac.</p>
+    </div></div>
+  </section>
+
+  <!-- 4 · THE HUNT -->
+  <section class="slide s4" data-title="loop">
+    <div class="pad"><div class="wrap">
+      <div class="eyebrow">The Hunt</div>
+      <h2>Find it. Call it in. Get the nod. <span class="red">Kill it.</span></h2>
+      <div class="loop">
+        <div class="step">
+          <div class="shot"><!-- tac1 1680x1050 crop x300 y100 w540 h540 -->
+            <img src="assets/tac1.png" alt="Coverage sweep over the AO" style="width:311.1%;height:194.4%;left:-55.6%;top:-18.5%">
+          </div>
+          <div class="n">01</div><div class="t">SEARCH</div>
+          <div class="d">One shared map. Sixteen hunters sweeping it.</div>
+        </div>
+        <div class="step">
+          <div class="shot"><!-- tac1 crop x420 y300 w300 h300 -->
+            <img src="assets/tac1.png" alt="TARGET-01 TANK DETECTED label on the console" style="width:560%;height:350%;left:-140%;top:-100%">
+          </div>
+          <div class="n">02</div><div class="t">DETECT</div>
+          <div class="d">Armor in the treeline. Tagged in seconds.</div>
+        </div>
+        <div class="step">
+          <div class="shot"><!-- live_tactical crop x100 y240 w400 h400 -->
+            <img src="assets/live_tactical.png" alt="Jammed zone: lead jammed, reports held" style="width:420%;height:262.5%;left:-25%;top:-60%">
+          </div>
+          <div class="n">03</div><div class="t">UPLINK</div>
+          <div class="d">Jammed? Hold the report. Fly to where the link lives.</div>
+        </div>
+        <div class="step human">
+          <div class="shot"><!-- live_tactical crop x728 y163 w252 h252 -->
+            <img src="assets/live_tactical.png" alt="Strike request card with APPROVE and DENY buttons" style="width:666.7%;height:416.7%;left:-288.9%;top:-64.7%">
+          </div>
+          <div class="n">04</div><div class="t">APPROVE</div>
+          <div class="d">The request hits your screen. You approve — or you don't.</div>
+        </div>
+        <div class="step kill">
+          <div class="shot"><!-- kill_frame 1280x720 crop x400 y170 w440 h440 -->
+            <img src="assets/kill_frame.png" alt="Target neutralized on the tactical map" style="width:290.9%;height:163.6%;left:-90.9%;top:-38.6%">
+          </div>
+          <div class="n">05</div><div class="t">STRIKE</div>
+          <div class="d">One nod. One munition. One kill.</div>
+        </div>
+      </div>
+      <p class="note">It hunts alone. <b>It never kills alone.</b></p>
+    </div></div>
+  </section>
+
+  <!-- 5 · LIVE -->
+  <section class="slide s5" data-title="live">
+    <div class="bleed dim"><img src="assets/live_tactical.png" alt="" aria-hidden="true"></div>
+    <div class="pad"><div class="wrap">
+      <div class="live-cue"><span class="rec"></span>Going live · Kramatorsk AO · this Mac</div>
+      <h1>Watch it hunt.</h1>
+      <p class="sub" style="color:var(--ink);font-size:clamp(18px,2.2vw,26px)">Sixteen drones. Three hidden tanks. Most of the AO jammed.<br>Nothing dies until <span class="accent">we</span> say so.</p>
+    </div></div>
+  </section>
+
+  <!-- 6 · THE TWIN -->
+  <section class="slide s6t" data-title="twin">
+    <div class="pad"><div class="wrap">
+      <div class="eyebrow">How · The Twin</div>
+      <h2>We cloned the battlefield.</h2>
+      <p class="sub">Give us coordinates. We pull public satellite and terrain data and rebuild the city in 3D — <strong>every road, roof, and tree</strong> — a digital twin the swarm can die in, ten thousand times a night.</p>
+      <div class="pair">
+        <div class="shot vs"><!-- tac1 AO map panel: crop x1112 y120 w448 h336 -->
+          <img src="assets/tac1.png" alt="Real satellite imagery of Kramatorsk" style="width:375%;height:312.5%;left:-248.2%;top:-35.7%">
+          <div class="tag"><b>KRAMATORSK</b> · the real city — satellite</div>
+        </div>
+        <div class="shot"><!-- isaac_early 900x900, crop to 4:3 -->
+          <img src="assets/isaac_early.png" alt="The same city rebuilt as a photoreal 3D digital twin" style="width:100%;height:133.3%;left:0;top:-16.6%">
+          <div class="tag"><b>KRAMATORSK</b> · our twin — flyable, photoreal</div>
+        </div>
+      </div>
+    </div></div>
+  </section>
+
+  <!-- 7 · THE REPS -->
+  <section class="slide s6" data-title="trained">
+    <div class="pad"><div class="wrap">
+      <div class="eyebrow">How · The Reps</div>
+      <h2>A million sorties <span class="accent">before the first real one.</span></h2>
+      <div class="row">
+        <div>
+          <div class="shot"><img src="assets/prog_0000.png" alt="Training iteration 0: drone still wandering at 43 seconds" style="width:100%;height:100%;left:0;top:0">
+            <div class="tag"><b>ITER 0</b> · 43 seconds in — still lost</div>
+          </div>
+        </div>
+        <div>
+          <div class="shot"><img src="assets/prog_0040.png" alt="Training iteration 40: covering ground, first neutralization" style="width:100%;height:100%;left:0;top:0">
+            <div class="tag"><b>ITER 40</b> · covering ground, first kill</div>
+          </div>
+        </div>
+        <div>
+          <div class="shot"><img src="assets/prog_final.png" alt="Final policy: target neutralized at 11 seconds" style="width:100%;height:100%;left:0;top:0">
+            <div class="tag"><b>FINAL</b> · first kill in 12 seconds</div>
+          </div>
+        </div>
+      </div>
+      <div class="arrowline">lost <span>────▶</span> methodical <span>────▶</span> <b>lethal</b> · same policy, same terrain — the only thing that changed is training</div>
+      <p class="sub" style="margin-top:18px">Millions of rollouts in the twin. Nobody wrote a waypoint. Nobody scripted a behavior. <strong>Reward did the teaching — the kill lives in the weights.</strong></p>
+    </div></div>
+  </section>
+
+  <!-- 8 · PHOTOREAL AFTER-ACTION -->
+  <section class="slide s7" data-title="photoreal">
+    <div class="bleed">
+      <video id="fpv" src="assets/isaac_fpv.mp4" muted loop playsinline preload="auto" poster="assets/isaac_kill.png"></video>
+      <img class="print-poster" src="assets/fpv_mid.png" alt="Photoreal drone's-eye view over the reconstructed town">
+    </div>
+    <div class="pad flex"><div class="wrap bottomer">
+      <div class="eyebrow">After Action</div>
+      <h1>Then fly it back — <span class="accent">through the drone's eyes.</span></h1>
+      <p class="sub"><strong>Every sortie replays photoreal</strong> in Isaac Sim — the same flight, frame for frame, from search to strike.</p>
+      <p class="cap" style="margin-top:12px">Isaac RTX replay of the recorded strike sortie — simulation render, not combat footage.</p>
+    </div></div>
+    <div class="inset">
+      <img src="assets/runs_page.png" alt="Run detail page: photoreal chase and FPV replays beside the tactical replay and trajectory">
+      <div class="cap">One click in the console: tactical ▸ trajectory ▸ photoreal</div>
+    </div>
+  </section>
+
+  <!-- 9 · CLOSE -->
+  <section class="slide s8" data-title="close">
+    <div class="bleed dim"><img src="assets/fpv_mid.png" alt="" aria-hidden="true"></div>
+    <div class="pad"><div class="wrap">
+      <div class="eyebrow">Vesper</div>
+      <h1>Point it at any coordinates <span class="accent">on Earth.</span></h1>
+      <p class="sub">Kramatorsk today. Anywhere tomorrow. The twin builds itself — the swarm trains overnight.</p>
+      <div class="close-line">
+        <span><b>Edge</b>-autonomous — runs on a Mac</span>
+        <span><b>Comms</b>-aware, jam-resilient</span>
+        <span><b>Human</b>-authorized, always</span>
+        <span><b>RL</b>-trained, not scripted</span>
+      </div>
+      <div class="team">
+        <div class="who"><div class="nm">Eashan Vagish</div><div class="em">ev264@cornell.edu</div></div>
+        <div class="who"><div class="nm">Theo Oltean</div><div class="em">tio3@cornell.edu</div></div>
+      </div>
+      <p class="fin">The cord is cut.</p>
+    </div></div>
+  </section>
+
+</div>
+
+<div class="foot">
+  <span class="dots" id="dots"></span>
+  <span class="count"><b id="cur">01</b> / <span id="tot">09</span></span>
+</div>
+<div class="hint">← → to navigate</div>
+
+<script>
+  const slides=[...document.querySelectorAll('.slide')];
+  const dotsBox=document.getElementById('dots');
+  const cur=document.getElementById('cur'),tot=document.getElementById('tot');
+  const fpv=document.getElementById('fpv');
+  const reduced=matchMedia('(prefers-reduced-motion: reduce)').matches;
+  let i=0; tot.textContent=String(slides.length).padStart(2,'0');
+  slides.forEach((_,n)=>{const d=document.createElement('i');d.tabIndex=0;d.setAttribute('role','button');
+    d.setAttribute('aria-label','Go to slide '+(n+1));
+    d.onclick=()=>go(n);d.onkeydown=e=>{if(e.key==='Enter'||e.key===' ')go(n)};dotsBox.appendChild(d);});
+  const dots=[...dotsBox.children];
+  function go(n){
+    i=Math.max(0,Math.min(slides.length-1,n));
+    slides.forEach((s,k)=>s.classList.toggle('on',k===i));
+    dots.forEach((d,k)=>d.classList.toggle('on',k===i));
+    cur.textContent=String(i+1).padStart(2,'0');
+    if(fpv){ if(slides[i].dataset.title==='photoreal' && !reduced){fpv.currentTime=0;fpv.play().catch(()=>{});} else {fpv.pause();} }
+  }
+  addEventListener('keydown',e=>{
+    if(e.key==='ArrowRight'||e.key===' '||e.key==='PageDown'){e.preventDefault();go(i+1);}
+    else if(e.key==='ArrowLeft'||e.key==='PageUp'){e.preventDefault();go(i-1);}
+    else if(e.key==='Home'){go(0);} else if(e.key==='End'){go(slides.length-1);}
+  });
+  addEventListener('click',e=>{ if(e.target.closest('.dots'))return;
+    const x=e.clientX/innerWidth; go(x<0.28?i-1:i+1); });
+  const h=parseInt(location.hash.slice(1),10);
+  go(Number.isFinite(h)?h-1:0);
+</script>
+</body>
+</html>

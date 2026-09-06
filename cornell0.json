@@ -1,0 +1,61 @@
+{
+  "seed": 0,
+  "world": "cornell",
+  "takeoff_alt_m": 39.9,
+  "waypoints": [
+    [
+      0.0,
+      45.0,
+      45.6
+    ],
+    [
+      45.0,
+      45.0,
+      45.6
+    ],
+    [
+      45.0,
+      -45.0,
+      45.6
+    ],
+    [
+      -45.0,
+      -45.0,
+      45.0
+    ],
+    [
+      -45.0,
+      45.0,
+      45.0
+    ],
+    [
+      0.0,
+      0.0,
+      43.5
+    ]
+  ],
+  "wind_speed_ms": 0.0,
+  "wind_dir_deg": 0.0,
+  "visibility_m": 10000.0,
+  "buildings": [],
+  "max_sim_s": 75.0,
+  "spawn_east": 0.0,
+  "range_noise_std": 0.1,
+  "terrain": {
+    "usd": "assets/cornell/cornell.usd",
+    "translation": [
+      -220.2,
+      -482.1,
+      12.074
+    ],
+    "rotation_xyz_deg": [
+      0.0,
+      0.0,
+      0.0
+    ],
+    "scale": 1.0
+  },
+  "overview_cam": null,
+  "chase_cam": true,
+  "cruise_ms": 18.0
+}

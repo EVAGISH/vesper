@@ -1,0 +1,61 @@
+{
+  "seed": 0,
+  "world": "kramatorsk_ms",
+  "takeoff_alt_m": 44.1,
+  "waypoints": [
+    [
+      0.0,
+      45.0,
+      44.1
+    ],
+    [
+      45.0,
+      45.0,
+      44.1
+    ],
+    [
+      45.0,
+      -45.0,
+      42.1
+    ],
+    [
+      -45.0,
+      -45.0,
+      44.8
+    ],
+    [
+      -45.0,
+      45.0,
+      44.8
+    ],
+    [
+      0.0,
+      0.0,
+      44.8
+    ]
+  ],
+  "wind_speed_ms": 0.0,
+  "wind_dir_deg": 0.0,
+  "visibility_m": 10000.0,
+  "buildings": [],
+  "max_sim_s": 75.0,
+  "spawn_east": 0.0,
+  "range_noise_std": 0.1,
+  "terrain": {
+    "usd": "assets/kramatorsk_ms/kramatorsk_ms.usd",
+    "translation": [
+      -0.0,
+      -0.0,
+      -0.0
+    ],
+    "rotation_xyz_deg": [
+      0.0,
+      0.0,
+      0.0
+    ],
+    "scale": 1.0
+  },
+  "overview_cam": null,
+  "chase_cam": true,
+  "cruise_ms": 18.0
+}
