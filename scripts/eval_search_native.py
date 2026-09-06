@@ -86,12 +86,16 @@ win_step = torch.zeros(N, dtype=torch.long, device=dev)
 
 quarters = torch.zeros(4, dtype=torch.long)  # first sightings per episode quarter
 orbit_win = still_win = 0                    # windows: net-disp < 30 m / total
+radial_max = torch.zeros(N, device=dev)      # farthest each drone got from centre this episode
+reach_radii = []                             # per-drone episode max radius, on reset
+outer_serviced = []                          # fleet: was the outermost target killed?
 ep = {"found": [], "cleared": [], "coverage": [], "len_s": [],
       "crash": 0, "oob": 0, "flip": 0, "expend": 0, "timeout": 0, "all": 0}
 fleet = {"kills": [], "found": [], "expended": []}   # per completed sortie
 wrecked = torch.zeros(K, dtype=torch.bool, device=dev)
 expended = torch.zeros(N, dtype=torch.bool, device=dev)
 sortie_found = torch.zeros(K, dtype=torch.bool, device=dev)
+sortie_tr = env.target_pos[0, :, :2].norm(dim=1).clone()   # this sortie's target radii
 grp0 = env.group == 0
 
 done_eps = 0
@@ -119,10 +123,14 @@ while done_eps < args.episodes:
         still_win += int(roll.sum())
         pos0_win[roll] = p[roll]
         win_step[roll] = 0
+    # coverage reach: how far from the arena centre each drone flies
+    radial_max = torch.maximum(radial_max, env.flight_state()[0][:, :2].norm(dim=1))
     # a reset drone starts a fresh window
     if bool(done.any()):
         pos0_win[done] = env.flight_state()[0][done, :2]
         win_step[done] = 0
+        reach_radii += radial_max[done].tolist()
+        radial_max[done] = 0.0
 
     if args.fleet:
         expended |= st.any(dim=1)
@@ -134,10 +142,15 @@ while done_eps < args.episodes:
             fleet["kills"].append(int(wrecked.sum()))
             fleet["found"].append(int((sortie_found | wrecked).sum()))
             fleet["expended"].append(int(expended.sum()))
+            # outer-ring acceptance: the target farthest from the AO centre --
+            # was it serviced (killed) this sortie? sortie_tr held the radii
+            # before this step's auto-reset swapped in a new target set
+            outer_serviced.append(float(wrecked[int(sortie_tr.argmax())]))
             wrecked[:] = False
             expended[:] = False
             sortie_found[:] = False
             prev_known = env.task.known.clone()
+            sortie_tr = env.target_pos[0, :, :2].norm(dim=1).clone()   # new sortie
             done_eps += 1
         else:
             sortie_found |= env.task.known[grp0].any(dim=0)
@@ -165,6 +178,13 @@ def mean(v):
     return round(sum(v) / max(len(v), 1), 3)
 
 
+def pct(v, p):
+    if not v:
+        return 0.0
+    s = sorted(v)
+    return round(s[min(len(s) - 1, int(p * len(s)))], 1)
+
+
 qt = quarters.float()
 res = {
     "policy": args.policy, "map": cfg.world_map, "episodes": done_eps,
@@ -173,13 +193,17 @@ res = {
     "detect_quarters": [round(float(x / qt.sum().clamp(min=1)), 3) for x in qt],
     "detections_total": int(qt.sum()),
     "orbit_frac": round(orbit_win / max(still_win, 1), 3),
+    "drone_radius_p50_m": pct(reach_radii, 0.5),
+    "drone_radius_p95_m": pct(reach_radii, 0.95),
+    "drone_radius_max_m": round(max(reach_radii), 1) if reach_radii else 0.0,
 }
 if args.fleet:
     res |= {"mode": "fleet", "drones": N,
             "kills_per_sortie": mean(fleet["kills"]),
             "found_per_sortie": mean(fleet["found"]),
             "expended_per_sortie": mean(fleet["expended"]),
-            "sorties_3_for_3": mean([1.0 if k >= K else 0.0 for k in fleet["kills"]])}
+            "sorties_3_for_3": mean([1.0 if k >= K else 0.0 for k in fleet["kills"]]),
+            "outer_target_serviced": mean(outer_serviced)}
 else:
     n = done_eps
     res |= {"mode": "solo", "found": mean(ep["found"]), "cleared": mean(ep["cleared"]),

@@ -65,6 +65,10 @@ parser.add_argument("--w_yaw_rate", type=float, default=None,
                          "makes the saturated-orbit scan unprofitable")
 parser.add_argument("--yaw_rate_free", type=float, default=None,
                     help="rad/s of turn that costs nothing (camera panning stays free)")
+parser.add_argument("--w_cover", type=float, default=None,
+                    help="first-sweep coverage bonus. Lower it (with a higher --w_cover_stale / "
+                         "--w_frontier) so re-covering FRESH ground stops paying and the "
+                         "profitable heading is always toward stale/unvisited cells")
 parser.add_argument("--w_frontier", type=float, default=None,
                     help="anti-circling: per metre closed on the nearest stale coverage cell "
                          "while no known target is in hand -- a persistent 'go where you "
@@ -94,7 +98,7 @@ cfg.n_targets = args.targets
 cfg.episode_length_s = args.episode_s
 cfg.search = {"arena_half": args.arena}
 for _k in ("w_proximity", "w_time", "reach_radius",    # reward overrides, if given
-           "w_cover_stale", "w_yaw_rate", "yaw_rate_free",
+           "w_cover", "w_cover_stale", "w_yaw_rate", "yaw_rate_free",
            "w_frontier", "frontier_stale", "pos_id_range"):
     _v = getattr(args, _k)
     if _v is not None:
