@@ -13,9 +13,10 @@ mkdir -p "$REPO_ROOT/runs/detect"
 # the few small files worth keeping. The dataset's own JPEGs are deliberately not
 # matched -- they are gigabytes and gen_detect_dataset.py reproduces them from a seed.
 rsync -az --info=stats1 -e "ssh -i $KEY_FILE -o StrictHostKeyChecking=accept-new" \
+  --exclude='venv-rfdetr' --exclude='datasets' \
   --include='review/***' \
   --include='*/' \
-  --include='*.onnx' --include='*.json' --include='*.txt' \
+  --include='*.onnx' --include='*.pth' --include='*.json' --include='*.txt' \
   --exclude='*' \
   root@"$IP":vesper/scratch/ "$REPO_ROOT/runs/detect/"
 echo "pulled -> runs/detect/"

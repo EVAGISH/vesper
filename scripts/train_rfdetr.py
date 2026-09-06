@@ -34,7 +34,8 @@ ap.add_argument("--batch-size", type=int, default=8)
 ap.add_argument("--grad-accum-steps", type=int, default=2)
 ap.add_argument("--lr", type=float, default=1e-4)
 ap.add_argument("--resolution", type=int, default=None,
-                help="input square, multiple of 56; default is the model's own")
+                help="input square, multiple of patch_size*num_windows: 32 for "
+                     "nano/small/medium/large, 56 for base; default is the model's own")
 ap.add_argument("--num-workers", type=int, default=4)
 ap.add_argument("--early-stopping", action="store_true")
 ap.add_argument("--resume", default=None, help="checkpoint to continue from")
@@ -62,10 +63,7 @@ for split, (n_img, n_box) in counts.items():
 from rfdetr import __dict__ as rfdetr_ns  # noqa: E402
 
 out.mkdir(parents=True, exist_ok=True)
-model_kwargs = {}
-if args.resolution:
-    model_kwargs["resolution"] = args.resolution
-model = rfdetr_ns[SIZES[args.model]](**model_kwargs)
+model = rfdetr_ns[SIZES[args.model]]()
 
 train_kwargs = dict(
     dataset_dir=str(dataset),
@@ -81,6 +79,10 @@ train_kwargs = dict(
     wandb=False,
     run_test="test" in counts,
 )
+if args.resolution:
+    # train() is the only path that checks the value divides patch_size *
+    # num_windows; the constructor accepts any integer and breaks later.
+    train_kwargs["resolution"] = args.resolution
 if args.resume:
     train_kwargs["resume"] = str(Path(args.resume).resolve())
 

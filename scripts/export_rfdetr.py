@@ -5,11 +5,16 @@
 
 Two artefacts, on purpose:
 
-  model.onnx  portable. Survives a driver upgrade, a different GPU and the trip
-              to the airframe's Jetson, and is the thing worth pulling home.
-  model.trt   fast. Target-specific compilation: the engine is tied to this
-              exact GPU and TensorRT version, so it is rebuilt on whatever
-              hardware actually runs it and never treated as a deliverable.
+  rfdetr-<size>.onnx      portable. Survives a driver upgrade, a different GPU
+                          and the trip to the airframe's Jetson, and is the
+                          thing worth pulling home.
+  rfdetr-<size>_fp16.trt  fast. Target-specific compilation: the engine is tied
+                          to this exact GPU and TensorRT version, so it is
+                          rebuilt on whatever hardware actually runs it and
+                          never treated as a deliverable.
+
+rfdetr names both files after the model variant, not after us -- the engine
+carries the precision it was actually built at (_fp32 under --fp32).
 
 The latency number printed at the end is the one that decides whether the
 detector can sit in the control loop at all, so it is measured rather than
@@ -62,9 +67,18 @@ if not args.no_trt:
     try:
         trt_path = model.export(output_dir=str(out), format="tensorrt",
                                 batch_size=args.batch_size, fp16=not args.fp32)
+        # Record the precision that was actually built, not the one asked for.
+        # TensorRT 11.2 does not expose the FP16 builder flag and silently falls
+        # back to FP32 with only a warning -- rfdetr encodes the truth in the
+        # filename suffix, so trust that over our own request.
+        built_fp16 = "_fp16" in Path(trt_path).name
         report["artifacts"]["tensorrt"] = {"path": str(trt_path),
-                                           "fp16": not args.fp32,
+                                           "fp16_requested": not args.fp32,
+                                           "fp16_built": built_fp16,
                                            "seconds": round(time.time() - t0, 1)}
+        if (not args.fp32) and not built_fp16:
+            print("  NOTE: FP16 was requested but an FP32 engine was built "
+                  "(this TensorRT has no FP16 builder flag)")
         print(f"  {trt_path}")
     except Exception as e:
         report["artifacts"]["tensorrt"] = {"error": f"{type(e).__name__}: {e}"}

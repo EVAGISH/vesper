@@ -56,6 +56,8 @@ parser.add_argument("--hfov", type=float, default=110.0, help="degrees; the airf
 parser.add_argument("--seed", type=int, default=0)
 parser.add_argument("--max-vehicles", type=int, default=3)
 parser.add_argument("--occluders", type=int, default=6, help="clutter prims per scene, max")
+parser.add_argument("--cam-clear-m", type=float, default=7.0,
+                    help="radius of open ground required around the lens")
 parser.add_argument("--clutter-clear-m", type=float, default=18.0,
                     help="no clutter this close to any camera: a tree a few metres from "
                          "a 110 deg lens is the whole frame, not an occluder")
@@ -70,6 +72,9 @@ parser.add_argument("--sky-every", type=int, default=4,
                     help="scenes between HDR swaps; the dome's rotation and intensity "
                          "still change every scene")
 parser.add_argument("--flush-every", type=int, default=200)
+parser.add_argument("--no-texture-streaming", action="store_true",
+                    help="keep every texture resident: sharper, but exhausts the GPU "
+                         "on large sites")
 AppLauncher.add_app_launcher_args(parser)
 args = parser.parse_args()
 args.enable_cameras = True
@@ -80,7 +85,7 @@ import numpy as np  # noqa: E402
 import omni.replicator.core as rep  # noqa: E402
 import torch  # noqa: E402
 from PIL import Image  # noqa: E402
-from pxr import Gf, UsdGeom, UsdLux  # noqa: E402
+from pxr import Gf, Usd, UsdGeom, UsdLux  # noqa: E402
 
 import isaacsim.core.utils.prims as prim_utils  # noqa: E402
 import isaacsim.core.utils.stage as stage_utils  # noqa: E402
@@ -89,7 +94,14 @@ from isaaclab.sim import SimulationCfg, SimulationContext  # noqa: E402
 from vesper.worlds.heightmap import WorldMap  # noqa: E402
 
 settings = carb.settings.get_settings()
-settings.set("/rtx-transient/resourcemanager/enableTextureStreaming", False)
+# Texture streaming stays ON. render_demo.py disables it to keep a short
+# cinematic capture crisp, and that is safe on a small site -- but forcing every
+# texture resident on a 4.75 km world with two 70 MB ground rasters and 26k
+# trees exhausts the device and the run dies in cudaMemcpyAsync with an illegal
+# memory access, 17 minutes into loading. --no-texture-streaming restores the
+# old behaviour for small sites where sharpness matters more.
+if args.no_texture_streaming:
+    settings.set("/rtx-transient/resourcemanager/enableTextureStreaming", False)
 settings.set("/rtx/post/aa/op", 2)
 settings.set("/rtx/post/dlss/execMode", 0)
 settings.set("/rtx/post/motionblur/enabled", False)
@@ -227,12 +239,35 @@ for i in range(args.max_vehicles):
     vehicles.append(path)
 
 TREES = tree_files([s['name'] for s in SITES])
+
+
+def unit_scale(usd_path, target_h_m) -> float:
+    """Scale that turns a species prototype into a `target_h_m` tall tree.
+
+    The prototypes are authored at roughly centimetre scale but declare
+    metersPerUnit = 1.0, so a Gray_Birch is 333 *units* tall. Referencing one
+    directly and scaling it by ~1 gives a 300 m tree, which at any stand-off is
+    simply an opaque wall of bark -- geo.py folds a scale_to_metres into every
+    tree it scatters for exactly this reason, and clutter has to do the same.
+    """
+    stage = Usd.Stage.Open(str(usd_path))
+    prim = stage.GetDefaultPrim() or stage.GetPseudoRoot()
+    rng_box = UsdGeom.BBoxCache(Usd.TimeCode.Default(),
+                                [UsdGeom.Tokens.default_]).ComputeWorldBound(prim)
+    height = rng_box.ComputeAlignedRange().GetSize()[2]
+    return float(target_h_m) / height if height > 0 else 1.0
+
+
 occluders = []
 for i in range(max(args.occluders, args.cams)):
     path = f"/World/clutter/c{i}"
-    prim_utils.create_prim(path, "Xform", usd_path=str(rng.choice(TREES))) if TREES \
-        else prim_utils.create_prim(path, "Cube")
-    occluders.append(path)
+    if TREES:
+        src = rng.choice(TREES)
+        prim_utils.create_prim(path, "Xform", usd_path=str(src))
+        occluders.append((path, unit_scale(src, rng.uniform(7.0, 16.0))))
+    else:
+        prim_utils.create_prim(path, "Cube")
+        occluders.append((path, 1.0))
 
 # --- cameras: one render product each, all drawn by the same render tick
 APERTURE = 20.955                       # USD's tenths-of-a-mm horizontal aperture
@@ -306,8 +341,20 @@ def drivable(site, x, y) -> bool:
 
 
 def sample_stand(site, tries=60):
-    """An open, drivable spot to park the targets on, in site-local metres."""
-    half = site["map"].half_m * 0.85
+    """Somewhere to park the targets, in site-local metres.
+
+    Half the stands are drawn from the site's road raster. Sampling drivable
+    ground uniformly puts almost every scene in open field on a site like
+    Vuhledar, and an APC parked in a field is not the context the drone will
+    mostly see it in -- roads bring in verges, tree lines and the town edge.
+    """
+    m = site["map"]
+    half = m.half_m * 0.85
+    want_road = rng.random() < 0.5
+    if want_road:
+        xy, ok = m.sample_cells_xy(m.road, 1, None, half=half)
+        if bool(ok[0]):
+            return float(xy[0, 0]), float(xy[0, 1])
     for _ in range(tries):
         x, y = np_rng.uniform(-half, half, 2)
         if drivable(site, x, y):
@@ -466,18 +513,21 @@ while kept < args.images:
     for ci, cam in enumerate(CAMS):
         aim = placed[rng.randrange(len(placed))]
         aim_z = ground_at(site, *aim) + 1.2
-        # Resample until the lens is over open ground. Lifting the camera clear
-        # of whatever is beneath it is not enough on a wooded site: standing it
-        # 2 m above a tree crown or a roof fills the frame with bark or tiles
-        # and leaves a technically-correct box on a target nobody can see.
-        for _ in range(12):
+        # Resample until the lens is over open ground, checking a ring around it
+        # and not just the cell it stands in. The map cell is 5 m, so a trunk one
+        # cell away passes a point test and still fills a 110 deg frame -- which
+        # is what half the frames looked like on a site with 18k trees.
+        for _ in range(16):
             dist = float(math.exp(np_rng.uniform(math.log(args.near), math.log(args.far))))
             az = float(np_rng.uniform(0, 2 * math.pi))
             el = math.radians(float(np_rng.uniform(3.0, 72.0)))
             cx = aim[0] + dist * math.cos(el) * math.cos(az)
             cy = aim[1] + dist * math.cos(el) * math.sin(az)
             cz = aim_z + dist * math.sin(el)
-            if solid_at(site, cx, cy) - ground_at(site, cx, cy) < 1.5:
+            r = args.cam_clear_m
+            ring = ((0.0, 0.0), (r, 0.0), (-r, 0.0), (0.0, r), (0.0, -r))
+            if all(solid_at(site, cx + ox, cy + oy) - ground_at(site, cx + ox, cy + oy) < 1.5
+                   for ox, oy in ring):
                 break
         cz = max(cz, ground_at(site, cx, cy) + 1.5)
         jitter = dist * 0.16                    # target off dead centre
@@ -492,7 +542,7 @@ while kept < args.images:
     # It is placed on the far half of the line of sight and offset sideways by
     # about a vehicle's width, so it cuts into the silhouette. Put it near the
     # lens instead and it stops being an occluder and becomes the photograph.
-    for i, path in enumerate(occluders):
+    for i, (path, base_scale) in enumerate(occluders):
         if i < len(shots) and rng.random() < 0.6:
             sh = shots[i]
             ex, ey = sh["eye"]
@@ -513,7 +563,7 @@ while kept < args.images:
                         for sh in shots)
         set_xform(path, (ox + dx, oy, ground_at(site, ox, oy)),
                   yaw_deg=float(np_rng.uniform(0, 360)),
-                  scale=float(np_rng.uniform(0.6, 1.4)),
+                  scale=base_scale * float(np_rng.uniform(0.8, 1.25)),
                   visible=not too_close)
 
     t_place += time.time() - t_place0
