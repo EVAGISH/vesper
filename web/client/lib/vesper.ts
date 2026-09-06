@@ -9,6 +9,13 @@ export type Manifest = {
   frames?: Record<string, number>;
   fps?: number;
   resolution?: [number, number];
+  // live-sortie recordings (warm session): kind:"sortie"; auto:true marks an
+  // end-of-episode auto-save (prunable), auto:false the operator's keeper.
+  kind?: string;
+  auto?: boolean;
+  // photoreal Isaac render state for a manual keeper — "rendering" while the
+  // droplet works, "pending" when the box was down, then "done" / "failed".
+  isaac?: "rendering" | "pending" | "done" | "failed";
 };
 
 export type Run = { id: string; manifest: Manifest; files: string[] };
@@ -106,7 +113,9 @@ export function runKind(run: Run): RunKind {
   const f = run.files;
   if (f.includes("report.json") || f.includes("results.jsonl")) return "sweep";
   if (f.includes("curve.jsonl")) return "training";
-  if (f.includes("events.json") || f.includes("track.png") || f.includes("chase.mp4"))
+  // replay.json marks a recorded live sortie (warm session RECORD SORTIE)
+  if (f.includes("events.json") || f.includes("track.png") || f.includes("chase.mp4") ||
+      f.includes("replay.json"))
     return "search";
   if (f.some((n) => n.startsWith("view_") && n.endsWith(".png"))) return "view";
   return "flight";
@@ -128,6 +137,9 @@ const ARTIFACT_LABELS: Record<string, string> = {
   "overview.mp4": "chase cam",
   "chase.mp4": "chase cam",
   "fpv.mp4": "fpv",
+  "tactical.mp4": "tactical replay",
+  "isaac_fpv.mp4": "drone fpv — photoreal (isaac rtx)",
+  "isaac.mp4": "chase — photoreal (isaac rtx)",
   "track.png": "track map",
   "trajectory.parquet": "track",
   "scenario.json": "mission",

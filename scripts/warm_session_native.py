@@ -21,16 +21,47 @@ Serves on VESPER_LIVE_PORT (8180):
                             cell (0 unknown, 1 confirmed link, 2 confirmed dead zone),
                             row 0 = south, revealed as the drones fly. found/reached are
                             RELAYED reports: a sighting made while the lead is jammed stays
-                            `pending` (off the operator's map) until it regains link
+                            `pending` (off the operator's map) until it regains link.
+                            `requests` is the strike-approval queue (env 0's mission):
+                            [{target, status, x, y, detected_t, uplink, disengaged}] with
+                            status one of PENDING_UPLINK / AWAITING_APPROVAL / APPROVED /
+                            DENIED, and `strikes` {pending, awaiting, approved, denied} the
+                            HUD tally. Any group-0 drone's detection raises the request and
+                            any linked drone relays it; --auto_approve_s N approves it N s
+                            after uplink (unattended demos). A target only neutralizes once
+                            its request is APPROVED; one un-approved past --disengage_s is
+                            masked from the actor's belief (disengaged: true) so the drones
+                            search on instead of orbiting it, re-engaging on approval.
     POST /command          {"kind":"reset"} | {"kind":"deploy","policy":"runs/<id>/<f>.pt"}
                            {"kind":"manual","on":true|false}   hand drone 0 to the operator
                            {"kind":"teleop","axes":[fwd,left,up]} in [-1,1], body frame;
                            re-sent every ~100 ms by the page. Older than --deadman_s: hover.
+                           {"kind":"approve","target":i} | {"kind":"deny","target":i}
+                           the operator's strike decision for target i
+                           {"kind":"record"}   dump the mission buffered since the
+                           last reset to a fresh runs/<id>/ (replay.json +
+                           trajectory.parquet + manifest) and render tactical.mp4
+                           in the background -- the Live->Runs loop. A manual
+                           record is the KEEPER: never pruned, and it also kicks
+                           off the photoreal Isaac render on the droplet
+                           (isaac_fpv.mp4 lands in the run when it finishes).
+
+Missions also auto-save: when the lead's episode completes (all-cleared or the
+episode_s rollover) the buffered mission lands in runs/ by itself IF it scored
+at least one neutralization -- tagged auto in the manifest and capped at the
+last AUTO_KEEP, so the Runs tab fills with real sorties without flooding.
 """
 import argparse
+import json
 import math
 import os
+import re
+import shutil
+import subprocess
+import sys
+import threading
 import time
+import urllib.request
 
 import numpy as np
 import torch
@@ -38,6 +69,7 @@ import torch
 from vesper.capture.live import LiveFrameServer
 from vesper.lab.ppo import load_policy
 from vesper.native import NativeSearchEnv, NativeSearchEnvCfg
+from vesper.record.trajectory import TrajectoryWriter
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--num_envs", type=int, default=16)
@@ -70,6 +102,14 @@ parser.add_argument("--reach_radius", type=float, default=None,
 parser.add_argument("--episode_s", type=float, default=None,
                     help="episode length (default 75, a training value); longer lets a full "
                          "search->detect->neutralize mission complete before any rollover")
+parser.add_argument("--auto_approve_s", type=float, default=None,
+                    help="unattended demo: a strike request AWAITING_APPROVAL this many "
+                         "seconds auto-promotes to APPROVED (default off: operator decides)")
+parser.add_argument("--disengage_s", type=float, default=20.0,
+                    help="a target whose strike request stays un-approved this long is shown "
+                         "to the actor as already struck, so its drones break off and keep "
+                         "searching instead of orbiting an ungranted strike; re-engaged the "
+                         "moment it is APPROVED (<= 0 disables)")
 args = parser.parse_args()
 
 os.environ.setdefault("VESPER_LIVE_PORT", "8180")
@@ -115,6 +155,249 @@ _comms_cell = 2 * _ao_half / COMMS_N
 relayed_found = np.zeros(args.targets, bool)
 relayed_reach = np.zeros(args.targets, bool)
 prev_ep0 = 0
+
+# --- human-in-the-loop strike approval (env 0's mission, the one on the map).
+# A detection RAISES a strike request; the request reaches the operator only
+# while the lead holds an RF link (PENDING_UPLINK until then -- a tank found in
+# a dead zone forces the drone to egress before it can call the strike in);
+# and the target can only be neutralized once the operator APPROVES. The gate
+# itself lives in SearchTask.strike_hold: a [N,K] mask the task ANDs out of
+# `touching`, None during training, so the policy and reward are untouched --
+# the drone still dives, the kill just does not register until cleared hot.
+REQ_NONE, REQ_PENDING, REQ_AWAITING, REQ_APPROVED, REQ_DENIED = (
+    "NONE", "PENDING_UPLINK", "AWAITING_APPROVAL", "APPROVED", "DENIED")
+req_status = [REQ_NONE] * args.targets
+req_detected_t = [0.0] * args.targets
+req_await_t = [0.0] * args.targets      # when the request reached AWAITING_APPROVAL
+mission_t = [0.0]                       # the lead's mission clock, for the helpers below
+strike_hold = torch.ones(env.num_envs, args.targets, dtype=torch.bool, device=env.device)
+_grp0 = (env.group == 0)         # every env hunting vehicle set 0 shares the gate
+env.task.strike_hold = strike_hold
+# disengage-on-hold: False masks the target out of the actor's belief (it reads
+# as already struck) so drones search on instead of orbiting an ungranted strike
+engage = torch.ones(env.num_envs, args.targets, dtype=torch.bool, device=env.device)
+env.task.engage_mask = engage
+
+
+def sync_strike_hold():
+    """Push the approval state into the task's neutralization gate."""
+    for k, s in enumerate(req_status):
+        strike_hold[:, k] = s != REQ_APPROVED
+    strike_hold[~_grp0] = False   # other groups (if any) are not the operator's
+
+
+def sync_engage():
+    """Mask long-held targets out of the actor's belief (disengage-on-hold).
+
+    A request un-approved for --disengage_s reads to the policy as a struck
+    target, so its drones break off and resume the search; an APPROVED request
+    re-engages immediately, whatever its age."""
+    if args.disengage_s <= 0:
+        return
+    for k, s in enumerate(req_status):
+        held = (s in (REQ_PENDING, REQ_AWAITING, REQ_DENIED)
+                and mission_t[0] - req_detected_t[k] >= args.disengage_s)
+        engage[_grp0, k] = not held
+
+
+def reset_requests():
+    req_status[:] = [REQ_NONE] * args.targets
+    req_detected_t[:] = [0.0] * args.targets
+    req_await_t[:] = [0.0] * args.targets
+    engage[:] = True
+    sync_strike_hold()
+
+
+sync_strike_hold()
+
+# --- sortie recorder: the mission since the last reset, buffered in the same
+# frame schema replay.json carries (vesper.native.replay), so a {"kind":"record"}
+# command can dump it straight into a fresh runs/<id>/ and hand it to
+# scripts/render_replay.py for tactical.mp4. Bounded: one frame per REC_EVERY
+# control steps, and when the buffer hits REC_CAP it thins itself 2x and doubles
+# the stride -- a long session keeps the whole mission at coarser sampling in a
+# few MB of RAM instead of growing without limit.
+REC_EVERY = 2                     # 25 Hz control -> 12.5 Hz logged
+REC_CAP = 4500                    # ~6 min at 12.5 Hz before the first thinning
+AUTO_KEEP = 10                    # auto-saved sorties kept; older ones are pruned
+rec_buf: list[dict] = []
+rec_every = REC_EVERY
+rec_count = 0
+rec_t = 0.0                       # mission clock: resets with each mission
+manual_recorded = False           # this mission was kept by hand -> skip the auto-save
+last_record: dict = {}
+_REPO = _P(__file__).resolve().parents[1]
+
+# droplet access for the photoreal render (same key/layout web/server/app.py uses)
+_SSH_KEY = os.path.expanduser(os.environ.get("KEY_FILE", "~/.ssh/vesper.pem"))
+_SSH_OPTS = f"ssh -i {_SSH_KEY} -o BatchMode=yes -o StrictHostKeyChecking=accept-new"
+
+
+def _yaws_np(q):
+    """World yaw per drone from wxyz quats [N,4] (matches vesper.native.replay)."""
+    w, x, y, z = q[:, 0], q[:, 1], q[:, 2], q[:, 3]
+    return np.arctan2(2 * (w * z + x * y), 1 - 2 * (y * y + z * z))
+
+
+def reset_recording():
+    global rec_t, rec_every, rec_count, manual_recorded
+    rec_buf.clear()
+    rec_t, rec_every, rec_count = 0.0, REC_EVERY, 0
+    manual_recorded = False
+
+
+def _droplet_ip():
+    """Public IP of the GPU droplet, or None (box down / no token in .env)."""
+    token = os.environ.get("DIGITALOCEAN_TOKEN")
+    if not token:
+        envf = _REPO / ".env"
+        if envf.exists():
+            for line in envf.read_text().splitlines():
+                m = re.match(r"^(?:export\s+)?DIGITALOCEAN_TOKEN=[\"']?([^\"'#\s]+)", line)
+                if m:
+                    token = m.group(1)
+                    break
+    if not token:
+        return None
+    name = os.environ.get("DROPLET_NAME", "vesper-dev")
+    req = urllib.request.Request(
+        "https://api.digitalocean.com/v2/droplets?tag_name=vesper",
+        headers={"Authorization": f"Bearer {token}"})
+    try:
+        with urllib.request.urlopen(req, timeout=6) as r:
+            for drop in json.load(r).get("droplets", []):
+                if drop.get("name") != name:
+                    continue
+                for net in drop.get("networks", {}).get("v4", []):
+                    if net.get("type") == "public":
+                        return net.get("ip_address")
+    except OSError:
+        pass
+    return None
+
+
+def _set_isaac_status(run_dir, status):
+    """Stamp the photoreal render's state into the run's manifest, so the Runs
+    tab can show 'rendering photoreal…' / 'pending' beside tactical.mp4."""
+    mf = run_dir / "manifest.json"
+    try:
+        m = json.loads(mf.read_text())
+    except (OSError, json.JSONDecodeError):
+        m = {}
+    m["isaac"] = status
+    mf.write_text(json.dumps(m))
+
+
+def _isaac_render(run_dir):
+    """Photoreal Isaac render of a manually-recorded sortie, on the droplet.
+
+    Push the run's replay.json to the box, run scripts/render_isaac_replay.py
+    in the Isaac container, and pull isaac.mp4 + isaac_fpv.mp4 back into the
+    run dir. Entirely async (own thread) and best-effort: droplet down leaves
+    the run marked isaac:"pending" so it can be rendered later; a crashed
+    render (tree-heavy worlds) marks "failed". The UI never blocks on this."""
+    run_id = run_dir.name
+    ip = _droplet_ip()
+    if not ip:
+        _set_isaac_status(run_dir, "pending")
+        print(f"[warm] photoreal render deferred: gpu box is offline (runs/{run_id})", flush=True)
+        return
+    try:
+        subprocess.run(["rsync", "-az", "-e", _SSH_OPTS, str(run_dir),
+                        f"root@{ip}:vesper/runs/"], timeout=300, check=True)
+        r = subprocess.run(
+            ["ssh", "-i", _SSH_KEY, "-o", "BatchMode=yes",
+             "-o", "StrictHostKeyChecking=accept-new", f"root@{ip}",
+             f"cd vesper && docker compose -f docker/compose.yml run --rm "
+             f"--name vsp_replay_{run_id} sim "
+             f"/isaac-sim/python.sh scripts/render_isaac_replay.py runs/{run_id}"],
+            capture_output=True, text=True, timeout=2400)
+        subprocess.run(["rsync", "-az", "-e", _SSH_OPTS,
+                        f"root@{ip}:vesper/runs/{run_id}/isaac*.mp4",
+                        str(run_dir) + "/"], timeout=300)
+        ok = (run_dir / "isaac_fpv.mp4").exists()
+        _set_isaac_status(run_dir, "done" if ok else "failed")
+        print(f"[warm] photoreal render {'done' if ok else 'FAILED'} -> runs/{run_id}"
+              + ("" if ok else f" ({(r.stderr or r.stdout)[-200:]})"), flush=True)
+    except (OSError, subprocess.SubprocessError) as e:
+        _set_isaac_status(run_dir, "pending")
+        print(f"[warm] photoreal render deferred ({e}); re-run render_isaac_replay "
+              f"against runs/{run_id} later", flush=True)
+
+
+def _prune_auto_runs(keep=AUTO_KEEP):
+    """Cap auto-saved sorties at `keep`, oldest deleted first. Only ever touches
+    runs the session itself auto-saved (dir suffix AND manifest auto:true), so
+    training / manual / flight runs are untouchable by construction."""
+    autos = []
+    for d in (_REPO / "runs").iterdir():
+        if not d.is_dir() or not d.name.endswith("-auto-sortie"):
+            continue
+        try:
+            m = json.loads((d / "manifest.json").read_text())
+        except (OSError, json.JSONDecodeError):
+            continue
+        if m.get("kind") == "sortie" and m.get("auto") is True:
+            autos.append((m.get("started") or 0, d))
+    autos.sort()
+    for _, d in autos[:-keep]:
+        shutil.rmtree(d, ignore_errors=True)
+        print(f"[warm] pruned old auto sortie runs/{d.name}", flush=True)
+
+
+def dump_recording(frames, frame_dt, auto=False):
+    """Write the buffered mission as a run: replay.json (vesper.native.replay
+    schema) + trajectory.parquet + manifest.json into runs/<id>/, then kick off
+    scripts/render_replay.py detached so tactical.mp4 appears without stalling
+    the sim loop. Runs on its own thread over a snapshot; touches no env state.
+
+    auto=True is the end-of-episode auto-save: tagged {kind:"sortie", auto:true}
+    in the manifest and pruned to the last AUTO_KEEP. auto=False is the operator's
+    RECORD SORTIE keeper: never pruned, and it also starts the photoreal Isaac
+    render (isaac_fpv.mp4) for this run on the droplet."""
+    global last_record
+    run_id = time.strftime("%Y%m%d-%H%M%S-" + ("auto-sortie" if auto else "live-sortie"))
+    run_dir = _REPO / "runs" / run_id
+    run_dir.mkdir(parents=True, exist_ok=True)
+    now = time.time()
+    dur = frames[-1]["t"] - frames[0]["t"]
+    manifest = {"name": "auto sortie" if auto else "live sortie", "scene": world_name,
+                "kind": "sortie", "auto": auto, "started": now - dur, "finished": now}
+    if not auto:
+        manifest["isaac"] = "rendering"           # photoreal is on its way (or pending)
+    (run_dir / "manifest.json").write_text(json.dumps(manifest))
+    (run_dir / "replay.json").write_text(json.dumps({
+        "world": world_name, "half_m": float(env.world.half_m), "dt": frame_dt,
+        "targets": int(args.targets), "frames": frames}, separators=(",", ":")))
+    tw = TrajectoryWriter(run_dir)
+    for f in frames:                              # lead pose; yaw-only quat
+        h = f["hdg"][0]
+        tw.append(f["t"], f["d"][0], [math.cos(h / 2), 0.0, 0.0, math.sin(h / 2)])
+    tw.close()
+    if not auto:
+        last_record = {"run": run_id, "at": round(now, 1)}
+    print(f"[warm] recorded {len(frames)} frames -> runs/{run_id}"
+          f" ({'auto' if auto else 'manual keeper'})", flush=True)
+    subprocess.Popen([sys.executable, "scripts/render_replay.py", str(run_dir)],
+                     cwd=_REPO, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                     start_new_session=True)
+    if auto:
+        _prune_auto_runs()
+    else:
+        threading.Thread(target=_isaac_render, args=(run_dir,), daemon=True).start()
+
+
+def finish_mission():
+    """The lead's episode just completed (all-cleared or the episode_s rollover).
+    Auto-save the buffered mission when it is interesting -- >=1 neutralization
+    relayed to the operator -- unless the operator already kept it by hand, then
+    clear the buffer so the next mission records fresh."""
+    frames = list(rec_buf)
+    interesting = len(frames) >= 12 and any(t[3] for t in frames[-1]["tg"])
+    if interesting and not manual_recorded:
+        threading.Thread(target=dump_recording, args=(frames, dt * rec_every, True),
+                         daemon=True).start()
+    reset_recording()
 
 
 def stamp_comms(drones_xy):
@@ -239,7 +522,7 @@ def render_feeds(d0, quat0, v_xy, tp, others, fleet):
 
 
 def apply_commands():
-    global obs, t0, step, manual
+    global obs, t0, step, manual, manual_recorded
     for cmd in srv.drain_commands():
         kind = cmd.get("kind")
         if kind == "manual":
@@ -258,6 +541,8 @@ def apply_commands():
             t0, step = 0.0, 0
             comms_seen[:] = 0                               # fresh mission, fresh reveal
             relayed_found[:] = relayed_reach[:] = False
+            reset_requests()
+            reset_recording()
             print("[warm] reset", flush=True)
         elif kind == "deploy":
             p = cmd.get("policy")
@@ -267,9 +552,34 @@ def apply_commands():
                 t0, step = 0.0, 0
                 comms_seen[:] = 0
                 relayed_found[:] = relayed_reach[:] = False
+                reset_requests()
+                reset_recording()
                 print(f"[warm] deployed {policy.name}", flush=True)
             except Exception as e:                          # noqa: BLE001
                 print(f"[warm] deploy failed: {e}", flush=True)
+        elif kind == "record":
+            frames = list(rec_buf)                          # snapshot; buffer keeps rolling
+            if len(frames) < 12:
+                print("[warm] record ignored: nothing buffered yet", flush=True)
+            else:
+                manual_recorded = True                      # keeper exists; skip the auto-save
+                threading.Thread(target=dump_recording, args=(frames, dt * rec_every),
+                                 daemon=True).start()
+        elif kind in ("approve", "deny"):
+            try:
+                i = int(cmd.get("target", -1))
+            except (TypeError, ValueError):
+                i = -1
+            # only a request the operator has actually seen can be decided;
+            # a DENIED (or even APPROVED) one may be re-decided while it stands
+            if 0 <= i < args.targets and req_status[i] in (REQ_AWAITING, REQ_APPROVED, REQ_DENIED):
+                req_status[i] = REQ_APPROVED if kind == "approve" else REQ_DENIED
+                sync_strike_hold()
+                sync_engage()          # an approval re-engages the drones at once
+                print(f"[warm] strike on target {i} {req_status[i]}", flush=True)
+            else:
+                print(f"[warm] {kind} ignored (target {cmd.get('target')}, "
+                      f"status {req_status[i] if 0 <= i < args.targets else '?'})", flush=True)
 
 
 try:
@@ -302,11 +612,60 @@ try:
         # with it; while linked, everything it knows commits to the operator
         ep0 = int(env.episode_length_buf[0].item())
         if ep0 < prev_ep0:
+            finish_mission()                      # auto-save the completed sortie
             relayed_found[:] = relayed_reach[:] = False
+            reset_requests()                      # requests die with the sortie
         prev_ep0 = ep0
         if linked[0]:
             relayed_found |= known
             relayed_reach |= reached
+
+        # engagement: ANY group-0 drone's detection raises a strike request
+        # (the hold gates the whole group, so the whole group's eyes count);
+        # it reaches the operator once ANY drone holds a link (the relay lane,
+        # not just the lead's own radio); approval opens the gate
+        mission_t[0] = float(t)
+        known_any = env.task.known[_grp0].any(dim=0).cpu().numpy()
+        any_link = bool(linked.any())
+        for k in range(args.targets):
+            if req_status[k] == REQ_NONE and known_any[k]:
+                req_status[k] = REQ_PENDING
+                req_detected_t[k] = float(t)
+                print(f"[warm] strike request raised on target {k} "
+                      f"({'uplinked' if any_link else 'NO LINK -- egressing to call it in'})",
+                      flush=True)
+            if req_status[k] == REQ_PENDING and any_link:
+                req_status[k] = REQ_AWAITING
+                req_await_t[k] = float(t)
+                print(f"[warm] request {k} uplinked; awaiting operator approval", flush=True)
+            if (args.auto_approve_s is not None and req_status[k] == REQ_AWAITING
+                    and t - req_await_t[k] >= args.auto_approve_s):
+                req_status[k] = REQ_APPROVED
+                print(f"[warm] strike on target {k} AUTO-APPROVED "
+                      f"(--auto_approve_s {args.auto_approve_s:g})", flush=True)
+        sync_strike_hold()
+        sync_engage()
+        n_by = {s: sum(1 for x in req_status if x == s) for s in
+                (REQ_PENDING, REQ_AWAITING, REQ_APPROVED, REQ_DENIED)}
+
+        # buffer this step for RECORD SORTIE (operator's picture: relayed truth)
+        rec_t += dt
+        rec_count += 1
+        if rec_count % rec_every == 0:
+            rec_buf.append({
+                "t": round(rec_t, 2),
+                "d": [[round(float(p[0]), 1), round(float(p[1]), 1), round(float(p[2]), 1)]
+                      for p in drones],
+                "hdg": [round(float(h), 3) for h in _yaws_np(quats)],
+                "tg": [[round(float(tp[k][0]), 1), round(float(tp[k][1]), 1),
+                        int(relayed_found[k]), int(relayed_reach[k])]
+                       for k in range(args.targets)],
+                "agl": round(float(info["agl"][0]), 1),
+            })
+            if len(rec_buf) > REC_CAP:            # thin 2x, keep the whole mission
+                rec_buf[:] = rec_buf[1::2]
+                rec_every *= 2
+
         srv.set_state({
             "t": round(float(t), 1),
             "world": world_name,
@@ -318,6 +677,17 @@ try:
             "found": int(relayed_found.sum()), "reached": int(relayed_reach.sum()),
             "targets": int(args.targets),
             "pending": int((known & ~relayed_found).sum()),   # contacts awaiting relay
+            # strike-approval queue: every live request, plus the HUD tally
+            "requests": [{"target": k, "status": req_status[k],
+                          "x": round(float(tp[k][0]), 1), "y": round(float(tp[k][1]), 1),
+                          "detected_t": round(req_detected_t[k], 1),
+                          "uplink": any_link,
+                          "disengaged": not bool(engage[0, k])}
+                         for k in range(args.targets) if req_status[k] != REQ_NONE],
+            "strikes": {"pending": n_by[REQ_PENDING], "awaiting": n_by[REQ_AWAITING],
+                        "approved": n_by[REQ_APPROVED], "denied": n_by[REQ_DENIED]},
+            # the last RECORD SORTIE dump ({run, at}), so the UI can confirm it
+            "last_record": last_record or None,
             "comms_denied": round(comms_denied_frac, 3),
             "comms": {"n": COMMS_N, "half": _ao_half, "denied_frac": round(comms_denied_frac, 3),
                       "grid": (comms_seen + ord("0")).astype(np.uint8).tobytes().decode("ascii")},

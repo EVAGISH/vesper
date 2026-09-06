@@ -12,6 +12,14 @@ const ACCENT = "#0ca30c";
 const POLL_MS = 400;
 
 type Vehicle = { x: number; y: number; found: boolean; reached: boolean };
+// strike-approval queue: the drone raises a request when it detects a target;
+// it reaches the operator only once the drone has an RF link (PENDING_UPLINK
+// until then), and the strike is held until the operator APPROVEs
+type StrikeReq = {
+  target: number;
+  status: "PENDING_UPLINK" | "AWAITING_APPROVAL" | "APPROVED" | "DENIED";
+  x: number; y: number; detected_t: number; uplink?: boolean;
+};
 type LiveState = {
   t: number;
   world?: string;
@@ -22,9 +30,11 @@ type LiveState = {
   drone0?: { speed: number; vz: number; agl: number };
   drones?: { x: number; y: number; z: number }[];
   vehicles?: Vehicle[];
+  requests?: StrikeReq[];
+  strikes?: { pending: number; awaiting: number; approved: number; denied: number };
 };
 
-type Ev = { t: number; kind: "detect" | "neutralize"; id: number };
+type Ev = { t: number; kind: "detect" | "neutralize" | "request" | "approve" | "deny"; id: number };
 
 function fmtT(t: number) {
   const s = Math.max(0, Math.floor(t));
@@ -36,7 +46,16 @@ export function MissionPanel({ ip }: { ip: string | null }) {
   const [st, setSt] = useState<LiveState | null>(null);
   const [live, setLive] = useState(false);
   const [events, setEvents] = useState<Ev[]>([]);
-  const prev = useRef<{ found: boolean[]; reached: boolean[] }>({ found: [], reached: [] });
+  const prev = useRef<{ found: boolean[]; reached: boolean[]; req: Record<number, string> }>(
+    { found: [], reached: [], req: {} },
+  );
+
+  const decide = (target: number, kind: "approve" | "deny") =>
+    fetch(`http://${ip}:8180/command`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ kind, target }),
+    }).catch(() => {});
 
   useEffect(() => {
     if (!ip) { setLive(false); setSt(null); return; }
@@ -57,10 +76,23 @@ export function MissionPanel({ ip }: { ip: string | null }) {
             if (v.found && !pf[i]) add.push({ t: d.t, kind: "detect", id: i });
             if (v.reached && !pr[i]) add.push({ t: d.t, kind: "neutralize", id: i });
           });
+          // strike-request transitions (edge-triggered like found/reached)
+          const preq = prev.current.req;
+          const nreq: Record<number, string> = {};
+          (d.requests ?? []).forEach((r) => {
+            nreq[r.target] = r.status;
+            const was = preq[r.target];
+            if (r.status !== was) {
+              if (r.status === "AWAITING_APPROVAL") add.push({ t: d.t, kind: "request", id: r.target });
+              if (r.status === "APPROVED") add.push({ t: d.t, kind: "approve", id: r.target });
+              if (r.status === "DENIED") add.push({ t: d.t, kind: "deny", id: r.target });
+            }
+          });
           if (add.length) setEvents((e) => [...add.reverse(), ...e].slice(0, 40));
           prev.current = {
             found: vs.map((v) => v.found),
             reached: vs.map((v) => v.reached),
+            req: nreq,
           };
         })
         .catch(() => alive && setLive(false));
@@ -72,7 +104,7 @@ export function MissionPanel({ ip }: { ip: string | null }) {
   // a fresh session (clock reset) clears the log so it tracks this mission only
   const tRef = useRef(0);
   useEffect(() => {
-    if (st && st.t < tRef.current - 2) { setEvents([]); prev.current = { found: [], reached: [] }; }
+    if (st && st.t < tRef.current - 2) { setEvents([]); prev.current = { found: [], reached: [], req: {} }; }
     if (st) tRef.current = st.t;
   }, [st]);
 
@@ -89,6 +121,10 @@ export function MissionPanel({ ip }: { ip: string | null }) {
   const vs = st.vehicles ?? [];
   const assets = st.drones?.length ?? 0;
   const complete = st.reached >= st.targets && st.targets > 0;
+  const reqs = st.requests ?? [];
+  const reqBy = new Map(reqs.map((r) => [r.target, r]));
+  const awaiting = reqs.filter((r) => r.status === "AWAITING_APPROVAL");
+  const pendingUplink = reqs.filter((r) => r.status === "PENDING_UPLINK");
 
   return (
     <div className="flex h-full min-h-0 flex-col">
@@ -107,6 +143,51 @@ export function MissionPanel({ ip }: { ip: string | null }) {
         ))}
       </div>
 
+      {/* strike approval queue: the human is the release authority */}
+      {(awaiting.length > 0 || pendingUplink.length > 0) && (
+        <div className="border-b border-border px-3 py-2">
+          <div className="mb-1.5 font-mono text-[9px] uppercase tracking-widest text-muted-foreground">
+            Strike authority
+          </div>
+          <div className="flex flex-col gap-1.5">
+            {awaiting.map((r) => (
+              <div
+                key={r.target}
+                className="border border-[#e8b430]/60 bg-[#e8b430]/10 px-2 py-1.5"
+              >
+                <div className="flex items-center gap-2 font-mono text-[11px]">
+                  <span className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-[#e8b430]" />
+                  <span className="font-semibold text-[#e8b430]">STRIKE REQUEST</span>
+                  <span className="text-foreground">{tid(r.target)}</span>
+                  <span className="text-muted-foreground">TANK · T+{fmtT(r.detected_t)}</span>
+                </div>
+                <div className="mt-1.5 flex gap-1.5">
+                  <button
+                    onClick={() => decide(r.target, "approve")}
+                    className="cursor-pointer border border-[#0ca30c] bg-[#0ca30c]/15 px-2.5 py-0.5 font-mono text-[10px] font-semibold tracking-[0.12em] text-[#0ca30c] hover:bg-[#0ca30c]/30"
+                  >
+                    ✓ APPROVE
+                  </button>
+                  <button
+                    onClick={() => decide(r.target, "deny")}
+                    className="cursor-pointer border border-[#d03b3b] bg-[#d03b3b]/10 px-2.5 py-0.5 font-mono text-[10px] font-semibold tracking-[0.12em] text-[#d03b3b] hover:bg-[#d03b3b]/25"
+                  >
+                    ✕ DENY
+                  </button>
+                </div>
+              </div>
+            ))}
+            {pendingUplink.map((r) => (
+              <div key={r.target} className="flex items-center gap-2 border border-border bg-card px-2 py-1.5 font-mono text-[10.5px]">
+                <span className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-amber-500" />
+                <span className="text-amber-500">UPLINK PENDING</span>
+                <span className="text-muted-foreground">contact in dead zone · drone egressing to relay</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
       {/* target roster */}
       <div className="border-b border-border px-3 py-2">
         <div className="mb-1.5 font-mono text-[9px] uppercase tracking-widest text-muted-foreground">
@@ -114,8 +195,15 @@ export function MissionPanel({ ip }: { ip: string | null }) {
         </div>
         <div className="flex flex-col gap-1">
           {vs.map((v, i) => {
-            const status = v.reached ? "NEUTRALIZED" : v.found ? "DETECTED" : "UNLOCATED";
-            const color = v.reached ? "#d03b3b" : v.found ? ACCENT : "#6b7280";
+            const rq = reqBy.get(i);
+            let status = v.reached ? "NEUTRALIZED" : v.found ? "DETECTED" : "UNLOCATED";
+            let color = v.reached ? "#d03b3b" : v.found ? ACCENT : "#6b7280";
+            if (!v.reached && rq) {
+              if (rq.status === "PENDING_UPLINK") { status = "UPLINK PENDING"; color = "#f59e0b"; }
+              else if (rq.status === "AWAITING_APPROVAL") { status = "AWAITING APPROVAL"; color = "#e8b430"; }
+              else if (rq.status === "APPROVED") { status = "CLEARED HOT"; color = "#0ca30c"; }
+              else if (rq.status === "DENIED") { status = "HELD"; color = "#8a949c"; }
+            }
             return (
               <div key={i} className="flex items-center gap-2 font-mono text-[11px]">
                 <span className="tabular-nums text-foreground">{tid(i)}</span>
@@ -141,18 +229,28 @@ export function MissionPanel({ ip }: { ip: string | null }) {
           </div>
         ) : (
           <div className="flex flex-col gap-1">
-            {events.map((e, i) => (
-              <div key={i} className="flex items-baseline gap-2 font-mono text-[11px]">
-                <span className="tabular-nums text-muted-foreground">T+{fmtT(e.t)}</span>
-                <span style={{ color: e.kind === "neutralize" ? "#d03b3b" : ACCENT }}>
-                  {e.kind === "neutralize" ? "◆" : "◈"}
-                </span>
-                <span className="text-foreground">{tid(e.id)}</span>
-                <span className="text-muted-foreground">
-                  {e.kind === "neutralize" ? "neutralized" : "acquired by EO/IR"}
-                </span>
-              </div>
-            ))}
+            {events.map((e, i) => {
+              const glyph = { detect: "◈", neutralize: "◆", request: "▲", approve: "✓", deny: "✕" }[e.kind];
+              const color = {
+                detect: ACCENT, neutralize: "#d03b3b", request: "#e8b430",
+                approve: "#0ca30c", deny: "#d03b3b",
+              }[e.kind];
+              const text = {
+                detect: "acquired by EO/IR",
+                neutralize: "neutralized",
+                request: "strike request uplinked — awaiting approval",
+                approve: "strike APPROVED — cleared hot",
+                deny: "strike DENIED — weapons hold",
+              }[e.kind];
+              return (
+                <div key={i} className="flex items-baseline gap-2 font-mono text-[11px]">
+                  <span className="tabular-nums text-muted-foreground">T+{fmtT(e.t)}</span>
+                  <span style={{ color }}>{glyph}</span>
+                  <span className="text-foreground">{tid(e.id)}</span>
+                  <span className="text-muted-foreground">{text}</span>
+                </div>
+              );
+            })}
           </div>
         )}
       </div>

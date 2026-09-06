@@ -8,3 +8,5 @@ runs/
 assets/
 .venv/
 .vesper_jobs.json
+.vesper_session.json
+.vesper_session.log

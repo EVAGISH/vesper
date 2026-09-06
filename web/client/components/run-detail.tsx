@@ -133,6 +133,29 @@ export function RunDetail({ run }: { run: Run }) {
           );
         })}
 
+        {/* photoreal render still in flight (or deferred): hold its slot beside
+            tactical.mp4 so the operator knows the fpv video is coming */}
+        {m.isaac && m.isaac !== "done" && !run.files.includes("isaac_fpv.mp4") && (
+          <Panel title="drone fpv — photoreal (isaac rtx)">
+            <div className="flex aspect-video flex-col items-center justify-center gap-2 bg-black text-center">
+              <span className="font-mono text-xs tracking-[0.25em] text-muted-foreground">
+                {m.isaac === "rendering"
+                  ? "RENDERING PHOTOREAL…"
+                  : m.isaac === "pending"
+                    ? "PHOTOREAL PENDING"
+                    : "PHOTOREAL RENDER FAILED"}
+              </span>
+              <span className="max-w-sm px-6 text-[11px] text-muted-foreground">
+                {m.isaac === "rendering"
+                  ? "The Isaac RTX render is running on the GPU box (~2 min). The video drops in here when it lands."
+                  : m.isaac === "pending"
+                    ? "The GPU box was offline — render later with scripts/render_isaac_replay.py against this run."
+                    : "The Isaac render crashed on the box — re-run scripts/render_isaac_replay.py against this run."}
+              </span>
+            </div>
+          </Panel>
+        )}
+
         {pngs.map((p) => (
           <Panel key={p} title={artifactLabel(p)}>
             {/* eslint-disable-next-line @next/next/no-img-element -- streamed from /media, never optimized/copied */}

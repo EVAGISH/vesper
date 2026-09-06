@@ -15,6 +15,11 @@ Writes isaac.mp4 (chase of drone 0, the same trailing shot warm_session
 publishes as /overview.mjpeg) and isaac_fpv.mp4 (drone 0's own nadir-cone
 lens via sensor_pose) into the run dir, where the Runs tab picks up any
 *.mp4 automatically.
+
+NB: the demo-kram-lean run's isaac_fpv.mp4 was copied in by hand from a
+session scratchpad; going forward, run this script against the run dir
+directly (as documented above) so the photoreal pair lands beside
+tactical.mp4 with no manual hop.
 """
 import argparse
 import json

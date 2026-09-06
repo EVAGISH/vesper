@@ -1,7 +1,6 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { JobButton } from "@/components/job-controls";
 
 // The live downlink: the drone's own camera feeds from the run currently in the
 // air on the GPU box. Polls the box's frame server (vesper.capture.live, 8180);
@@ -67,7 +66,10 @@ export function DroneFeeds({ ip }: { ip: string }) {
     );
   }
 
-  // nothing flying: standby with a one-click mission so the operator is self-serve
+  // nothing flying on the box. The one-click Isaac launch buttons that lived
+  // here are gone on purpose: the demo lane is the NATIVE session (▶ START
+  // MISSION on the Live tab), and Isaac jobs on the droplet stay an explicit
+  // choice from the Models / Environments tabs.
   if (!info) {
     return (
       <div className="flex aspect-video flex-col items-center justify-center gap-3 bg-black text-center">
@@ -75,23 +77,9 @@ export function DroneFeeds({ ip }: { ip: string }) {
           {checked ? "NO DRONE IN FLIGHT" : "CHECKING FEED…"}
         </div>
         <div className="max-w-sm px-6 text-xs text-muted-foreground">
-          The feed is live only while a drone is flying. Launch a mission — cameras
-          appear here as soon as it takes off (~2 min to load the world).
-        </div>
-        <div className="flex items-center gap-2">
-          <JobButton
-            label="▶ FLY MISSION"
-            body={{ kind: "mission", scenario: "cornell_core.json" }}
-          />
-          <JobButton
-            label="◉ START WARM SESSION"
-            variant="secondary"
-            body={{ kind: "warm" }}
-          />
-        </div>
-        <div className="max-w-sm px-6 text-[11px] text-muted-foreground">
-          A warm session keeps the world loaded — feeds and the live map stay up,
-          and deploys take seconds instead of minutes.
+          The GPU box is up but nothing is flying. Launch Isaac work explicitly
+          from the Models or Environments tabs — or stop the box and use
+          ▶ START MISSION for the native local session.
         </div>
       </div>
     );

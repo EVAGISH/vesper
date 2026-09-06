@@ -152,12 +152,20 @@ class NativeSearchEnv:
 
     # ---------------------------------------------------------------- vehicles
     def _drive_vehicles(self):
-        """Kinematic driving on the ground raster, steering from vesper.lab.ground."""
+        """Kinematic driving on the ground raster, steering from vesper.lab.ground.
+
+        A neutralized vehicle is a wreck and stops: `reached` is per-hunter, so
+        OR it back onto the owned vehicle sets (via `group`) and zero those hulls'
+        velocity. Without this a 'destroyed' tank kept driving down the road."""
+        dead = torch.zeros(self.num_envs, self.k, device=self.device)
+        dead.index_add_(0, self.group, self.task.reached.float())
+        dead = (dead > 0).unsqueeze(2)                           # [N,K,1] over veh sets
         actual = self.veh_vel.norm(dim=2)
         sp = GD.steer(self, self.world, self.tcfg.arena_half, actual, self._dt,
                       gen=self.gen, probe=self._probe)
         vel = torch.stack([sp * torch.cos(self.veh_heading),
                            sp * torch.sin(self.veh_heading)], dim=2)
+        vel = torch.where(dead, torch.zeros_like(vel), vel)      # wrecks don't move
         self.veh_vel = vel
         self.veh_pos[..., :2] += vel * self._dt
         self.veh_pos[..., 2] = self.world.ground_at(self.veh_pos[..., 0],

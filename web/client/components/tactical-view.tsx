@@ -22,6 +22,7 @@ const POLL_MS = 150;
 const MASK = 1024; // offscreen coverage resolution (world-space, ±half)
 const ACCENT = "#0ca30c";
 const LINK_BLUE = "#3b8dff"; // confirmed-connectivity layer (distinct from search green)
+const AMBER = "#e8b430"; // strike-approval state (a decision is on the human)
 
 type SDrone = { x: number; y: number; z: number; q?: number[]; linked?: boolean };
 type SVehicle = {
@@ -33,6 +34,14 @@ type SVehicle = {
 // mission-accumulated connectivity map over the AO (±half m): one digit per
 // cell — 0 unknown, 1 confirmed link, 2 confirmed dead zone; row 0 = south
 type SComms = { n: number; half: number; grid: string; denied_frac?: number };
+// strike-approval queue: a detection raises a request; it reaches the operator
+// only once the drone has RF link (PENDING_UPLINK until then) and the strike
+// stays held until the operator APPROVEs — the human is the release authority
+type SRequest = {
+  target: number;
+  status: "PENDING_UPLINK" | "AWAITING_APPROVAL" | "APPROVED" | "DENIED";
+  x: number; y: number; detected_t: number; uplink?: boolean;
+};
 type State = {
   t: number;
   world?: string;
@@ -44,6 +53,8 @@ type State = {
   pending?: number;
   comms?: SComms;
   comms_denied?: number;
+  requests?: SRequest[];
+  strikes?: { pending: number; awaiting: number; approved: number; denied: number };
   drones: SDrone[];
   vehicles: SVehicle[];
 };
@@ -133,6 +144,13 @@ export function TacticalView({ ip }: { ip: string }) {
   const [hud, setHud] = useState<State | null>(null);
   const [link, setLink] = useState<"wait" | "live" | "lost">("wait");
   const [sortieAt, setSortieAt] = useState(0); // "NEW SORTIE" HUD note
+  // debug layer: paint ground-truth tank positions in grey before detection.
+  // The ref mirrors the state so the rAF render loop reads it without re-render.
+  const [showTanks, setShowTanks] = useState(false);
+  const showTanksRef = useRef(false);
+  useEffect(() => {
+    showTanksRef.current = showTanks;
+  }, [showTanks]);
 
   // ── render state ──
   const rDronesRef = useRef<RDrone[]>([]);
@@ -721,20 +739,50 @@ export function TacticalView({ ip }: { ip: string }) {
 
     // 5 ── targets + detection animation
     if (st) {
+      const reqBy = new Map((st.requests ?? []).map((r) => [r.target, r]));
       st.vehicles.forEach((v, i) => {
         const rec = detRef.current.get(i);
         const sx = m.toX(v.x), sy = m.toY(v.y);
         if (!v.found && !v.reached) {
-          // undiscovered: barely-there ghost only (the drone hasn't found it)
-          g.fillStyle = "rgba(255,255,255,0.06)";
-          g.beginPath();
-          g.arc(sx, sy, 3, 0, 7);
-          g.fill();
+          if (showTanksRef.current) {
+            // debug: ground truth in flat grey — unmistakably not a detection
+            g.save();
+            g.translate(sx, sy);
+            g.rotate(Math.PI / 4);
+            g.fillStyle = "rgba(0,0,0,0.4)";
+            g.fillRect(-5, -5, 10, 10);
+            g.strokeStyle = "rgba(168,176,184,0.85)";
+            g.lineWidth = 1.4;
+            g.strokeRect(-5, -5, 10, 10);
+            g.restore();
+            g.fillStyle = "rgba(168,176,184,0.75)";
+            g.font = "9px ui-monospace, monospace";
+            g.fillText(`T-${String(i + 1).padStart(2, "0")} · GT`, sx + 10, sy - 8);
+          } else {
+            // undiscovered: barely-there ghost only (the drone hasn't found it)
+            g.fillStyle = "rgba(255,255,255,0.06)";
+            g.beginPath();
+            g.arc(sx, sy, 3, 0, 7);
+            g.fill();
+          }
           return;
         }
         const reached = v.reached;
-        const col = reached ? "#e0483b" : ACCENT;
+        const rq = reqBy.get(i);
+        const awaiting = !reached && rq?.status === "AWAITING_APPROVAL";
+        const col = reached ? "#e0483b" : awaiting ? AMBER : ACCENT;
         const foundAge = rec ? (now - rec.foundAt) / 1000 : 99;
+
+        // a request awaiting the operator: slow amber ping so the eye finds
+        // the decision on the map (matches the APPROVE/DENY card)
+        if (awaiting) {
+          const p = (now / 1100) % 1;
+          g.strokeStyle = `rgba(232,180,48,${0.75 * (1 - p)})`;
+          g.lineWidth = 2;
+          g.beginPath();
+          g.arc(sx, sy, 8 + p * 30, 0, 7);
+          g.stroke();
+        }
 
         // expanding detection ring on the found rising edge
         if (foundAge >= 0 && foundAge < 1.2) {
@@ -767,7 +815,15 @@ export function TacticalView({ ip }: { ip: string }) {
 
         // label box with leader line
         const id = `TARGET-${String(i + 1).padStart(2, "0")}`;
-        const status = reached ? "NEUTRALIZED" : "DETECTED";
+        const status = reached
+          ? "NEUTRALIZED"
+          : rq?.status === "AWAITING_APPROVAL"
+            ? "AWAITING APPROVAL"
+            : rq?.status === "APPROVED"
+              ? "CLEARED HOT"
+              : rq?.status === "DENIED"
+                ? "WEAPONS HOLD"
+                : "DETECTED";
         const l1 = `◈ ${id} · TANK`;
         const appear = clamp(foundAge / 0.35, 0, 1); // fade/slide in
         g.save();
@@ -875,6 +931,14 @@ export function TacticalView({ ip }: { ip: string }) {
     manualUntil.current = 0; // hand control back to the auto-camera immediately
   };
 
+  // operator's strike decision → the warm session's /command queue
+  const decide = (target: number, kind: "approve" | "deny") =>
+    fetch(`http://${ip}:8180/command`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ kind, target }),
+    }).catch(() => {});
+
   const world3dReady = !!world;
 
   return (
@@ -949,6 +1013,82 @@ export function TacticalView({ ip }: { ip: string }) {
           </div>
         )}
 
+        {/* right rail: strike authority — the human decision, front and centre */}
+        {hud?.requests && hud.requests.length > 0 && (
+          <div className="absolute right-6 top-20 flex w-[240px] flex-col gap-2">
+            {hud.requests.map((r) => {
+              const neutralized = hud.vehicles?.[r.target]?.reached;
+              const tgt = `TARGET-${String(r.target + 1).padStart(2, "0")}`;
+              if (r.status === "AWAITING_APPROVAL")
+                return (
+                  <div
+                    key={r.target}
+                    className="pointer-events-auto border bg-black/75 p-3 backdrop-blur-sm"
+                    style={{ borderColor: AMBER, boxShadow: `0 0 18px ${AMBER}44` }}
+                  >
+                    <div className="flex items-center gap-2 text-[10px] font-semibold uppercase tracking-[0.22em]" style={{ color: AMBER }}>
+                      <span className="inline-block h-1.5 w-1.5 animate-pulse rounded-full" style={{ background: AMBER }} />
+                      strike request
+                    </div>
+                    <div className="mt-1.5 text-[12px] font-semibold text-white/90">
+                      {tgt} · TANK
+                    </div>
+                    <div className="text-[9.5px] uppercase tracking-[0.16em] text-white/45">
+                      detected T+{r.detected_t.toFixed(1)}s · uplink live
+                    </div>
+                    <div className="mt-2.5 flex gap-2">
+                      <button
+                        onClick={() => decide(r.target, "approve")}
+                        className="flex-1 cursor-pointer border border-[#0ca30c] bg-[#0ca30c]/15 py-1 text-[10px] font-semibold uppercase tracking-[0.18em] text-[#3fdf3f] transition-colors hover:bg-[#0ca30c]/35"
+                      >
+                        ✓ approve
+                      </button>
+                      <button
+                        onClick={() => decide(r.target, "deny")}
+                        className="flex-1 cursor-pointer border border-[#e0483b] bg-[#e0483b]/10 py-1 text-[10px] font-semibold uppercase tracking-[0.18em] text-[#ff7a6e] transition-colors hover:bg-[#e0483b]/30"
+                      >
+                        ✕ deny
+                      </button>
+                    </div>
+                  </div>
+                );
+              if (r.status === "PENDING_UPLINK")
+                return (
+                  <div key={r.target} className="border border-amber-500/50 bg-black/65 p-2.5">
+                    <div className="flex items-center gap-2 text-[10px] font-semibold uppercase tracking-[0.2em] text-amber-400/95">
+                      <span className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-amber-400" />
+                      uplink pending
+                    </div>
+                    <div className="mt-1 text-[9.5px] uppercase tracking-[0.14em] leading-relaxed text-white/50">
+                      contact in dead zone — no link, egressing to call it in
+                    </div>
+                  </div>
+                );
+              if (r.status === "APPROVED" && !neutralized)
+                return (
+                  <div key={r.target} className="flex items-center gap-2 border border-[#0ca30c]/50 bg-black/65 px-2.5 py-1.5 text-[10px] font-semibold uppercase tracking-[0.18em] text-[#3fdf3f]">
+                    <span className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-[#0ca30c]" />
+                    {tgt} cleared hot · strike in progress
+                  </div>
+                );
+              if (r.status === "DENIED" && !neutralized)
+                return (
+                  <div key={r.target} className="pointer-events-auto flex items-center gap-2 border border-white/20 bg-black/65 px-2.5 py-1.5 text-[10px] font-semibold uppercase tracking-[0.18em] text-white/60">
+                    <span className="inline-block h-1.5 w-1.5 rounded-full bg-white/40" />
+                    {tgt} held · weapons tight
+                    <button
+                      onClick={() => decide(r.target, "approve")}
+                      className="ml-auto cursor-pointer border border-white/25 px-1.5 py-0.5 text-[9px] tracking-[0.14em] text-white/55 transition-colors hover:border-[#0ca30c] hover:text-[#3fdf3f]"
+                    >
+                      re-approve
+                    </button>
+                  </div>
+                );
+              return null;
+            })}
+          </div>
+        )}
+
         {/* bottom-left: search status + tallies */}
         {hud ? (
           <div className="absolute bottom-6 left-6 flex flex-col gap-2">
@@ -977,6 +1117,20 @@ export function TacticalView({ ip }: { ip: string }) {
               {hud.comms && (
                 <Stat label="LINK" value={`${linkPctRef.current}% AO`} color={LINK_BLUE} />
               )}
+              {hud.strikes &&
+                hud.strikes.pending + hud.strikes.awaiting + hud.strikes.approved + hud.strikes.denied > 0 && (
+                  <Stat
+                    label="STRIKE AUTH"
+                    value={
+                      hud.strikes.awaiting > 0
+                        ? `${hud.strikes.awaiting} AWAITING`
+                        : hud.strikes.pending > 0
+                          ? `${hud.strikes.pending} UPLINK`
+                          : `${hud.strikes.approved} CLEARED`
+                    }
+                    color={hud.strikes.awaiting > 0 || hud.strikes.pending > 0 ? AMBER : ACCENT}
+                  />
+                )}
             </div>
           </div>
         ) : (
@@ -999,15 +1153,28 @@ export function TacticalView({ ip }: { ip: string }) {
           </div>
         )}
 
-        {/* recenter affordance (only meaningful once framed) */}
+        {/* recenter + debug affordances (only meaningful once framed) */}
         {world3dReady && (
-          <button
-            onClick={resetView}
-            className="pointer-events-auto absolute right-6 top-1/2 -translate-y-1/2 border border-white/15 bg-black/50 px-2 py-1 text-[9px] uppercase tracking-[0.16em] text-white/55 transition-colors hover:border-white/40 hover:text-white/90"
-            title="resume auto-camera"
-          >
-            ⟳ recenter
-          </button>
+          <div className="pointer-events-auto absolute bottom-24 right-6 flex flex-col items-end gap-1.5">
+            <button
+              onClick={() => setShowTanks((s) => !s)}
+              className={`border bg-black/50 px-2 py-1 text-[9px] uppercase tracking-[0.16em] transition-colors ${
+                showTanks
+                  ? "border-white/45 text-white/90"
+                  : "border-white/15 text-white/55 hover:border-white/40 hover:text-white/90"
+              }`}
+              title="debug: paint ground-truth tank positions (grey)"
+            >
+              ◈ {showTanks ? "hide tanks" : "show tanks"}
+            </button>
+            <button
+              onClick={resetView}
+              className="border border-white/15 bg-black/50 px-2 py-1 text-[9px] uppercase tracking-[0.16em] text-white/55 transition-colors hover:border-white/40 hover:text-white/90"
+              title="resume auto-camera"
+            >
+              ⟳ recenter
+            </button>
+          </div>
         )}
       </div>
 

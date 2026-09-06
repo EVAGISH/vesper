@@ -1,9 +1,10 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { DroneFeeds } from "@/components/drone-feeds";
 import { LiveViewport } from "@/components/live-viewport";
+import { LiveMissionControls, StartMissionButton } from "@/components/mission-controls";
 import { MissionPanel } from "@/components/mission-panel";
 import { TacticalView } from "@/components/tactical-view";
 import { Teleop } from "@/components/teleop";
@@ -46,19 +47,17 @@ export default function Live() {
       !!new URLSearchParams(window.location.search).get("viewport"),
   );
 
+  // pollLive is also handed to the mission controls, so start/stop reflect
+  // in the header immediately instead of waiting out the 15 s interval
+  const pollLive = useCallback(
+    () => fetchJSON<{ ip: string | null }>("/api/live").then((d) => setIp(d ? d.ip : null)),
+    [],
+  );
   useEffect(() => {
-    let alive = true;
-    const poll = () =>
-      fetchJSON<{ ip: string | null }>("/api/live").then(
-        (d) => alive && setIp(d ? d.ip : null),
-      );
-    poll();
-    const id = setInterval(poll, LIVE_POLL_MS);
-    return () => {
-      alive = false;
-      clearInterval(id);
-    };
-  }, []);
+    pollLive();
+    const id = setInterval(pollLive, LIVE_POLL_MS);
+    return () => clearInterval(id);
+  }, [pollLive]);
 
   const latest = runs?.[0];
 
@@ -74,9 +73,13 @@ export default function Live() {
               ip === undefined ? "checking…" : !ip ? (
                 <span className="font-mono text-[#d03b3b]">no session</span>
               ) : ip === "localhost" ? (
-                <span className="font-mono text-[#0ca30c]">native sim @ localhost</span>
+                <span className="flex items-center gap-3">
+                  <LiveMissionControls ip={ip} onChanged={pollLive} />
+                  <span className="font-mono text-[#0ca30c]">native sim @ localhost</span>
+                </span>
               ) : (
                 <span className="flex items-center gap-3">
+                  <StartMissionButton live={false} onChanged={pollLive} compact />
                   {!viewport && (
                     <button
                       onClick={() => setViewport(true)}
@@ -101,13 +104,15 @@ export default function Live() {
                 </div>
               </>
             ) : (
-              <div className="flex aspect-video flex-col items-center justify-center gap-2 bg-black text-center">
+              <div className="flex aspect-video flex-col items-center justify-center gap-3 bg-black text-center">
                 <div className="font-mono text-sm tracking-[0.3em] text-muted-foreground">
                   STANDBY
                 </div>
                 <div className="max-w-sm px-6 text-xs text-muted-foreground">
-                  No session is up. Launch a warm session to fly.
+                  No session is up. Start a mission — the native sim launches on
+                  this machine and the tactical picture goes live in seconds.
                 </div>
+                <StartMissionButton live={ip === "localhost"} onChanged={pollLive} />
               </div>
             )}
           </Panel>

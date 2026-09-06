@@ -481,15 +481,145 @@ def _local_live():
 
 
 @app.get("/api/live")
-def live():
-    # a session on this machine wins: the native warm session serves the same
-    # /state contract with no droplet, no firewall, and no streaming hop
+def live(request: Request = None):
+    # the demo is the native session on this machine. When it's up, it wins;
+    # when it's down, the live view is STANDBY (null) -- do NOT fall back to the
+    # droplet, or stopping the mission flips the UI to a stale Isaac session on
+    # the box ("random" old feeds). The Isaac/droplet path is opt-in via ?box=1.
     if _local_live():
         return {"ip": "localhost"}
-    return {"ip": _droplet_ip()}
+    if request is not None and request.query_params.get("box"):
+        return {"ip": _droplet_ip()}
+    return {"ip": None}
 
 
-# ---------------------------------------------------------------- jobs
+# ---------------------------------------------------------------- native session
+# The demo path: launch/kill the NATIVE warm session (scripts/warm_session_native.py)
+# as a local subprocess. No Isaac, no droplet — the session serves /state on 8180
+# and /api/live flips to "localhost" while it is up. The Isaac/droplet lane below
+# (/api/jobs) stays for work that genuinely needs the GPU box.
+
+SESSION_FILE = ROOT / ".vesper_session.json"
+SESSION_LOG = ROOT / ".vesper_session.log"
+# demo defaults: the kramatorsk AO with its best converged policy; reach_radius 40
+# registers the policy's close passes as strikes, episode_s 240 gives a full
+# search→detect→neutralize mission before any rollover.
+SESSION_DEFAULTS = {
+    "map": "assets/kramatorsk/kramatorsk_map.npz",
+    "policy": "runs/20260905-134502-demo-kram-lean/search.pt",
+    "reach_radius": 40.0,
+    "episode_s": 240.0,
+}
+
+
+class SessionReq(BaseModel):
+    map: str | None = None
+    policy: str | None = None
+    reach_radius: float | None = None
+    episode_s: float | None = None
+
+
+def _session_read() -> dict | None:
+    try:
+        return json.loads(SESSION_FILE.read_text())
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
+def _session_alive(info: dict | None) -> bool:
+    if not info or not info.get("pid"):
+        return False
+    try:
+        os.kill(int(info["pid"]), 0)
+        return True
+    except (OSError, ValueError):
+        return False
+
+
+@app.get("/api/session")
+def session_status():
+    info = _session_read()
+    alive = _session_alive(info)
+    return {"running": alive, **({k: info.get(k) for k in ("pid", "started", "args")} if alive and info else {})}
+
+
+@app.post("/api/session/start")
+def session_start(req: SessionReq):
+    info = _session_read()
+    if _session_alive(info) or _local_live():
+        raise HTTPException(409, "a live session is already running")
+    p = dict(SESSION_DEFAULTS)
+    if req.map is not None:
+        if not WORLD_MAP.match(req.map):
+            raise HTTPException(400, "map must be assets/<world>/<world>_map.npz")
+        p["map"] = req.map
+    if req.policy is not None:
+        if not POLICY_PATH.match(req.policy):
+            raise HTTPException(400, "policy must be runs/<id>/<name>.pt")
+        p["policy"] = req.policy
+    if req.reach_radius is not None:
+        p["reach_radius"] = req.reach_radius
+    if req.episode_s is not None:
+        p["episode_s"] = req.episode_s
+    if not (ROOT / p["map"]).is_file():
+        raise HTTPException(400, f"no such map: {p['map']}")
+    if not (ROOT / p["policy"]).is_file():
+        raise HTTPException(400, f"no such policy: {p['policy']}")
+    py = ROOT / ".venv" / "bin" / "python"
+    cmd = [str(py) if py.exists() else sys.executable, "scripts/warm_session_native.py",
+           "--map", p["map"], "--policy", p["policy"],
+           "--reach_radius", str(p["reach_radius"]), "--episode_s", str(p["episode_s"])]
+    log = open(SESSION_LOG, "w")
+    # detached (its own session) so uvicorn --reload restarts never take it down
+    proc = subprocess.Popen(cmd, cwd=ROOT, stdout=log, stderr=subprocess.STDOUT,
+                            stdin=subprocess.DEVNULL, start_new_session=True)
+    SESSION_FILE.write_text(json.dumps({"pid": proc.pid, "started": time.time(), "args": p}))
+    _local_live_cache["t"] = 0.0                    # next /api/live probes for real
+    return {"pid": proc.pid, "args": p}
+
+
+@app.post("/api/session/stop")
+def session_stop():
+    import signal
+    info = _session_read()
+    if not _session_alive(info):
+        # no tracked child — but a session started by hand may still own 8180;
+        # stop means stop, so take that one down too
+        try:
+            r = subprocess.run(["lsof", "-ti", "tcp:8180", "-sTCP:LISTEN"],
+                               capture_output=True, text=True, timeout=5)
+            for pid_s in r.stdout.split():
+                os.kill(int(pid_s), signal.SIGTERM)
+        except (OSError, ValueError, subprocess.TimeoutExpired):
+            pass
+        SESSION_FILE.unlink(missing_ok=True)
+        _local_live_cache.update(t=0.0, up=False)
+        return {"ok": True, "was_running": False}
+    pid = int(info["pid"])
+    try:
+        os.killpg(pid, signal.SIGTERM)              # its own session → pid == pgid
+    except OSError:
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except OSError:
+            pass
+    for _ in range(20):                             # up to ~2 s for a clean exit
+        if not _session_alive(info):
+            break
+        time.sleep(0.1)
+    if _session_alive(info):
+        try:
+            os.killpg(pid, signal.SIGKILL)
+        except OSError:
+            pass
+    SESSION_FILE.unlink(missing_ok=True)
+    _local_live_cache.update(t=0.0, up=False)
+    return {"ok": True, "was_running": True}
+
+
+# ---------------------------------------------------------------- jobs (Isaac lane)
+# Everything below launches on the GPU box — Isaac only, chosen explicitly from
+# the Models/Environments pages. The demo's live session is /api/session above.
 # The one write path: launch whitelisted sim jobs on the GPU box over SSH,
 # each in a named docker container so status and stop are just `docker ps`
 # and `docker rm -f`. The registry is a JSON file next to runs/.

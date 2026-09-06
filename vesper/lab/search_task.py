@@ -144,6 +144,14 @@ class SearchTask:
 
         self.known = torch.zeros(n, k, dtype=torch.bool, device=device)
         self.reached = torch.zeros(n, k, dtype=torch.bool, device=device)
+        # [N,K] bool, True = withhold neutralization of that target (a live
+        # session gating strikes on human approval sets this; None in training)
+        self.strike_hold = None
+        # [N,K] bool, False = present that target to the actor as already
+        # struck (a live session disengages drones from a strike the operator
+        # has not yet cleared, so they search on instead of orbiting it; None
+        # in training). Only the observation: reward and termination unchanged.
+        self.engage_mask = None
         self.fix = torch.zeros(n, k, 3, device=device)
         self.fix_age = torch.zeros(n, k, device=device)
         self.contrast = torch.ones(n, k, device=device)
@@ -262,6 +270,9 @@ class SearchTask:
 
         # --- reaching ------------------------------------------------------
         touching = (slant < cfg.reach_radius) & ~self.reached
+        in_reach = touching             # kill-sphere contact, approval or not
+        if self.strike_hold is not None:
+            touching = touching & ~self.strike_hold
         new_reach = touching
         self.reached |= touching
         self.known |= touching
@@ -296,7 +307,9 @@ class SearchTask:
 
         # --- failures ------------------------------------------------------
         solid = self.world.solid_at(drone_pos[:, 0], drone_pos[:, 1])
-        reaching_now = touching.any(dim=1)
+        # a drone inside the kill sphere is on its terminal run, approved or
+        # held -- holding an approval must not turn the dive into a "crash"
+        reaching_now = in_reach.any(dim=1)
         crash = (drone_pos[:, 2] < solid + cfg.min_clearance) & ~reaching_now
         # The arena is a square and vehicles spawn anywhere in it, so the bound has
         # to be square too. A radial test at arena_half + margin puts the limit at
@@ -367,11 +380,15 @@ class SearchTask:
 
         rel = self.fix - drone_pos.unsqueeze(1)
         dist = rel.norm(dim=2, keepdim=True)
-        live = (self.known & ~self.reached).float().unsqueeze(2)
+        # a disengaged target reads exactly like a struck one -- the pattern the
+        # policy already knows means "move on" -- and reappears when re-engaged
+        reached = (self.reached if self.engage_mask is None
+                   else self.reached | ~self.engage_mask)
+        live = (self.known & ~reached).float().unsqueeze(2)
         stale = torch.exp(-self.fix_age / cfg.stale_tau_s).unsqueeze(2)
         tgt = torch.cat([
             self.known.float().unsqueeze(2),
-            self.reached.float().unsqueeze(2),
+            reached.float().unsqueeze(2),
             stale,
             rel[..., :2] / A * live,
             rel[..., 2:3] / 50.0 * live,
@@ -381,7 +398,7 @@ class SearchTask:
 
         tail = torch.stack([
             time_frac,
-            self.reached.float().mean(dim=1),
+            reached.float().mean(dim=1),
             self.known.float().mean(dim=1),
         ], dim=1)
         return torch.cat([self_block, tgt, self.recency, tail], dim=1)
